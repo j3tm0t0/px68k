@@ -152,7 +152,10 @@ enum {
 	GE_ST_LAYER_US = GE_ST_BUILD_US + 6,	/* + 0-3: of the layer: fill, "gd" rectangles, sprites/BG planes, text */
 	GE_ST_G16_DOTS = GE_ST_LAYER_US + 4,	/* 65536 colour dots converted by the CPU */
 	GE_ST_G16_WHY,		/* + 0-4: rows converted: never, palette, GenAll, row written, columns */
-	GE_ST_FRAMES = GE_ST_G16_WHY + 5,	/* frames shown */
+	GE_ST_G16_FAST = GE_ST_G16_WHY + 5,	/* ... of the dots converted: by the 512 byte tables */
+	GE_ST_G16_GE,		/* 65536 colour dots the GE converted */
+	GE_ST_G16_US,		/* CPU time converting 65536 colour dots */
+	GE_ST_FRAMES,		/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
 };
