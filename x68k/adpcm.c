@@ -43,7 +43,16 @@ static int ADPCM_Step = 0;
 static int ADPCM_Out = 0;
 static BYTE ADPCM_Playing = 0;
        BYTE ADPCM_Clock = 0;
-static int ADPCM_PreCounter = 0;
+       int ADPCM_PreCounter = 0;
+/* Derived from ADPCM_ClockRate / ADPCM_SampleRate, refreshed whenever those change. */
+       DWORD ADPCM_PreStep = (7800*12)/24;			/* ADPCM_ClockRate/24 */
+static DWORD ADPCM_DifStep = (44100*12*400)/(7800*12);	/* (ADPCM_SampleRate*400)/ADPCM_ClockRate */
+
+static void ADPCM_UpdateSteps(void)
+{
+	ADPCM_PreStep = ADPCM_ClockRate/24;
+	ADPCM_DifStep = (ADPCM_SampleRate*400)/ADPCM_ClockRate;
+}
 static int ADPCM_DifBuf = 0;
 
 
@@ -96,15 +105,14 @@ static void ADPCM_InitTable(void)
 // -----------------------------------------------------------------------
 //   MPUクロック経過分だけバッファにデータを溜めておく
 // -----------------------------------------------------------------------
-void FASTCALL ADPCM_PreUpdate(DWORD clock)
+/* ADPCM_PreUpdate (adpcm.h) added this line's clocks and the counter is due. */
+void ADPCM_PreUpdateRun(void)
 {
-	/*if (!ADPCM_Playing) return;*/
-	ADPCM_PreCounter += ((ADPCM_ClockRate/24)*clock);
 	while ( ADPCM_PreCounter>=10000000L ) {		// ↓ データの送りすぎ防止（A-JAX）。200サンプリングくらいまでは許そう…。
-		ADPCM_DifBuf -= ( (ADPCM_SampleRate*400)/ADPCM_ClockRate );
+		ADPCM_DifBuf -= ADPCM_DifStep;
 		if ( ADPCM_DifBuf<=0 ) {
 			ADPCM_DifBuf = 0;
-			DMA_Exec(3);
+			if ( DMA[3].CSR&0x08 ) DMA_Exec(3);	/* no-op when not active */
 		}
 		ADPCM_PreCounter -= 10000000L;
 	}
@@ -127,7 +135,7 @@ void FASTCALL ADPCM_Update(signed short *buffer, DWORD length, int rate, BYTE *p
 		}
 		int tmpl, tmpr;
 
-		if ( (ADPCM_WrPtr==ADPCM_RdPtr)&&(!(DMA[3].CCR&0x40)) ) DMA_Exec(3);
+		if ( (ADPCM_WrPtr==ADPCM_RdPtr)&&(!(DMA[3].CCR&0x40))&&(DMA[3].CSR&0x08) ) DMA_Exec(3);
 		if ( ADPCM_WrPtr!=ADPCM_RdPtr ) {
 			OldR = outr = ADPCM_BufL[ADPCM_RdPtr];
 			OldL = outl = ADPCM_BufR[ADPCM_RdPtr];
@@ -319,6 +327,7 @@ void ADPCM_SetPan(int n)
 		ADPCM_Count = 0;
 		ADPCM_Clock = (ADPCM_Clock&4)|((n>>2)&3);
 		ADPCM_ClockRate = ADPCM_Clocks[ADPCM_Clock];
+		ADPCM_UpdateSteps();
 	}
 	ADPCM_Pan = n;
 }
@@ -333,6 +342,7 @@ void ADPCM_SetClock(int n)
 		ADPCM_Count = 0;
 		ADPCM_Clock = n|((ADPCM_Pan>>2)&3);
 		ADPCM_ClockRate = ADPCM_Clocks[ADPCM_Clock];
+		ADPCM_UpdateSteps();
 	}
 }
 
@@ -357,4 +367,5 @@ void ADPCM_Init(DWORD samplerate)
 
 	ADPCM_SetPan(0x0b);
 	ADPCM_InitTable();
+	ADPCM_UpdateSteps();
 }

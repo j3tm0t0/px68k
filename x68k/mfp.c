@@ -96,7 +96,7 @@ void MFP_RecheckInt(void)
 // -----------------------------------------------------------------------
 //   割り込み発生
 // -----------------------------------------------------------------------
-void MFP_Int(int irq)		// 'irq' は 0が最優先（HSYNC/GPIP7）、15が最下位（ALARM）
+static inline void MFP_IntInl(int irq)		// 'irq' は 0が最優先（HSYNC/GPIP7）、15が最下位（ALARM）
 {				// ベクタとは番号の振り方が逆になるので注意〜
 	BYTE flag = 0x80;
 	if (irq<8)
@@ -124,6 +124,11 @@ void MFP_Int(int irq)		// 'irq' は 0が最優先（HSYNC/GPIP7）、15が最下位（ALARM）
 			}
 		}
 	}
+}
+
+void MFP_Int(int irq)
+{
+	MFP_IntInl(irq);
 }
 
 
@@ -274,59 +279,53 @@ short timertrace = 0;
 // -----------------------------------------------------------------------
 //   たいまの時間を進める（も少し奇麗に書き直そう……）
 // -----------------------------------------------------------------------
+/*
+ * One timer: the same result as decrementing the data register once per
+ * prescaler period (the original tick loop: Timer B runs with prescaler 10,
+ * ~20 iterations per 200-clock slice), but one step per underflow.
+ * A data register of 0 counts 256 periods; MFP_Int is raised once per
+ * underflow, in the same order (A, B, C, D) as before.
+ */
+#define MFP_TIMER_RUN(i, prescale, dr, irq) do { \
+	int t_ = (prescale); \
+	Timer_Tick[i] += clock; \
+	if ( Timer_Tick[i]>=t_ ) { \
+		int n_, c_; \
+		if ( Timer_Tick[i]<2*t_ ) { \
+			n_ = 1; \
+			Timer_Tick[i] -= t_; \
+		} else { \
+			n_ = Timer_Tick[i]/t_; \
+			Timer_Tick[i] -= n_*t_; \
+		} \
+		for (;;) { \
+			c_ = MFP[dr] ? MFP[dr] : 256; \
+			if ( c_>n_ ) { \
+				MFP[dr] = (BYTE)(MFP[dr]-n_); \
+				break; \
+			} \
+			n_ -= c_; \
+			MFP[dr] = Timer_Reload[i]; \
+			MFP_IntInl(irq); \
+			if ( !n_ ) break; \
+		} \
+	} \
+} while (0)
+
 void FASTCALL MFP_Timer(long clock)
 {
-	if ( (!(MFP[MFP_TACR]&8))&&(MFP[MFP_TACR]&7) ) {
-		int t = Timer_Prescaler[MFP[MFP_TACR]&7];
-		Timer_Tick[0] += clock;
-		while ( Timer_Tick[0]>=t ) {
-			Timer_Tick[0] -= t;
-			MFP[MFP_TADR]--;
-			if ( !MFP[MFP_TADR] ) {
-				MFP[MFP_TADR] = Timer_Reload[0];
-				MFP_Int(2);
-			}
-		}
-	}
-
-	if ( MFP[MFP_TBCR]&7 ) {
-		int t = Timer_Prescaler[MFP[MFP_TBCR]&7];
-		Timer_Tick[1] += clock;
-		while ( Timer_Tick[1]>=t ) {
-			Timer_Tick[1] -= t;
-			MFP[MFP_TBDR]--;
-			if ( !MFP[MFP_TBDR] ) {
-				MFP[MFP_TBDR] = Timer_Reload[1];
-				MFP_Int(7);
-			}
-		}
-	}
-
-	if ( MFP[MFP_TCDCR]&0x70 ) {
-		int t = Timer_Prescaler[(MFP[MFP_TCDCR]&0x70)>>4];
-		Timer_Tick[2] += clock;
-		while ( Timer_Tick[2]>=t ) {
-			Timer_Tick[2] -= t;
-			MFP[MFP_TCDR]--;
-			if ( !MFP[MFP_TCDR] ) {
-				MFP[MFP_TCDR] = Timer_Reload[2];
-				MFP_Int(10);
-			}
-		}
-	}
-
-	if ( MFP[MFP_TCDCR]&7 ) {
-		int t = Timer_Prescaler[MFP[MFP_TCDCR]&7];
-		Timer_Tick[3] += clock;
-		while ( Timer_Tick[3]>=t ) {
-			Timer_Tick[3] -= t;
-			MFP[MFP_TDDR]--;
-			if ( !MFP[MFP_TDDR] ) {
-				MFP[MFP_TDDR] = Timer_Reload[3];
-				MFP_Int(11);
-			}
-		}
-	}
+	BYTE cr;
+	cr = MFP[MFP_TACR];
+	if ( (!(cr&8))&&(cr&7) )
+		MFP_TIMER_RUN(0, Timer_Prescaler[cr&7], MFP_TADR, 2);
+	cr = MFP[MFP_TBCR];
+	if ( cr&7 )
+		MFP_TIMER_RUN(1, Timer_Prescaler[cr&7], MFP_TBDR, 7);
+	cr = MFP[MFP_TCDCR];
+	if ( cr&0x70 )
+		MFP_TIMER_RUN(2, Timer_Prescaler[(cr&0x70)>>4], MFP_TCDR, 10);
+	if ( cr&7 )
+		MFP_TIMER_RUN(3, Timer_Prescaler[cr&7], MFP_TDDR, 11);
 }
 
 
