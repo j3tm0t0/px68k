@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------------------
 //  TVRAM.C - Text VRAM
-//  ToDo : Æ©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¤ï¿½ï¿½ï¿½ï¿½ï¿½
+//  ToDo : Æ©ÌÀ¿§½èÍý¤È¤«¿§¡¹
 // ---------------------------------------------------------------------------------------
 
 #include	"common.h"
@@ -13,94 +13,18 @@
 #include	"tvram.h"
 
 	BYTE	TVRAM[0x80000];
+	BYTE	TextDrawWork[1024*1024];
 	BYTE	TextDirtyLine[1024];
 
-/*
- * 1 byte per pixel copy of the text screen, only for the x86 assembler
- * drawing code; the C Text_DrawLine decodes the planes itself.
- */
-#if defined(USE_ASM) || (defined(USE_GAS) && defined(__i386__))
-#define	TEXT_USE_DRAWWORK
-	BYTE	TextDrawWork[1024*1024];
 	BYTE	TextDrawPattern[2048*4];
-#endif
 
-/* bit 7-j of a plane byte -> bit 0 of nibble j (pixel j) */
-static const DWORD Text_Expand[256] = {
-	0x00000000, 0x10000000, 0x01000000, 0x11000000, 0x00100000, 0x10100000,
-	0x01100000, 0x11100000, 0x00010000, 0x10010000, 0x01010000, 0x11010000,
-	0x00110000, 0x10110000, 0x01110000, 0x11110000, 0x00001000, 0x10001000,
-	0x01001000, 0x11001000, 0x00101000, 0x10101000, 0x01101000, 0x11101000,
-	0x00011000, 0x10011000, 0x01011000, 0x11011000, 0x00111000, 0x10111000,
-	0x01111000, 0x11111000, 0x00000100, 0x10000100, 0x01000100, 0x11000100,
-	0x00100100, 0x10100100, 0x01100100, 0x11100100, 0x00010100, 0x10010100,
-	0x01010100, 0x11010100, 0x00110100, 0x10110100, 0x01110100, 0x11110100,
-	0x00001100, 0x10001100, 0x01001100, 0x11001100, 0x00101100, 0x10101100,
-	0x01101100, 0x11101100, 0x00011100, 0x10011100, 0x01011100, 0x11011100,
-	0x00111100, 0x10111100, 0x01111100, 0x11111100, 0x00000010, 0x10000010,
-	0x01000010, 0x11000010, 0x00100010, 0x10100010, 0x01100010, 0x11100010,
-	0x00010010, 0x10010010, 0x01010010, 0x11010010, 0x00110010, 0x10110010,
-	0x01110010, 0x11110010, 0x00001010, 0x10001010, 0x01001010, 0x11001010,
-	0x00101010, 0x10101010, 0x01101010, 0x11101010, 0x00011010, 0x10011010,
-	0x01011010, 0x11011010, 0x00111010, 0x10111010, 0x01111010, 0x11111010,
-	0x00000110, 0x10000110, 0x01000110, 0x11000110, 0x00100110, 0x10100110,
-	0x01100110, 0x11100110, 0x00010110, 0x10010110, 0x01010110, 0x11010110,
-	0x00110110, 0x10110110, 0x01110110, 0x11110110, 0x00001110, 0x10001110,
-	0x01001110, 0x11001110, 0x00101110, 0x10101110, 0x01101110, 0x11101110,
-	0x00011110, 0x10011110, 0x01011110, 0x11011110, 0x00111110, 0x10111110,
-	0x01111110, 0x11111110, 0x00000001, 0x10000001, 0x01000001, 0x11000001,
-	0x00100001, 0x10100001, 0x01100001, 0x11100001, 0x00010001, 0x10010001,
-	0x01010001, 0x11010001, 0x00110001, 0x10110001, 0x01110001, 0x11110001,
-	0x00001001, 0x10001001, 0x01001001, 0x11001001, 0x00101001, 0x10101001,
-	0x01101001, 0x11101001, 0x00011001, 0x10011001, 0x01011001, 0x11011001,
-	0x00111001, 0x10111001, 0x01111001, 0x11111001, 0x00000101, 0x10000101,
-	0x01000101, 0x11000101, 0x00100101, 0x10100101, 0x01100101, 0x11100101,
-	0x00010101, 0x10010101, 0x01010101, 0x11010101, 0x00110101, 0x10110101,
-	0x01110101, 0x11110101, 0x00001101, 0x10001101, 0x01001101, 0x11001101,
-	0x00101101, 0x10101101, 0x01101101, 0x11101101, 0x00011101, 0x10011101,
-	0x01011101, 0x11011101, 0x00111101, 0x10111101, 0x01111101, 0x11111101,
-	0x00000011, 0x10000011, 0x01000011, 0x11000011, 0x00100011, 0x10100011,
-	0x01100011, 0x11100011, 0x00010011, 0x10010011, 0x01010011, 0x11010011,
-	0x00110011, 0x10110011, 0x01110011, 0x11110011, 0x00001011, 0x10001011,
-	0x01001011, 0x11001011, 0x00101011, 0x10101011, 0x01101011, 0x11101011,
-	0x00011011, 0x10011011, 0x01011011, 0x11011011, 0x00111011, 0x10111011,
-	0x01111011, 0x11111011, 0x00000111, 0x10000111, 0x01000111, 0x11000111,
-	0x00100111, 0x10100111, 0x01100111, 0x11100111, 0x00010111, 0x10010111,
-	0x01010111, 0x11010111, 0x00110111, 0x10110111, 0x01110111, 0x11110111,
-	0x00001111, 0x10001111, 0x01001111, 0x11001111, 0x00101111, 0x10101111,
-	0x01101111, 0x11101111, 0x00011111, 0x10011111, 0x01011111, 0x11011111,
-	0x00111111, 0x10111111, 0x01111111, 0x11111111
-};
-
-#ifndef TEXT_USE_DRAWWORK
-/*
- * The text screen, 4 bits per pixel: Text_Work4[a] holds the 8 pixels of
- * 68000 TVRAM byte offset a (0-0x1ffff), pixel j in bits 4j..4j+3 (plane 0
- * in the lowest bit).  Kept by TVRAM_Write / TVRAM_RCUpdate; a 256-dot line
- * is 128 bytes, and the 4 planes (which are 128 KB apart, i.e. in the same
- * cache set) are not touched when drawing.
- */
-static	DWORD	Text_Work4[0x20000] __attribute__ ((aligned (64)));
-
-static inline void
-Text_UpdateWork4(DWORD st)	/* st: TVRAM storage index in plane 0 */
-{
-	const BYTE *t = TVRAM + st;
-
-	Text_Work4[st ^ 1] = Text_Expand[t[0]] | (Text_Expand[t[0x20000]] << 1)
-	    | (Text_Expand[t[0x40000]] << 2) | (Text_Expand[t[0x60000]] << 3);
-}
-#endif
-
-typedef DWORD __attribute__((__may_alias__)) DWORD_A;	/* 32-bit access to BYTE/WORD arrays */
-
-//	WORD	Text_LineBuf[1024];	// ï¿½ï¿½BGï¿½Î¤ï¿½È¤ï¿½ï¿½è¤¦ï¿½ï¿½ï¿½Ñ¹ï¿½
-	BYTE	Text_TrFlag[1024] __attribute__ ((aligned (64)));
+//	WORD	Text_LineBuf[1024];	// ¢ªBG¤Î¤ò»È¤¦¤è¤¦¤ËÊÑ¹¹
+	BYTE	Text_TrFlag[1024];
 
 INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data);
 
 // -----------------------------------------------------------------------
-//   ï¿½ï¿½ï¿½ï¿½ï¿½ñ¤­´ï¿½ï¿½ï¿½ï¿½ï¿½
+//   Á´Éô½ñ¤­´¹¤¨¡Á
 // -----------------------------------------------------------------------
 void TVRAM_SetAllDirty(void)
 {
@@ -109,24 +33,18 @@ void TVRAM_SetAllDirty(void)
 
 
 // -----------------------------------------------------------------------
-//   ï¿½ï¿½ï¿½ï¿½ï¿½
+//   ½é´ü²½
 // -----------------------------------------------------------------------
 void TVRAM_Init(void)
 {
-#ifdef TEXT_USE_DRAWWORK
-	int i, j;
-#endif
+	int i, j, bit;
 	ZeroMemory(TVRAM, 0x80000);
+	ZeroMemory(TextDrawWork, 1024*1024);
 	TVRAM_SetAllDirty();
 
-#ifndef TEXT_USE_DRAWWORK
-	ZeroMemory(Text_Work4, sizeof(Text_Work4));
-#else
-	ZeroMemory(TextDrawWork, 1024*1024);
-	ZeroMemory(TextDrawPattern, 2048*4);		// ï¿½Ñ¥ï¿½ï¿½ï¿½ï¿½ï¿½Æ¡ï¿½ï¿½Ö¥ï¿½ï¿½ï¿½ï¿½ï¿½
+	ZeroMemory(TextDrawPattern, 2048*4);		// ¥Ñ¥¿¡¼¥ó¥Æ¡¼¥Ö¥ë½é´ü²½
 	for (i=0; i<256; i++)
 	{
-		int bit;
 		for (j=0, bit=0x80; j<8; j++, bit>>=1)
 		{
 			if (i&bit) {
@@ -137,12 +55,11 @@ void TVRAM_Init(void)
 			}
 		}
 	}
-#endif
 }
 
 
 // -----------------------------------------------------------------------
-//   Å±ï¿½ï¿½
+//   Å±¼ý
 // -----------------------------------------------------------------------
 void TVRAM_Cleanup(void)
 {
@@ -150,7 +67,7 @@ void TVRAM_Cleanup(void)
 
 
 // -----------------------------------------------------------------------
-//   ï¿½É¤ï¿½Ê¤ï¿½
+//   ÆÉ¤à¤Ê¤ê
 // -----------------------------------------------------------------------
 BYTE FASTCALL TVRAM_Read(DWORD adr)
 {
@@ -161,7 +78,7 @@ BYTE FASTCALL TVRAM_Read(DWORD adr)
 
 
 // -----------------------------------------------------------------------
-//   1ï¿½Ð¤ï¿½ï¿½È½ñ¤¯¤Ê¤ï¿½
+//   1¤Ð¤¤¤È½ñ¤¯¤Ê¤ê
 // -----------------------------------------------------------------------
 INLINE void TVRAM_WriteByte(DWORD adr, BYTE data)
 {
@@ -174,7 +91,7 @@ INLINE void TVRAM_WriteByte(DWORD adr, BYTE data)
 
 
 // -----------------------------------------------------------------------
-//   ï¿½Þ¤ï¿½ï¿½ï¿½ï¿½Õ¤ï¿½ï¿½Ç½ñ¤¯¤Ê¤ï¿½
+//   ¤Þ¤¹¤¯ÉÕ¤­¤Ç½ñ¤¯¤Ê¤ê
 // -----------------------------------------------------------------------
 INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 {
@@ -188,13 +105,13 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 
 
 // -----------------------------------------------------------------------
-//   ï¿½ñ¤¯¤Ê¤ï¿½
+//   ½ñ¤¯¤Ê¤ê
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
 	adr &= 0x7ffff;
 	adr ^= 1;
-	if (CRTC_Regs[0x2a]&1)			// Æ±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+	if (CRTC_Regs[0x2a]&1)			// Æ±»þ¥¢¥¯¥»¥¹
 	{
 		adr &= 0x1ffff;
 		if (CRTC_Regs[0x2a]&2)		// Text Mask
@@ -212,7 +129,7 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 			if (CRTC_Regs[0x2b]&0x80) TVRAM_WriteByte(adr+0x60000, data);
 		}
 	}
-	else					// ï¿½ï¿½ï¿½ó¥°¥ë¥¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+	else					// ¥·¥ó¥°¥ë¥¢¥¯¥»¥¹
 	{
 		if (CRTC_Regs[0x2a]&2)		// Text Mask
 		{
@@ -232,7 +149,7 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		mov	esi, eax
 		and	esi, 01ffffh		; TVRAM Adr
 		mov	edi, eax
-		and	edi, 01ff80h		; ï¿½ï¿½ï¿½ï¿½7bitï¿½Þ¥ï¿½ï¿½ï¿½
+		and	edi, 01ff80h		; ²¼°Ì7bit¥Þ¥¹¥¯
 		shl	edi, 3
 		and	eax, 07fh
 		xor	al, 1
@@ -265,7 +182,7 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		"mov	%%eax, %%esi;"
 		"and	$0x1ffff, %%esi;"	/* TVRAM Adr */
 		"mov	%%eax, %%edi;"
-		"and	$0x1ff80, %%edi;"	/* ï¿½ï¿½ï¿½ï¿½7bitï¿½Þ¥ï¿½ï¿½ï¿½ */
+		"and	$0x1ff80, %%edi;"	/* ²¼°Ì7bit¥Þ¥¹¥¯ */
 		"shl	$3, %%edi;"
 		"and	$0x7f, %%eax;"
 		"xor	$1, %%al;"
@@ -291,14 +208,39 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 	: /* output: nothing */
 	: "m" (adr)
 	: "ax", "cx", "dx", "si", "di", "memory");
-#else
-	Text_UpdateWork4(adr & 0x1ffff);
+#else /* !USE_ASM && !(USE_GAS && __i386__) */
+	{
+		DWORD *ptr = (DWORD *)TextDrawPattern;
+		DWORD tvram_addr = adr & 0x1ffff;
+		DWORD workadr = ((adr & 0x1ff80) + ((adr ^ 1) & 0x7f)) << 3;
+		DWORD t0, t1;
+		BYTE pat;
+
+		pat = TVRAM[tvram_addr + 0x60000];
+		t0 = ptr[(pat * 2) + 1536];
+		t1 = ptr[(pat * 2 + 1) + 1536];
+
+		pat = TVRAM[tvram_addr + 0x40000];
+		t0 |= ptr[(pat * 2) + 1024];
+		t1 |= ptr[(pat * 2 + 1) + 1024];
+
+		pat = TVRAM[tvram_addr + 0x20000];
+		t0 |= ptr[(pat * 2) + 512];
+		t1 |= ptr[(pat * 2 + 1) + 512];
+
+		pat = TVRAM[tvram_addr];
+		t0 |= ptr[(pat * 2)];
+		t1 |= ptr[(pat * 2 + 1)];
+
+		*((DWORD *)&TextDrawWork[workadr]) = t0;
+		*(((DWORD *)(&TextDrawWork[workadr])) + 1) = t1;
+	}
 #endif	/* USE_ASM */
 }
 
 
 // -----------------------------------------------------------------------
-//   ï¿½é¤¹ï¿½ï¿½ï¿½ï¿½ï¿½Ô¡ï¿½ï¿½ï¿½ï¿½Î¤ï¿½ï¿½Ã¤×¤Ç¡ï¿½ï¿½ï¿½
+//   ¤é¤¹¤¿¤³¤Ô¡¼»þ¤Î¤¢¤Ã¤×¤Ç¡¼¤È
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_RCUpdate(void)
 {
@@ -374,15 +316,41 @@ void FASTCALL TVRAM_RCUpdate(void)
 	: "m" (adr)
 	: "ax", "bx", "cx", "dx", "si", "di", "memory");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
+	/* XXX: BUG */
+	DWORD *ptr = (DWORD *)TextDrawPattern;
+	DWORD *wptr = (DWORD *)(TextDrawWork + (adr << 3));
+	DWORD t0, t1;
+	DWORD tadr;
+	BYTE pat;
 	int i;
 
-	for (i = 0; i < 512; i++)
-		Text_UpdateWork4(adr + i);
+	for (i = 0; i < 512; i++, adr++) {
+		tadr = adr ^ 1;
+
+		pat = TVRAM[tadr + 0x60000];
+		t0 = ptr[(pat * 2) + 1536];
+		t1 = ptr[(pat * 2 + 1) + 1536];
+
+		pat = TVRAM[tadr + 0x40000];
+		t0 |= ptr[(pat * 2) + 1024];
+		t1 |= ptr[(pat * 2 + 1) + 1024];
+
+		pat = TVRAM[tadr + 0x20000];
+		t0 |= ptr[(pat * 2) + 512];
+		t1 |= ptr[(pat * 2 + 1) + 512];
+
+		pat = TVRAM[tadr];
+		t0 |= ptr[(pat * 2)];
+		t1 |= ptr[(pat * 2 + 1)];
+
+		*wptr++ = t0;
+		*wptr++ = t1;
+	}
 #endif	/* USE_ASM */
 }
 
 // -----------------------------------------------------------------------
-//   1ï¿½é¥¤ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+//   1¥é¥¤¥óÉÁ²è
 // -----------------------------------------------------------------------
 void FASTCALL Text_DrawLine(int opaq)
 {
@@ -556,111 +524,40 @@ void FASTCALL Text_DrawLine(int opaq)
 	  "g" (TextScrollY), "g" (TextScrollX), "g" (TextPal[0]), "g" (TextDotX)
 	: "ax", "bx", "cx", "dx", "si", "di", "memory");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	const DWORD *w;
-	const WORD *pal = TextPal;
-	WORD *lb = BG_LineBuf + 16;
-	BYTE *tf = Text_TrFlag + 16;
-	const DWORD dotx = TextDotX;
-	DWORD y, x, n, rest, sk, cnt;
+	DWORD addr;
+	DWORD x, y;
+	DWORD off = 16;
+	DWORD i;
+	BYTE t;
 
 	y = TextScrollY + VLINE;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
 		y += VLINE;
-	y &= 0x3ff;
+	y = (y & 0x3ff) << 10;
 
 	x = TextScrollX & 0x3ff;
-	n = 0x400 - x;			/* the line does not wrap around */
-	if (n > dotx)
-		n = dotx;
-
-	w = Text_Work4 + (y << 7) + (x >> 3);
-	sk = x & 7;
-	rest = n;
+	addr = x + y;
+	x = (x ^ 0x3ff) + 1;
 
 	if (opaq) {
-		const DWORD pal0x2 = pal[0] | ((DWORD)pal[0] << 16);
-
-		/* partial first group */
-		if (sk && rest) {
-			DWORD s = *w++ >> (sk * 4), k;
-
-			cnt = 8 - sk;
-			if (cnt > rest)
-				cnt = rest;
-			for (k = 0; k < cnt; k++, s >>= 4) {
-				DWORD c = s & 15;
-				lb[k] = pal[c];
-				tf[k] = (c != 0);
-			}
-			lb += cnt; tf += cnt;
-			rest -= cnt;
+		for (i = 0; (i < TextDotX) && (x > 0); i++, x--, off++) {
+			t = TextDrawWork[addr++] & 0xf;
+			Text_TrFlag[off] = t ? 1 : 0;
+			BG_LineBuf[off] = TextPal[t];
 		}
-		for (; rest >= 8; rest -= 8, lb += 8, tf += 8) {
-			const DWORD s = *w++;
-
-			if (!s && !((DWORD)(size_t)tf & 3)) {
-				/* 8 transparent pixels, 32-bit stores */
-				DWORD_A *lw = (DWORD_A *)lb;
-				DWORD_A *fw = (DWORD_A *)tf;
-
-				lw[0] = lw[1] = lw[2] = lw[3] = pal0x2;
-				fw[0] = fw[1] = 0;
-				continue;
-			}
-#define TEXT_PIX(k)						\
-			{					\
-				DWORD c = (s >> (k * 4)) & 15;	\
-				lb[k] = pal[c];			\
-				tf[k] = (c != 0);		\
-			}
-			TEXT_PIX(0); TEXT_PIX(1); TEXT_PIX(2); TEXT_PIX(3);
-			TEXT_PIX(4); TEXT_PIX(5); TEXT_PIX(6); TEXT_PIX(7);
-#undef TEXT_PIX
-		}
-		if (rest) {
-			DWORD s = *w, k;
-
-			for (k = 0; k < rest; k++, s >>= 4) {
-				DWORD c = s & 15;
-				lb[k] = pal[c];
-				tf[k] = (c != 0);
-			}
-			lb += rest; tf += rest;
-		}
-		if (n != dotx) {
-			/* (sic) the original fills one pixel less here */
-			DWORD i;
-			const WORD c = pal[0];
-
-			for (i = n + 1; i < dotx; i++) {
-				*lb++ = c;
-				*tf++ = 0;
+		if (i++ != TextDotX) {
+			for (; i < TextDotX; i++, off++) {
+				BG_LineBuf[off] = TextPal[0];
+				Text_TrFlag[off] = 0;
 			}
 		}
 	} else {
-		while (rest) {
-			DWORD s = *w++;
-
-			cnt = 8 - sk;
-			if (cnt > rest)
-				cnt = rest;
-			if (s) {
-				int k;
-
-				s >>= sk * 4;
-				if (cnt < 8)
-					s &= (1u << (cnt * 4)) - 1;
-				for (k = 0; s; s >>= 4, k++) {
-					DWORD c = s & 15;
-					if (c) {
-						tf[k] |= 1;
-						lb[k] = pal[c];
-					}
-				}
+		for (i = 0; (i < TextDotX) && (x > 0); i++, x--, off++) {
+			t = TextDrawWork[addr++] & 0xf;
+			if (t) {
+				Text_TrFlag[off] |= 1;
+				BG_LineBuf[off] = TextPal[t];
 			}
-			lb += cnt; tf += cnt;
-			rest -= cnt;
-			sk = 0;
 		}
 	}
 #endif	/* USE_ASM */
