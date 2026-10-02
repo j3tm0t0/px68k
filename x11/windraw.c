@@ -255,7 +255,8 @@ GE compositing (psp/gecomp.c) also uses the ScrBufR area as its text/BG
 layer (512 x 256) when the screen is at most 512 dots wide, and the z buffer.
 */
 
-static unsigned int __attribute__((aligned(16))) list[262144];
+/* direct lists; the GE compositing lists have memory of their own (psp/gecomp.c) */
+static unsigned int __attribute__((aligned(16))) list[16384];
 
 void *fbp0, *fbp1, *zbp;
 struct Vertexes {
@@ -299,17 +300,54 @@ struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struc
  * list is reused.  The first visible line of the next frame comes after the
  * vertical blanking has been emulated, so the GE is normally done by then.
  */
-static int psp_ge_pending;
+static int psp_ge_pending;	/* a frame was queued: show it once the GE is done */
+static int psp_ge_busy;		/* lists were queued since the last sceGuSync() */
 static void *psp_drawbuf;	/* the draw buffer (sceGuSwapBuffers) */
 
-static void psp_ge_wait(void)
+/* returns the time waited, us */
+static unsigned psp_ge_wait(void)
 {
+	unsigned t = 0;
+
+	if (psp_ge_busy) {
+		unsigned t0 = sceKernelGetSystemTimeLow();
+
+		psp_ge_busy = 0;
+		sceGuSync(0, 0);
+		t = sceKernelGetSystemTimeLow() - t0;
+	}
 	if (psp_ge_pending) {
 		psp_ge_pending = 0;
-		sceGuSync(0, 0);
 		psp_drawbuf = sceGuSwapBuffers();
 	}
 	GE_Done();	/* the GE no longer reads the X68000 memory */
+	return t;
+}
+
+/*
+ * The waiting bands as a call list (GE_Build), with the D-cache written back
+ * (its vertices, GVRAM, TextDrawWork): the GE may run it from now on.
+ */
+static void *psp_ge_build(int passes)
+{
+	unsigned t0 = sceKernelGetSystemTimeLow();
+	void *l = GE_Build(psp_drawbuf, passes);
+
+	sceKernelDcacheWritebackAll();
+	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
+	return l;
+}
+
+/* run call list l in a direct list of its own (list[]: the GE is idle) and wait */
+static unsigned psp_ge_run(void *l)
+{
+	unsigned t0 = sceKernelGetSystemTimeLow();
+
+	sceGuStart(GU_DIRECT, list);
+	sceGuCallList(l);
+	sceGuFinish();
+	sceGuSync(0, 0);
+	return sceKernelGetSystemTimeLow() - t0;
 }
 
 /*
@@ -320,22 +358,12 @@ static void psp_ge_wait(void)
  */
 void WinDraw_GESync(void)
 {
-	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
-
-	psp_ge_wait();
+	GE_Stat[GE_ST_WAIT_US] += psp_ge_wait();
 	if (GE_Pending()) {
-		sceGuStart(GU_DIRECT, list);
-		GE_Render(psp_drawbuf, GE_P_ALL);
-		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
-		sceGuFinish();
-		t1 = sceKernelGetSystemTimeLow();
-		GE_Stat[GE_ST_RENDER_US] += t1 - t0;
-		t0 = t1;
-		sceGuSync(0, 0);
+		GE_Stat[GE_ST_WAIT_US] += psp_ge_run(psp_ge_build(GE_P_ALL));
 		GE_Done();
 		GE_StatFlushes++;
 	}
-	GE_Stat[GE_ST_WAIT_US] += sceKernelGetSystemTimeLow() - t0;
 }
 
 #endif // PSP
@@ -570,7 +598,7 @@ WinDraw_Draw(void)
 	SDL_Surface *sdl_surface;
 	static int oldtextx = -1, oldtexty = -1;
 #ifdef PSP
-	int ge_lines;
+	void *ge_list;
 #endif
 
 	if (oldtextx != TextDotX) {
@@ -664,32 +692,23 @@ WinDraw_Draw(void)
 #elif defined(PSP)
 	PROF_BEGIN(draw);
 	PROF_COUNT(PROF_FRAMES, 1);
-	psp_ge_wait();	/* normally done already, by the first line of this frame */
-	ge_lines = GE_Pending();
-	if (ge_lines && GE_TimeSync) {
+	/* normally done already, by the first line of this frame */
+	GE_Stat[GE_ST_FRAME_WAIT_US] += psp_ge_wait();
+	ge_list = NULL;
+	if (GE_Pending() && GE_TimeSync) {
 		/* "ge time": each pass in a list of its own, timed */
 		int k;
 
 		for (k = 0; k < GE_NPASS; k++) {
-			unsigned t0 = sceKernelGetSystemTimeLow();
-
-			sceGuStart(GU_DIRECT, list);
-			GE_Render(psp_drawbuf, (1 << k) | (k == GE_NPASS - 1 ? GE_P_END : 0));
-			sceKernelDcacheWritebackAll();
-			sceGuFinish();
-			sceGuSync(0, 0);
-			GE_Stat[GE_ST_PASS_US + k] += sceKernelGetSystemTimeLow() - t0;
+			GE_Stat[GE_ST_PASS_US + k] +=
+				psp_ge_run(psp_ge_build((1 << k) | (k == GE_NPASS - 1 ? GE_P_END : 0)));
+			GE_Done();
 		}
-		GE_Done();
-		ge_lines = 0;
-	}
+	} else if (GE_Pending())
+		ge_list = psp_ge_build(GE_P_ALL);	/* the lines left to the GE, into ScrBufL */
 	sceGuStart(GU_DIRECT, list);
-	if (ge_lines) {
-		unsigned t0 = sceKernelGetSystemTimeLow();
-
-		GE_Render(psp_drawbuf, GE_P_ALL);	/* the lines left to the GE, into ScrBufL */
-		GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
-	}
+	if (ge_list)
+		sceGuCallList(ge_list);
 	GE_Stat[GE_ST_FRAMES]++;
 
 	sceGuClearColor(0);
@@ -762,8 +781,6 @@ WinDraw_Draw(void)
 		sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, vtxk);
 	}
 
-	if (ge_lines)
-		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
 	sceGuFinish();
 	if (GE_TimeSync) {	/* "ge time": how long the GE takes for the frame */
 		unsigned t0 = sceKernelGetSystemTimeLow();
@@ -773,6 +790,7 @@ WinDraw_Draw(void)
 	}
 	/* sceGuSync() and sceGuSwapBuffers() are left to psp_ge_wait() */
 	psp_ge_pending = 1;
+	psp_ge_busy = 1;
 	/* GE_Render() set GE_Guard: the GE reads the X68000 memory until psp_ge_wait() */
 	PROF_END(draw, PROF_DRAW);
 
@@ -963,8 +981,12 @@ static void psp_copy_line(WORD *dst, const WORD *src, int n)
 static void psp_flush_line(void)
 {
 	int n = wd_n;
+	unsigned t;
 
-	psp_ge_wait();
+	if ((t = psp_ge_wait()) != 0) {
+		GE_Stat[GE_ST_LINE_WAITS]++;
+		GE_Stat[GE_ST_LINE_WAIT_US] += t;
+	}
 	if (VLINE >= PSP_SCRBUF_ROWS)
 		return;		/* below the textures */
 	psp_copy_line(ScrBufL + VLINE * 512, psp_line, (n > 512) ? 512 : n);
