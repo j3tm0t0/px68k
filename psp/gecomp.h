@@ -53,9 +53,7 @@ void GE_FullGuard(int why);	/* anything else: wait (why: GE_ST_*) */
  * GVRAM_FastClear, GVRAM_Init, TVRAM_Write, TVRAM_RCUpdate and TVRAM_Init.
  */
 extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
-/* GVRAM_Write: GVRAM in another layout than 16 colours 512 dots: all rows */
-#define GE_GVRAM_TOUCH()	do { if (CRTC_Regs[0x28] & 0x0f) GE_GGenAll++; } while (0)
-/* GVRAM_Write, 16 colours 512 dots: the word at offset a changed */
+/* GVRAM_Write: the word at byte offset a changed */
 #define GE_GVRAM_ROW(a)		(GE_GRowGen[((a) >> 10) & 511]++)
 /* TVRAM_Write: the TextDrawWork byte at a * 8 changed */
 #define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
@@ -167,7 +165,6 @@ void GE_LogStats(void);
 #define GE_GUARD_TVRAM(a)	do { } while (0)
 #define GE_GUARD_SPRITE()	do { } while (0)
 #define GE_GUARD_FULL(why)	do { } while (0)
-#define GE_GVRAM_TOUCH()	do { } while (0)
 #define GE_GVRAM_ROW(a)		do { } while (0)
 #define GE_TVRAM_TOUCH(a)	do { } while (0)
 

@@ -1141,7 +1141,6 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD temp;
 
 	GE_GUARD_GVRAM(adr);
-	GE_GVRAM_TOUCH();
 	adr ^= 1;
 	adr -= 0xc00000;
 
@@ -1151,6 +1150,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 		if ( adr<0x80000 )
 		{
 			GVRAM[adr] = data;
+			GE_GVRAM_ROW(adr);
 			line = (((adr&0x7ffff)/1024)-GrphScrollY[0])&511;
 		}
 	}
@@ -1167,6 +1167,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 				page += (BYTE)((adr>>8)&4);
 				temp = ((WORD)data&15)<<page;
 				*ram = ((*ram)&(~(0xf<<page)))|temp;
+				GE_GVRAM_ROW(((adr&0xff800)>>1)+(adr&0x3fe));
 				line = ((adr/2048)-GrphScrollY[0])&1023;
 			}
 			else
@@ -1205,7 +1206,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 					line = (((adr&0x7ffff)>>10)-scr)&511;		//
 					if (adr&0x80000) adr+=1;
 					adr &= 0x7ffff;
+#ifdef PSP
+					if (GVRAM[adr] != data) {
+						GVRAM[adr] = data;
+						GE_GVRAM_ROW(adr);	/* the GE's copy of the row is old */
+					}
+#else
 					GVRAM[adr] = data;
+#endif
 				}
 			}
 //			else
@@ -1218,6 +1226,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 			if ( adr<0x80000 )
 			{
 				GVRAM[adr] = data;
+				GE_GVRAM_ROW(adr);
 				line = (((adr&0x7ffff)>>10)-GrphScrollY[0])&511;
 			}
 //			else
