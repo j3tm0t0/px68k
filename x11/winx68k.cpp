@@ -515,6 +515,10 @@ void WinX68k_Exec(void)
 	FDD_SetFDInt();
 	if ( !DispFrame )
 		WinDraw_Draw();
+#ifdef PSP
+	else
+		WinDraw_Flush();	/* show the last drawn frame; its swap waits for the GE */
+#endif
 	TimerICount += clk_total;
 
 	t_end = timeGetTime();
@@ -1059,6 +1063,7 @@ int main(int argc, char *argv[])
 			if (!psp_paused) {
 				psp_paused = 1;
 				DSound_Stop();
+				WinDraw_Flush();
 			}
 			sceKernelDelayThread(20 * 1000);
 			psp_debug_poll();
