@@ -565,6 +565,142 @@ int SetupCallbacks(void)
 	return thid;
 }
 
+/*
+ * Remote debugging on real hardware (psp/debug.h). Only active when
+ * debug.key sits next to EBOOT.PBP: joins the saved network setting, serves
+ * the debug port and logs the frame rate once a second.
+ */
+#include "../psp/debug.h"
+#include "../psp/log.h"
+#include "../psp/net.h"
+
+static int psp_debug_on;
+static int psp_fps_log;
+static int psp_emu_frames, psp_drawn_frames;
+static unsigned psp_exec_us, psp_exec_max_us;
+static unsigned psp_fps_start;
+static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static char psp_dev[8];	/* "ms0:" or "ef0:" */
+
+static void psp_debug_init(const char *eboot)
+{
+	char dir[256], logpath[272], keypath[272], cfg[272], devcfg[272];
+	const char *profiles[2];
+	SceIoStat st;
+	char *slash;
+
+	snprintf(dir, sizeof(dir), "%s", eboot);
+	snprintf(psp_dev, sizeof(psp_dev), "%.4s", eboot);
+	slash = strrchr(dir, '/');
+	if (!slash)
+		return;
+	*slash = '\0';
+	snprintf(keypath, sizeof(keypath), "%s/debug.key", dir);
+	if (sceIoGetstat(keypath, &st) < 0)
+		return;	/* no key: no Wi-Fi, no debug server */
+
+	snprintf(logpath, sizeof(logpath), "%s/px68k.log", dir);
+	log_open(logpath);
+	log_printf("PX68K %s, eboot %s\n", PX68KVERSTR, eboot);
+
+	snprintf(cfg, sizeof(cfg), "%s/net.cfg", dir);
+	snprintf(devcfg, sizeof(devcfg), "%.4s/PSP/GAME/pspbrew.dev/net.cfg", eboot);
+	profiles[0] = cfg;
+	profiles[1] = devcfg;
+	if (net_start(profiles, 2) != 0 || debug_start(eboot, keypath) != 0)
+		return;
+	psp_debug_on = psp_fps_log = 1;
+	psp_fps_start = timeGetTime();
+	log_printf("cpu %d MHz, bus %d MHz, free %d KB (max block %d KB)\n", scePowerGetCpuClockFrequency(),
+		   scePowerGetBusClockFrequency(), (int)(sceKernelTotalFreeMemSize() / 1024),
+		   (int)(sceKernelMaxFreeMemSize() / 1024));
+}
+
+/* Time one WinX68k_Exec() and log the rates once a second. */
+static void psp_debug_frame(unsigned us)
+{
+	unsigned now;
+
+	if (!psp_debug_on)
+		return;
+	psp_emu_frames++;
+	if (!DispFrame)
+		psp_drawn_frames++;
+	psp_exec_us += us;
+	if (us > psp_exec_max_us)
+		psp_exec_max_us = us;
+	now = timeGetTime();
+	if (now - psp_fps_start < 1000)
+		return;
+	if (psp_fps_log)
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d\n",
+			   psp_emu_frames, psp_drawn_frames,
+			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
+			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
+			   scePowerGetCpuClockFrequency());
+	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
+		psp_bench_end = 0;
+		log_printf("bench: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+		now = timeGetTime();
+	}
+	psp_emu_frames = psp_drawn_frames = 0;
+	psp_exec_us = psp_exec_max_us = 0;
+	psp_fps_start = now;
+}
+
+/* Commands from the debug client that must run on the emulator thread. */
+static void psp_debug_poll(void)
+{
+	char cmd[128], arg[128], btn;
+	int n, dx, dy;
+
+	if (!psp_debug_on)
+		return;
+	while (debug_poll(cmd, sizeof(cmd))) {
+		if (sscanf(cmd, "fdd %d %127[^\n]", &n, arg) == 2 && (n == 0 || n == 1)) {
+			/* "/PSP/..." is on the device px68k runs from */
+			snprintf(Config.FDDImage[n], sizeof(Config.FDDImage[n]), "%s%s",
+				 arg[0] == '/' ? psp_dev : "", arg);
+			FDD_SetFD(n, Config.FDDImage[n], 0);
+			SaveConfig();	/* keep the disk across push/exec */
+			log_printf("fdd%d: %s\n", n, Config.FDDImage[n]);
+		} else if (sscanf(cmd, "eject %d", &n) == 1 && (n == 0 || n == 1)) {
+			FDD_EjectFD(n);
+			Config.FDDImage[n][0] = '\0';
+			log_printf("fdd%d: ejected\n", n);
+		} else if (sscanf(cmd, "mouse %d %d", &dx, &dy) == 2) {
+			Mouse_StartCapture(1);	/* off unless Config.JoyOrMouse */
+			Mouse_Event(0, (float)dx, (float)dy);
+		} else if (sscanf(cmd, "mbtn %c %d", &btn, &n) == 2 && (btn == 'l' || btn == 'r')) {
+			Mouse_StartCapture(1);
+			Mouse_Event(btn == 'l' ? 1 : 2, (float)n, 0);
+		} else if (sscanf(cmd, "bench %d", &n) == 1 && n > 0 && !psp_bench_end) {
+			/* Leave the WLAN for n seconds: the firmware caps the clock while it is up. */
+			log_printf("bench: %d s without WLAN\n", n);
+			net_pause();
+			psp_bench_end = timeGetTime() + n * 1000;
+			psp_fps_start = timeGetTime();
+			psp_emu_frames = psp_drawn_frames = 0;
+			psp_exec_us = psp_exec_max_us = 0;
+		} else if (strcmp(cmd, "reset") == 0) {
+			WinX68k_Reset();
+			log_printf("reset\n");
+		} else if (strcmp(cmd, "fps on") == 0 || strcmp(cmd, "fps off") == 0) {
+			psp_fps_log = cmd[5] == 'n';
+		} else if (sscanf(cmd, "skip %d", &n) == 1 && n >= 1 && n <= 7) {
+			Config.FrameRate = n;	/* draw 1 frame in n; 7 = auto */
+			log_printf("frame skip %d\n", n);
+		} else if (sscanf(cmd, "nowait %d", &n) == 1) {
+			Config.NoWaitMode = n;
+			log_printf("no wait %d\n", n);
+		} else {
+			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
+				   "skip <1-7>, nowait <0|1>, bench <sec>, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "pad, shot, get, push, exec, launch, quit\n");
+		}
+	}
+}
+
 PSP_HEAP_SIZE_KB(-1024);
 
 extern "C" int
@@ -592,6 +728,7 @@ int main(int argc, char *argv[])
 
 	sceCtrlSetSamplingCycle(0);
 	sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+	psp_debug_init(argv[0]);
 #endif
 
 	p6logd("PX68K Ver.%s\n", PX68KVERSTR);
@@ -694,6 +831,10 @@ int main(int argc, char *argv[])
 
 	SplashFlag = 20;
 	SoundSampleRate = Config.SampleRate;
+#ifdef PSP
+	if (psp_debug_on)
+		log_printf("sound: rate %d, buffer %d\n", Config.SampleRate, Config.BufferSize);
+#endif
 
 	StatBar_Show(Config.WindowFDDStat);
 	WinDraw_ChangeSize();
@@ -778,7 +919,13 @@ int main(int argc, char *argv[])
 		// OPM_RomeoOut(Config.BufferSize * 5);
 		if (menu_mode == menu_out
 		    && (Config.NoWaitMode || Timer_GetCount())) {
+#ifdef PSP
+			unsigned t0 = sceKernelGetSystemTimeLow();
 			WinX68k_Exec();
+			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
+#else
+			WinX68k_Exec();
+#endif
 #if defined(ANDROID) || TARGET_OS_IPHONE
 			if (vk_cnt > 0) {
 				vk_cnt--;
@@ -900,6 +1047,9 @@ int main(int argc, char *argv[])
 		}
 #endif //PSP
 
+#ifdef PSP
+		psp_debug_poll();
+#endif
 #ifdef PSP
 		if (Joystick_get_downstate_psp(PSP_CTRL_START)) {
 			if (menu_mode == menu_out) { 

@@ -7,6 +7,7 @@
 #include "keyboard.h"
 #ifdef PSP
 #include <pspctrl.h>
+#include "../psp/debug.h"
 #else
 #include <SDL.h>
 #endif
@@ -270,6 +271,7 @@ void FASTCALL Joystick_Update(int is_menu, SDL_Keycode key)
 
 	SceCtrlData psppad;
 	sceCtrlPeekBufferPositive(&psppad, 1);
+	psppad.Buttons |= debug_pad();
 
 	if (is_menu || !Config.JoyOrMouse || Keyboard_IsSwKeyboard()) {
 		if (psppad.Buttons & PSP_CTRL_LEFT) {

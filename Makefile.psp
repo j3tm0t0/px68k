@@ -43,22 +43,25 @@ X11CXXOBJS= x11/winx68k.o
 
 WIN32APIOBJS= win32api/dosio.o win32api/fake.o win32api/peace.o
 
-COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS)
+PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o
+
+COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS) $(PSPOBJS)
 CXXOBJS=	$(FMGENOBJS) $(X11CXXOBJS)
 OBJS=		$(COBJS) $(CXXOBJS)
 
 TARGET = px68k
 #OBJS = cube.o logo.o ../common/callbacks.o ../common/vram.o
 
-# for psplink
-#BUILD_PRX = 1
+# PRX so that the net modules loaded at run time get linked (debug port)
+BUILD_PRX = 1
 
 PSPDEV = $(shell psp-config -d)
 PSPBIN = $(PSPDEV)/psp/bin
 SDL_CONFIG = $(PSPBIN)/sdl-config
 
-SDL_INCLUDE=	`$(SDL_CONFIG) --cflags`
-SDL_LIB=	`$(SDL_CONFIG) --libs`
+# sdl-config of recent pspdev has a wrong prefix (/psp), so fix it up
+SDL_INCLUDE=	$(shell $(SDL_CONFIG) --cflags | sed "s|-I/psp/|-I$(PSPDEV)/psp/|g")
+SDL_LIB=	$(shell $(SDL_CONFIG) --libs | sed "s|-L/psp/|-L$(PSPDEV)/psp/|g")
 
 INCDIR = ./x11 ./x68k ./fmgen ./win32api
 CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION)
@@ -68,7 +71,11 @@ CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 
 LIBDIR =
 LDFLAGS =
-LIBS= -lpspgum -lpspgu -lm -lstdc++ $(SDL_LIB)
+# Only libraries that build.mak / the psp-gcc specs do not add themselves
+# (sdl-config --libs repeats those, which splits a module's import stubs:
+# "stubs out of order", and the calls stay unresolved on real hardware).
+LIBS= -lSDLmain -lSDL -lpspgum -lpspgu -lstdc++ -lm -lpsphprm -lpspaudio \
+	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PX68K for PSP ver.$(PX68K_VERSION)

@@ -85,7 +85,7 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 	fmt.samples = samples;
 	fmt.callback = sdlaudio_callback;
 #ifdef PSP
-	fmt.userdata = rate;
+	fmt.userdata = (void *)rate;
 #else
 	fmt.userdata = NULL;
 #endif
