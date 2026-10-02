@@ -213,9 +213,10 @@ INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
 		UINT32 res;
 		UINT32 src;
 		UINT32 dst;
+		INT32 icount;
 
 		PC = CPU->PC;
-		CPU->ICount = cycles;
+		CPU->ICount = icount = cycles;
 
 C68k_Check_Interrupt:
 		CHECK_INT
@@ -223,7 +224,7 @@ C68k_Check_Interrupt:
 		{
 
 C68k_Exec_Next:
-			if (CPU->ICount > 0)
+			if (icount > 0)
 			{
 
 				if (BusErrHandling) {
@@ -250,8 +251,9 @@ C68k_Exec_Next:
 		}
 
 		CPU->PC = PC;
+		CPU->ICount = icount;
 
-		return cycles - CPU->ICount;
+		return cycles - icount;
 	}
 	else
 	{
