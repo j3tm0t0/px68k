@@ -58,6 +58,49 @@ typedef DWORD GDWORD;
 
 #define GRP_ODD(p)	(((size_t)(p)) & 2)
 
+// Build with -DGRP_STATS to log (every 65536 decoder calls) which decoders
+// run with which page/opaq, and the video controller registers.
+#if defined(GRP_STATS) && defined(PSP)
+#include "psp/log.h"
+static const char *grp_stat_name[10] = {
+	"16", "8", "4", "4h", "16SP", "8SP", "4SP", "4hSP", "8TR", "4TR"
+};
+static unsigned grp_stat[10][4][2], grp_stat_calls;
+
+static void Grp_StatDump(void)
+{
+	char buf[512];
+	int v, p, o, len;
+
+	log_note("grp: VC0 %02x VC1 %02x VC2 %02x %02x dotx %u r29 %02x "
+		 "scr %x,%x %x,%x %x,%x %x,%x\n",
+		 VCReg0[1], VCReg1[1], VCReg2[0], VCReg2[1], (unsigned)TextDotX,
+		 CRTC_Regs[0x29],
+		 (unsigned)GrphScrollX[0], (unsigned)GrphScrollY[0],
+		 (unsigned)GrphScrollX[1], (unsigned)GrphScrollY[1],
+		 (unsigned)GrphScrollX[2], (unsigned)GrphScrollY[2],
+		 (unsigned)GrphScrollX[3], (unsigned)GrphScrollY[3]);
+	len = 0;
+	buf[0] = 0;
+	for (v = 0; v < 10; v++)
+		for (p = 0; p < 4; p++)
+			for (o = 0; o < 2; o++)
+				if (grp_stat[v][p][o] && len < (int)sizeof(buf) - 40)
+					len += sprintf(buf + len, " %s/p%d/o%d:%u",
+						       grp_stat_name[v], p, o, grp_stat[v][p][o]);
+	log_note("grp: calls%s\n", buf);
+	memset(grp_stat, 0, sizeof(grp_stat));
+	grp_stat_calls = 0;
+}
+#define GRP_STAT(v, p, o) do {						\
+		grp_stat[v][(p) & 3][(o) ? 1 : 0]++;			\
+		if (++grp_stat_calls >= 65536)				\
+			Grp_StatDump();					\
+	} while (0)
+#else
+#define GRP_STAT(v, p, o) do { } while (0)
+#endif
+
 // GVRAM offset of the first byte of the line shown at VLINE
 GRP_INLINE DWORD Grp_LineOfs(DWORD scry)
 {
@@ -194,6 +237,7 @@ static void Grp_DrawLine4_C(DWORD page, int opaq)
 	DWORD x, n1, n = TextDotX;
 	const GWORD *src;
 
+	GRP_STAT(2, page, opaq);
 	page &= 3;
 	x = GrphScrollX[page] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]) + x * 2);
@@ -232,6 +276,7 @@ static void Grp_DrawLine4h_C(void)
 	DWORD x, y, run, n = TextDotX;
 	int bits;
 
+	GRP_STAT(3, 0, 1);
 	y = GrphScrollY[0] + VLINE;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
 		y += VLINE;
@@ -311,6 +356,7 @@ static void Grp_DrawLine4SP_C(DWORD page, DWORD scrx, DWORD scry)
 	DWORD x, n1, n = TextDotX;
 	const GWORD *src;
 
+	GRP_STAT(6, page, 1);
 	x = scrx & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(scry) + x * 2);
 	n1 = 512 - x;
@@ -333,6 +379,7 @@ static void Grp_DrawLine4hSP_C(void)
 	DWORD v, c, m;
 	int bits;
 
+	GRP_STAT(7, 0, 1);
 	y = GrphScrollY[0] + VLINE;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
 		y += VLINE;
@@ -414,6 +461,7 @@ static void Grp_DrawLine4TR_C(DWORD page, int opaq)
 	const GWORD *line;
 	DWORD x, i, end, n = TextDotX;
 
+	GRP_STAT(9, page, opaq);
 	page &= 3;
 	line = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]));
 	x = GrphScrollX[page] & 0x1ff;
@@ -457,6 +505,7 @@ static void Grp_DrawLine8_C(int page, int opaq)
 	const BYTE *a, *b;
 	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
 
+	GRP_STAT(1, page, opaq);
 	page &= 1;
 	x = GrphScrollX[page * 2] & 0x1ff;
 	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
@@ -510,6 +559,7 @@ static void Grp_DrawLine8SP_C(int page)
 	const BYTE *a, *b;
 	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
 
+	GRP_STAT(5, page, 1);
 	page &= 1;
 	x = GrphScrollX[page * 2] & 0x1ff;
 	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
@@ -542,6 +592,7 @@ static void Grp_DrawLine8TR_C(int page, int opaq)
 	const BYTE *line, *src;
 	DWORD x, i, end, v, v0, c, n = TextDotX;
 
+	GRP_STAT(8, page, opaq);
 	if (!opaq)
 		return;
 
@@ -582,6 +633,7 @@ static void Grp_DrawLine16_C(void)
 	WORD *dst = Grp_LineBuf;
 	DWORD x, n1, n = TextDotX;
 
+	GRP_STAT(0, 0, 1);
 	x = GrphScrollX[0] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
 	n1 = 512 - x;
@@ -615,6 +667,7 @@ static void Grp_DrawLine16SP_C(void)
 	const GWORD *src;
 	DWORD x, i, n1, n = TextDotX;
 
+	GRP_STAT(4, 0, 1);
 	x = GrphScrollX[0] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
 	n1 = 512 - x;
