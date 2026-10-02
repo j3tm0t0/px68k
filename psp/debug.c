@@ -418,6 +418,11 @@ static int server_thread(SceSize args, void *argp)
 			continue;
 		}
 		failures = 0;
+		{
+			/* Don't block on a peer that went away without a close. */
+			struct timeval tv = { 5, 0 };
+			setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		}
 		serve(fd);
 		close(fd);
 	}
