@@ -284,14 +284,150 @@ static void Grp4_MultiRun(const GWORD *src, WORD *dst, DWORD n)
 		*dst = GrphPal[Grp4_Pick(*src)];
 }
 
+// Pages drawn in descending page order (VCReg1 = e4, the usual priority),
+// each at its own scroll position.  Masked to their own nibble and ORed,
+// the words of the pages make a word whose lowest non-0 nibble is the dot
+// (the last page drawn that is not 0 there); 0 if none.
+
+static BYTE	Grp4_Lnz[256];		// lowest non-0 nibble of a byte, or 0
+static int	Grp4_LnzOk = 0;
+
+#if defined(__GNUC__)
+typedef struct { DWORD v; } __attribute__((__packed__, __may_alias__)) GU32;
+GRP_INLINE DWORD Grp_Ld32(const GWORD *p)	// two dots, any 2-byte alignment
+{
+	return ((const GU32 *)p)->v;
+}
+#else
+GRP_INLINE DWORD Grp_Ld32(const GWORD *p)
+{
+	DWORD v;
+	memcpy(&v, p, 4);
+	return v;
+}
+#endif
+
+// l if it is not 0, else h
+GRP_INLINE DWORD Grp_Sel(DWORD l, DWORD h)
+{
+#if defined(__mips__)
+	__asm__("movz %0, %1, %0" : "+r"(l) : "r"(h));
+	return l;
+#else
+	return l ? l : h;
+#endif
+}
+
+GRP_INLINE DWORD Grp4_LnzW(DWORD w)
+{
+	return Grp_Sel(Grp4_Lnz[w & 0xff], Grp4_Lnz[w >> 8]);
+}
+
+// po: the opaque (highest) page, its nibble at bit 'sho'; q1..q3: the
+// others with their nibble masks k1..k3 (mask 0 for a page not drawn)
+#define GRP4_W(i)	((po[i] & mo) | (q1[i] & k1) | (q2[i] & k2) | (q3[i] & k3))
+
+GRP_INLINE void Grp4_DescRun(const GWORD *po, const GWORD *q1, const GWORD *q2,
+			     const GWORD *q3, DWORD k1, DWORD k2, DWORD k3,
+			     WORD *dst, DWORD n, const int sho)
+{
+	const DWORD *tab = Grp4_OpTab;
+	const BYTE *lnz = Grp4_Lnz;
+	const DWORD mo = 15 << sho, MO = mo | (mo << 16);
+	const DWORD K1 = k1 | (k1 << 16), K2 = k2 | (k2 << 16), K3 = k3 | (k3 << 16);
+	DWORD a, b, c, d, A, B, a1, b1, a2, b2, a3, b3;
+
+	if (n && GRP_ODD(dst)) {
+		*dst++ = GrphPal[Grp4_LnzW(GRP4_W(0))];
+		po++; q1++; q2++; q3++;
+		n--;
+	}
+	for (; n >= 4; n -= 4) {
+		a1 = Grp_Ld32(q1); b1 = Grp_Ld32(q1 + 2);
+		a2 = Grp_Ld32(q2); b2 = Grp_Ld32(q2 + 2);
+		a3 = Grp_Ld32(q3); b3 = Grp_Ld32(q3 + 2);
+		if ((((a1 | b1) & K1) | ((a2 | b2) & K2) | ((a3 | b3) & K3)) == 0) {
+			// only the opaque page shows
+			a = po[0]; b = po[1]; c = po[2]; d = po[3];
+			((GDWORD *)dst)[0] = tab[GRP4_IDX(a, b, sho)];
+			((GDWORD *)dst)[1] = tab[GRP4_IDX(c, d, sho)];
+		} else {
+			// two dots per word: the pages' nibbles ORed in place
+			A = (Grp_Ld32(po) & MO) | (a1 & K1) | (a2 & K2) | (a3 & K3);
+			B = (Grp_Ld32(po + 2) & MO) | (b1 & K1) | (b2 & K2) | (b3 & K3);
+			a = Grp_Sel(lnz[A & 0xff], lnz[(A >> 8) & 0xff]);
+			b = Grp_Sel(lnz[(A >> 16) & 0xff], lnz[A >> 24]);
+			c = Grp_Sel(lnz[B & 0xff], lnz[(B >> 8) & 0xff]);
+			d = Grp_Sel(lnz[(B >> 16) & 0xff], lnz[B >> 24]);
+			((GDWORD *)dst)[0] = tab[a | (b << 4)];
+			((GDWORD *)dst)[1] = tab[c | (d << 4)];
+		}
+		po += 4; q1 += 4; q2 += 4; q3 += 4;
+		dst += 4;
+	}
+	for (; n; n--) {
+		*dst++ = GrphPal[Grp4_LnzW(GRP4_W(0))];
+		po++; q1++; q2++; q3++;
+	}
+}
+#undef GRP4_W
+
+// pages: the pages drawn, highest first (pg[0] opaque), n of them, n >= 2
+static void Grp4_Desc(const DWORD *pg, int n)
+{
+	const GWORD *p[4];
+	DWORD wrap[4], i, end, cnt = TextDotX, x, k1, k2, k3;
+	int k;
+
+	if (!Grp4_LnzOk) {
+		for (k = 0; k < 256; k++)
+			Grp4_Lnz[k] = (k & 15) ? (k & 15) : (k >> 4);
+		Grp4_LnzOk = 1;
+	}
+	Grp4_PalCheck(1);
+
+	for (k = 0; k < n; k++) {
+		x = GrphScrollX[pg[k]] & 0x1ff;
+		p[k] = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[pg[k]]) + x * 2);
+		// as Grp_DrawLine4_C: back 0x200 words after x ^ 0x1ff dots
+		wrap[k] = x ^ 0x1ff;
+		if (wrap[k] >= cnt)
+			wrap[k] = cnt;
+	}
+	for (; k < 4; k++) {			// not drawn: read the opaque page, masked out
+		p[k] = p[0];
+		wrap[k] = wrap[0];
+	}
+	k1 = (n > 1) ? 15 << (pg[1] * 4) : 0;
+	k2 = (n > 2) ? 15 << (pg[2] * 4) : 0;
+	k3 = (n > 3) ? 15 << (pg[3] * 4) : 0;
+
+	for (i = 0; i < cnt; i = end) {
+		end = cnt;
+		for (k = 0; k < 4; k++) {
+			if (wrap[k] == i)
+				p[k] -= 0x200;
+			if (wrap[k] > i && wrap[k] < end)
+				end = wrap[k];
+		}
+		switch (pg[0]) {
+		case 1: Grp4_DescRun(p[0], p[1], p[2], p[3], k1, k2, k3, Grp_LineBuf + i, end - i, 4); break;
+		case 2: Grp4_DescRun(p[0], p[1], p[2], p[3], k1, k2, k3, Grp_LineBuf + i, end - i, 8); break;
+		default: Grp4_DescRun(p[0], p[1], p[2], p[3], k1, k2, k3, Grp_LineBuf + i, end - i, 12); break;
+		}
+		for (k = 0; k < 4; k++)
+			p[k] += end - i;
+	}
+}
+
 // -----------------------------------------------------------------------
 //   Grp_DrawLine4Multi(pages, n): the n (1..4) 16 colour pages packed two
 //   bits each in 'pages' (first in bits 0-1), the first opaque and each
 //   following one over it.  Exactly the same as
 //	Grp_DrawLine4(pages & 3, 1);
 //	Grp_DrawLine4((pages >> 2) & 3, 0); ...
-//   but when the pages are at the same scroll position (they are nibbles
-//   of the same GVRAM words) the line is read and written only once.
+//   but in one pass when the pages are drawn in descending page order
+//   (each at its own scroll position) or are all at the same position.
 // -----------------------------------------------------------------------
 void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
 {
@@ -303,6 +439,18 @@ void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
 		return;
 	if (n > 4)
 		n = 4;
+	if (n >= 2) {
+		DWORD pg[4];
+		for (k = 0; k < n; k++)
+			pg[k] = (pages >> (k * 2)) & 3;
+		for (k = 1; k < n; k++)
+			if (pg[k] >= pg[k - 1])
+				break;
+		if (k == n) {			// strictly descending: any scroll
+			Grp4_Desc(pg, n);
+			return;
+		}
+	}
 	x = GrphScrollX[p0] & 0x1ff;
 	y = Grp_LineOfs(GrphScrollY[p0]);
 	for (k = 1; k < n; k++) {
