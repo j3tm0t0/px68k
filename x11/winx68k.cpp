@@ -691,8 +691,9 @@ static void psp_debug_frame(unsigned us)
 	}
 	if (psp_bf_end) {
 		if (psp_frame_no == psp_bf_start) {
-			log_printf("benchf: frames %u-%u, skip %d\n", psp_bf_start, psp_bf_end, psp_bf_skip);
 			net_pause();
+			log_printf("benchf: frames %u-%u, skip %d, cpu %d MHz\n", psp_bf_start, psp_bf_end, psp_bf_skip,
+				   scePowerGetCpuClockFrequency());
 			psp_bf_saved_skip = Config.FrameRate;
 			psp_bf_saved_prof = prof_on;
 			Config.FrameRate = psp_bf_skip;
@@ -718,11 +719,11 @@ static void psp_debug_frame(unsigned us)
 			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
 			/* us per emulated frame */
 			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
-				   "draw %u snd %u lines %u shown %u\n", n, total / n,
+				   "draw %u snd %u lines %u shown %u cpu %d\n", n, total / n,
 				   n * 1000000u / total, n * 10000000u / total % 10,
 				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
 				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
-				   prof_count[PROF_LINES], prof_count[PROF_FRAMES]);
+				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency());
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
 			RTC_TimeHook = NULL;
 			DSound_Play();
@@ -802,8 +803,8 @@ static void psp_debug_poll(void)
 			Mouse_Event(btn == 'l' ? 1 : 2, (float)n, 0);
 		} else if (sscanf(cmd, "bench %d", &n) == 1 && n > 0 && !psp_bench_end) {
 			/* Leave the WLAN for n seconds: the firmware caps the clock while it is up. */
-			log_printf("bench: %d s without WLAN\n", n);
 			net_pause();
+			log_printf("bench: %d s without WLAN, cpu %d MHz\n", n, scePowerGetCpuClockFrequency());
 			psp_bench_end = timeGetTime() + n * 1000;
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
