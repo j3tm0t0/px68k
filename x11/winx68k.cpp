@@ -326,6 +326,7 @@ void WinX68k_Exec(void)
 {
 	//char *test = NULL;
 	int clk_total, clkdiv, usedclk, hsync, clk_next, clk_count, clk_line=0;
+	DWORD cn_num, cn_vt, cn_q, cn_r, cn_sq, cn_sr;	/* clk_next as quotient/remainder */
 	int KeyIntCnt = 0, MouseIntCnt = 0;
 	DWORD t_start = timeGetTime(), t_end;
 
@@ -362,6 +363,12 @@ void WinX68k_Exec(void)
 	}
 	ICount += clk_total;
 	clk_next = (clk_total/VLINE_TOTAL);
+	cn_num = (DWORD)clk_total;
+	cn_vt = (DWORD)VLINE_TOTAL;
+	cn_q  = cn_num/cn_vt;
+	cn_r  = cn_num%cn_vt;
+	cn_sq = cn_q;
+	cn_sr = cn_r;
 	hsync = 1;
 
 	do {
@@ -500,7 +507,23 @@ void WinX68k_Exec(void)
 			PROF_END(pline, PROF_LINE);
 
 			vline++;
-			clk_next  = (clk_total*(vline+1))/VLINE_TOTAL;
+			/* clk_next = (clk_total*(vline+1))/VLINE_TOTAL, without a division per line */
+			cn_num += (DWORD)clk_total;			/* DWORD, wraps like the old product */
+			if ( (cn_vt==(DWORD)VLINE_TOTAL)&&(cn_num>=(DWORD)clk_total) ) {
+				cn_q += cn_sq;
+				cn_r += cn_sr;
+				if ( cn_r>=cn_vt ) {
+					cn_r -= cn_vt;
+					cn_q++;
+				}
+			} else {						/* line count changed, or wrapped */
+				cn_vt = (DWORD)VLINE_TOTAL;
+				cn_q  = cn_num/cn_vt;
+				cn_r  = cn_num%cn_vt;
+				cn_sq = (DWORD)clk_total/cn_vt;
+				cn_sr = (DWORD)clk_total%cn_vt;
+			}
+			clk_next  = (int)cn_q;
 			hsync = 1;
 		}
 	} while ( vline<VLINE_TOTAL );
