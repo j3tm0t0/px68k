@@ -167,6 +167,9 @@ typedef struct {
 static GE_Pal ge_pal[GE_NPAL];
 static int ge_npal, ge_palcur;
 
+static int ge_g16ge;		/* the GE converts the 65536 colour dots (ge_g16_check) */
+static void ge_g16_check(void);
+
 /* 0, or why the CPU must draw this line (GE_R_*) */
 static int ge_eval(GE_State *s)
 {
@@ -287,8 +290,8 @@ static int ge_eval(GE_State *s)
 		}
 	}
 
-	if (s->dotx > 512 && (s->mode == GE_G || s->mode == GE_GM))
-		return GE_R_WIDTH;	/* wider than 512 dots: no graphics (ge_wide) */
+	if (s->dotx > 512 && s->mode == GE_GM)
+		return GE_R_WIDTH;	/* wider than 512 dots: graphics or the layer (ge_wide) */
 	{
 		/*
 		 * The layer of lines up to 512 dots is ScrBufR (dots 512-767):
@@ -325,6 +328,25 @@ static int ge_eval(GE_State *s)
 			s->gx[1] = s->gx[2];
 			s->gy[1] = s->gy[2];
 			s->gx[2] = s->gx[3] = s->gy[2] = s->gy[3] = 0;
+		}
+		if (s->dotx > 512) {
+			/*
+			 * ge_wide_grp: Grp_DrawLine8 reads the low nibble on into
+			 * the next line after 1024 - x dots, the high one from
+			 * the line start again: alike for x <= 256 only; 65536
+			 * colours: when the GE converts.
+			 */
+			int k;
+
+			if (s->gm == 1)
+				for (k = 0; k < s->ng; k++)
+					if (s->gx[s->gpage[k]] > 256)
+						return GE_R_WIDTH;
+			if (s->gm == 2) {
+				ge_g16_check();
+				if (!ge_g16ge)
+					return GE_R_WIDTH;
+			}
 		}
 	} else {
 		s->ng = 0;
@@ -391,7 +413,6 @@ int GE_Pending(void)
 static int ge_inflight;		/* bands handed to the GE, not done yet */
 static int ge_g16pend, ge_g16pal;	/* waiting 65536 colour bands, their palette */
 static int ge_g16fly;		/* ... and some of those handed to the GE */
-static int ge_g16ge;		/* the GE converts the 65536 colour dots (ge_g16_check) */
 static int ge_voff, ge_coff;	/* list memory used (see ge_mem) */
 static int ge_vneed;		/* ge_varena bytes the waiting bands may take */
 static int ge_bgfly;		/* ... and some of them read the BG patterns */
@@ -505,6 +526,11 @@ static void ge_mark_line(const GE_Band *b, int new)
 				GE_SET(m->grow[q], row);
 			if (quirk)
 				GE_SET(m->grow[p], (row - 1) & 511);
+			if (s->dotx > 512)	/* ge_wide_grp: also the lines above and below */
+				for (q = m0; q <= m1; q++) {
+					GE_SET(m->grow[q], (row - 1) & 511);
+					GE_SET(m->grow[q], (row + 1) & 511);
+				}
 			if (new) {
 				for (q = m0; q <= m1; q++)
 					for (i = 0; i < s->dotx; i++)
@@ -830,8 +856,9 @@ static int ge_vband(const GE_State *s)
 	}
 	if (s->prio)	/* ge_prio draws the text / BG again, the layer, the fills */
 		n = 2 * n + 4 * (16 + GE_NSTRIP(512) * 2 * sizeof(GE_TV));
-	if (s->dotx > 512)	/* ge_wide: two halves, the text in 3 x 2 pieces each */
-		n = 2 * n + 12 * (16 + GE_NSTRIP(256) * 2 * sizeof(GE_TV));
+	if (s->dotx > 512)	/* ge_wide: two halves, the text in 3 x 2 pieces each, the graphics */
+		n = 2 * n + 12 * (16 + GE_NSTRIP(256) * 2 * sizeof(GE_TV)) +
+			2 * 4 * 2 * (16 + 3 * GE_NSTRIP(768) * 2 * sizeof(GE_TV)) + 2 * (256 * 4 + 16);
 	return n;
 }
 
@@ -1729,21 +1756,53 @@ static void ge_g16_conv32(const WORD *src, WORD *d)
  * then 0 where the word is 0 (the word itself as 5650, colour test "equal
  * 0").
  */
-static void ge_grp16ge(const GE_Band *b)
+/* the CLUTs of the low and high bytes (ge_grp16ge) */
+static void ge_g16_cluts(const GE_Pal *pal, unsigned int **lo, unsigned int **hi)
 {
 	extern WORD Pal16Adr[256];
-	const GE_State *s = &b->st;
-	const GE_Pal *pal = &ge_pal[s->pal];
-	const int x = s->gx[0], copy = ge_gcopy_ok(s, 0);
-	const int n1 = 512 - x < s->dotx ? 512 - x : s->dotx;
 	unsigned int *clo = (unsigned int *)ge_mem(256 * 4), *chi = (unsigned int *)ge_mem(256 * 4);
-	GE_TV *v, *e;
-	int i, n;
+	int i;
 
 	for (i = 0; i < 256; i++) {
 		clo[i] = ge_c32(Pal16[pal->regs[Pal16Adr[i]]], 255);
 		chi[i] = ge_c32(Pal16[pal->regs[Pal16Adr[i] + 2] << 8], 255);
 	}
+	*lo = clo;
+	*hi = chi;
+}
+
+/* draw v .. e from the texture set as ge_grp16ge does (CLUTs lo, hi; then 0) */
+static void ge_g16_draw3(GE_TV *v, GE_TV *e, const unsigned int *clo, const unsigned int *chi)
+{
+	sceGuTexMode(GU_PSM_T16, 0, 0, 0);
+	sceGuClutLoad(256 / 8, clo);
+	sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
+	ge_draw(v, e);
+	sceGuClutLoad(256 / 8, chi);
+	sceGuClutMode(GU_PSM_8888, 8, 0xff, 0);
+	sceGuEnable(GU_BLEND);
+	sceGuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0xffffff, 0xffffff);
+	ge_draw(v, e);
+	sceGuDisable(GU_BLEND);
+	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+	sceGuColorFunc(GU_EQUAL, 0, 0xffffff);
+	sceGuEnable(GU_COLOR_TEST);
+	ge_draw(v, e);		/* the word is 0: 0 */
+	sceGuDisable(GU_COLOR_TEST);
+	sceGuColorFunc(GU_NOTEQUAL, 0, 0xffffff);
+}
+
+static void ge_grp16ge(const GE_Band *b)
+{
+	const GE_State *s = &b->st;
+	const GE_Pal *pal = &ge_pal[s->pal];
+	const int x = s->gx[0], copy = ge_gcopy_ok(s, 0);
+	const int n1 = 512 - x < s->dotx ? 512 - x : s->dotx;
+	unsigned int *clo, *chi;
+	GE_TV *v, *e;
+	int i, n;
+
+	ge_g16_cluts(pal, &clo, &chi);
 	v = e = (GE_TV *)ge_mem(2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 	for (i = 0; i < b->h; i += n) {
 		/* the copy has the row of line y at y */
@@ -1761,21 +1820,7 @@ static void ge_grp16ge(const GE_Band *b)
 		sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_GCOPY));
 	else
 		sceGuTexImage(0, 512, 512, 512, GVRAM);
-	sceGuClutLoad(256 / 8, clo);
-	sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
-	ge_draw(v, e);
-	sceGuClutLoad(256 / 8, chi);
-	sceGuClutMode(GU_PSM_8888, 8, 0xff, 0);
-	sceGuEnable(GU_BLEND);
-	sceGuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0xffffff, 0xffffff);
-	ge_draw(v, e);
-	sceGuDisable(GU_BLEND);
-	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-	sceGuColorFunc(GU_EQUAL, 0, 0xffffff);
-	sceGuEnable(GU_COLOR_TEST);
-	ge_draw(v, e);		/* the word is 0: 0 */
-	sceGuDisable(GU_COLOR_TEST);
-	sceGuColorFunc(GU_NOTEQUAL, 0, 0xffffff);
+	ge_g16_draw3(v, e, clo, chi);
 	GE_Stat[GE_ST_G16_GE] += b->h * s->dotx;
 	GE_G16Live = 0;		/* GVRAM writes need not convert (the rows' generations still move) */
 }
@@ -2015,7 +2060,84 @@ static void ge_prio(const GE_Band *b, const unsigned int *tclut)
  * the layer is drawn straight into the screen, dots 0-511 into ScrBufL,
  * 512-767 into ScrBufR (ge_xoff), as the layer pass draws it.
  */
-static void ge_wide(const GE_Band *b, const unsigned int *tclut)
+/*
+ * Dots sx .. sx + w - 1 of lines y .. y + n - 1 from GVRAM word 'start' of
+ * their line on, read straight on in memory as the CPU path reads it (on
+ * into the next line, or from the one above for start < 0): the texture
+ * is GVRAM from the line above the first (ge_wide_grp), cut at the line
+ * ends.
+ */
+static GE_TV *ge_run(GE_TV *e, int sx, int y, int w, int n, int start)
+{
+	while (w > 0) {
+		const int r = start >= 0 ? start >> 9 : -((511 - start) >> 9);
+		const int u = start - r * 512, seg = 512 - u < w ? 512 - u : w;
+
+		e = ge_quad(e, sx - ge_xoff, y, seg, n, u, r + 1, 0, 0, 0);
+		sx += seg;
+		start += seg;
+		w -= seg;
+	}
+	return e;
+}
+
+/* the graphics of a line wider than 512 dots, the half ge_xoff of it */
+static void ge_wide_grp(const GE_Band *b, const unsigned int *gclut)
+{
+	const GE_State *s = &b->st;
+	unsigned int *clo = NULL, *chi = NULL;
+	int k, i, n;
+
+	sceGuDisable(GU_DEPTH_TEST);
+	if (s->gm == 2)
+		ge_g16_cluts(&ge_pal[s->pal], &clo, &chi);
+	else
+		sceGuClutLoad(s->gm ? 256 / 8 : 16 / 8, gclut);
+	for (k = 0; k < s->ng; k++) {
+		const int p = s->gpage[k], x = s->gx[p];
+
+		if (s->gm == 0)
+			sceGuClutMode(GU_PSM_8888, p * 4, 0x0f, 0);
+		else if (s->gm == 1)
+			sceGuClutMode(GU_PSM_8888, p * 8, 0xff, 0);
+		if (k == 0)
+			sceGuDisable(GU_ALPHA_TEST);
+		else
+			sceGuEnable(GU_ALPHA_TEST);
+		for (i = 0; i < b->h; i += n) {
+			const int row = (s->gy[p] + b->y0 + i) & 511, y = GE_LY(b->y0) + i;
+			GE_TV *v, *e;
+
+			n = (512 - row < b->h - i) ? 512 - row : b->h - i;
+			v = e = (GE_TV *)ge_mem(3 * GE_NSTRIP(768) * 2 * sizeof(GE_TV));
+			if (s->gm == 0) {
+				/* Grp_DrawLine4: dots x .. 510, then on from the line above's last */
+				e = ge_run(e, 0, y, 511 - x, n, x);
+				e = ge_run(e, 511 - x, y, s->dotx - (511 - x), n, -1);
+			} else if (s->gm == 1) {
+				/* Grp_DrawLine8 (x <= 256): x .. 511, then 0 .. */
+				e = ge_run(e, 0, y, 512 - x, n, x);
+				e = ge_run(e, 512 - x, y, s->dotx - (512 - x), n, 0);
+			} else {
+				/* Grp_DrawLine16: x .. 511, then on from the line start */
+				e = ge_run(e, 0, y, 512 - x, n, x);
+				e = ge_run(e, 512 - x, y, s->dotx - (512 - x), n, 0);
+			}
+			if (e == v)
+				continue;
+			sceGuTexImage(0, 512, 512, 512, GVRAM + (row - 1) * 1024);
+			if (s->gm == 2)
+				ge_g16_draw3(v, e, clo, chi);
+			else {
+				sceGuTexMode(GU_PSM_T16, 0, 0, 0);
+				ge_draw(v, e);
+			}
+		}
+	}
+	sceGuDisable(GU_ALPHA_TEST);
+}
+
+static void ge_wide(const GE_Band *b, const unsigned int *tclut, const unsigned int *gclut)
 {
 	const GE_State *s = &b->st;
 	const GE_Pal *pal = &ge_pal[s->pal];
@@ -2026,6 +2148,10 @@ static void ge_wide(const GE_Band *b, const unsigned int *tclut)
 		ge_dotx = half ? s->dotx - 512 : 512;
 		if (half)
 			sceGuDrawBufferList(GU_PSM_5650, (void *)(GE_SCRBUF_R + ge_ybase * 512), 256);
+		if (s->mode == GE_G) {
+			ge_wide_grp(b, gclut);
+			continue;
+		}
 		if (s->mode == GE_ZERO) {
 			ge_fill(0, GE_LY(b->y0), ge_dotx, b->h, 0, 0);
 			continue;
@@ -2149,7 +2275,7 @@ static void GE_Render(void *fbp, int passes)
 					ge_gc[GE_LY(b->y0) + k].cols = 0;
 			if (s->dotx > 512) {
 				if (passes & GE_P_COMP)
-					ge_wide(b, tclut[s->pal]);
+					ge_wide(b, tclut[s->pal], gclut[s->pal]);
 				continue;
 			}
 			if ((passes & GE_P_GRP) && (s->mode == GE_G || s->mode == GE_GM))
