@@ -243,9 +243,10 @@ def main():
                 except SystemExit:
                     continue
                 text = b""
-                s.settimeout(2)
+                s.settimeout(1)
+                read_until = time.time() + 3  # the log keeps coming; take what is there
                 try:
-                    while True:
+                    while time.time() < read_until:
                         chunk = s.recv(65536)
                         if not chunk:
                             break
