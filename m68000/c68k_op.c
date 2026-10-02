@@ -14,6 +14,878 @@
   ORI    inclusive-OR Immediate
 -----------------------------------------------------------------------------*/
 
+/* hot handlers first (I-cache), see docs/c68k-speed.md */
+#undef C68K_INL
+#define C68K_INL 1
+
+OP(bne_8)              { Bcc_8(NE)                             }	// 6601
+OP(move_16_d_d)        { MOVE(16, D,   D)                      }	// 3000
+OP(and_16_er_i)        { AND_ER(16, I)                         }	// c07c
+
+OP(tst_16_di)          { TST(16, DI)                           }	// 4a68
+OP(or_16_er_d)         { OR_ER(16, D)                          }	// 8040
+OP(asr_32_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = (INT32)DY;
+	CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = ((INT32)src) >> sft;
+	CPU->flag_N = res >> 24;
+	CPU->flag_Z = res;
+	*(UINT32 *)(&DY) = res;
+	RET(8)
+}
+
+// e008
+OP(move_16_pd_d)       { MOVE(16, PD,  D)                      }	// 3100
+OP(swap_32)
+{
+	EA_READ_D(32, Y, res);
+	res = (res >> 16) | (res << 16);
+	FLAGS(32)
+	EA_WRITE_RESULT(32, D, Y)
+	RET(4)
+}
+
+/*-----------------------------------------------------------------------------
+  MOVEM    Move from Multiple Registers
+-----------------------------------------------------------------------------*/
+
+OP(beq_8)              { Bcc_8(EQ)                             }	// 6701
+OP(bhi_8)              { Bcc_8(HI)                             }	// 6201
+OP(move_16_d_di)       { MOVE(16, D,   DI)                     }	// 3028
+OP(cmp_16_i)           { CMP(16, I)                            }	// b07c
+
+OP(rts_32)
+{
+	POP_32_F(res)
+	SET_PC(res)
+	RET(16)
+}
+
+/*-----------------------------------------------------------------------------
+  TRAPV    Trap on Overflow
+-----------------------------------------------------------------------------*/
+
+// 4e76
+OP(cmp_16_pcdi)        { CMP(16, PCDI)                         }	// b07a
+OP(dbf_16)             { DBF()                                 }	// 51c8
+OP(tst_16_al)          { TST(16, AL)                           }	// 4a79
+
+OP(add_32_er_d)        { ADD_ER_RI32(D)                        }	// d080
+OP(addq_16_a)          { ADDQ_A(16)                            }	// 5048
+OP(sub_16_er_d)        { SUB_ER(16, D)                         }	// 9040
+OP(add_16_er_d)        { ADD_ER(16, D)                         }	// d040
+OP(bsr_16)
+{
+	res = READSX_IMM_16();
+	ADJUST_PC()
+	PUSH_32_F(PC + 2)
+	PC += res;
+	SET_PC(PC)
+	RET(18)
+}
+
+/******************************************************************************
+	OPCODE $7xxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  MOVEQ    Move Quick
+-----------------------------------------------------------------------------*/
+
+// 7000
+OP(bra_16)
+{
+	PC += READSX_IMM_16();
+	ADJUST_PC()
+	SET_PC(PC)
+	RET(10)
+}
+
+/*-----------------------------------------------------------------------------
+  BSR    Branch to Subroutine
+-----------------------------------------------------------------------------*/
+
+// 6101
+OP(move_32_d_d)        { MOVE(32, D,   D)                      }	// 2000
+OP(adda_16_i)          { ADDA(16, I)                           }	// 047c
+
+OP(movea_32_a)         { MOVEA(32, A)                          }	// 2048
+OP(lea_32_di)          { LEA(DI)                               }	// 41e8
+OP(move_16_pi_d)       { MOVE(16, PI,  D)                      }	// 30c0
+OP(movem_32_re_pd)     { MOVEM_RE_PD(32, Y)                    }	// 48e0
+OP(bcc_8)              { Bcc_8(CC)                             }	// 6401
+OP(move_16_d_pi)       { MOVE(16, D,   PI)                     }	// 3018
+OP(subq_16_ai)         { SUBQ(16, M, AI)                       }	// 5150
+OP(cmp_16_d)           { CMP(16, D)                            }	// b040
+OP(ext_32)             { EXT(16, 32)                           }	// 48c0
+
+/*-----------------------------------------------------------------------------
+  TST    Test an Operand
+-----------------------------------------------------------------------------*/
+
+OP(moveq_32)
+{
+	res = MAKE_INT_8(Opcode);
+	FLAG_C = CFLAG_CLEAR;
+	FLAG_V = VFLAG_CLEAR;
+	FLAG_N = res;
+	FLAG_Z = res;
+	EA_WRITE_RESULT(32, D, X)
+	RET(4)
+}
+
+/******************************************************************************
+	OPCODE $8xxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  OR    inclusive-OR logical
+-----------------------------------------------------------------------------*/
+
+OP(bmi_8)              { Bcc_8(MI)                             }	// 6b01
+OP(movea_32_d)         { MOVEA(32, D)                          }	// 2040
+OP(addq_16_d)          { ADDQ(16, D, D)                        }	// 5040
+OP(ble_16)             { Bcc_16(LE)                            }	// 6f00
+
+/*-----------------------------------------------------------------------------
+  BRA    Branch Always
+-----------------------------------------------------------------------------*/
+
+// 6001
+OP(asl_32_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_32(DY);
+	CPU->flag_X = CPU->flag_C = src >> (24 - sft);
+	res = src << sft;
+	CPU->flag_N = res >> 24;
+	CPU->flag_Z = res;
+	*(UINT32 *)(&DY) = res;
+	CPU->flag_V = 0;
+	{
+		UINT32 msk = (((INT32)0x80000000) >> (sft + 0));
+		src &= msk;
+		if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
+	}
+	RET(8)
+}
+
+// e108
+OP(lsl_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_16(DY);
+	CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src >> (8 - sft);
+	res = src << sft;
+	CPU->flag_N = res >> 8;
+	CPU->flag_Z = res & 0xffff;
+	*(UINT16 *)(&DY) = res;
+	RET(6)
+}
+
+// e188
+OP(adda_16_d)          { ADDA(16, D)                           }	// 0440
+OP(move_16_d_a)        { MOVE(16, D,   A)                      }	// 3008
+OP(muls_16_d)          { MULS(D)                               }	// c1c0
+OP(blt_16)             { Bcc_16(LT)                            }	// 6d00
+OP(jmp_32_pcix)        { JMP(PCIX)                             }	// 4efb
+
+/*-----------------------------------------------------------------------------
+  CHK    Check Register Against Bounds
+-----------------------------------------------------------------------------*/
+
+OP(move_16_di_d)       { MOVE(16, DI,  D)                      }	// 3140
+OP(move_16_d_ix)       { MOVE(16, D,   IX)                     }	// 3030
+OP(add_32_er_ai)       { ADD_ER(32, AI)                        }	// d090
+OP(move_16_d_i)        { MOVE(16, D,   I)                      }	// 303c
+OP(beq_16)             { Bcc_16(EQ)                            }	// 6700
+OP(movea_32_di)        { MOVEA(32, DI)                         }	// 2068
+OP(add_32_er_i)        { ADD_ER_RI32(I)                        }	// d0bc
+
+OP(move_32_pd_d)       { MOVE(32, PD,  D)                      }	// 2100
+OP(bcs_8)              { Bcc_8(CS)                             }	// 6501
+OP(lea_32_al)          { LEA(AL)                               }	// 41f9
+OP(bpl_8)              { Bcc_8(PL)                             }	// 6a01
+OP(movem_32_er_pi)     { MOVEM_ER_PI(32, Y)                    }	// 4cd8
+OP(lsr_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_16(DY);
+	CPU->flag_N = CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = src >> sft;
+	CPU->flag_Z = res;
+	*(UINT16 *)(&DY) = res;
+	RET(6)
+}
+
+// e088
+OP(adda_32_d)          { ADDA_RI32(D)                          }	// 0480
+OP(adda_32_i)          { ADDA_RI32(I)                          }	// 04bc
+
+/******************************************************************************
+	OPCODE $Exxx
+******************************************************************************/
+
+// e000
+OP(clr_16_d)           { CLR(16, D, D)                         }	// 4240
+OP(move_32_d_ai)       { MOVE(32, D,   AI)                     }	// 2010
+OP(asl_32_r)
+{
+	UINT32 sft;
+
+	sft = DX & 0x3f;
+	src = READ_REG_32(DY);
+	if (sft)
+	{
+		USE_CYCLES(sft << 1)
+		if (sft < 32)
+		{
+			CPU->flag_X = CPU->flag_C = (src >> (32 - sft)) << C68K_SR_C_SFT;
+			res = src << sft;
+			CPU->flag_N = res >> 24;
+			CPU->flag_Z = res;
+			*(UINT32 *)(&DY) = res;
+			CPU->flag_V = 0;
+			{
+				UINT32 msk = (((INT32)0x80000000) >> (sft + 0));
+				src &= msk;
+				if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
+			}
+			RET(8)
+		}
+
+		if (sft == 0) CPU->flag_C = src << C68K_SR_C_SFT;
+		else CPU->flag_C = 0;
+		CPU->flag_X = CPU->flag_C;
+		CPU->flag_V = (src) ? C68K_SR_V : 0;
+		*(UINT32 *)(&DY) = 0;
+		CPU->flag_N = 0;
+		CPU->flag_Z = 0;
+		RET(8)
+	}
+
+	CPU->flag_V = 0;
+	CPU->flag_C = 0;
+	CPU->flag_N = src >> 24;
+	CPU->flag_Z = src;
+	RET(8)
+}
+
+// e128
+OP(btst_32_s_d)        { BITOP_STATIC(TST, 32, D)              }	// 0800
+OP(tst_16_d)           { TST(16, D)                            }	// 4a40
+OP(bge_16)             { Bcc_16(GE)                            }	// 6c00
+OP(move_16_d_ai)       { MOVE(16, D,   AI)                     }	// 3010
+OP(muls_16_i)          { MULS(I)                               }	// c1fc
+
+/*-----------------------------------------------------------------------------
+  EXG    Exchange Registers
+-----------------------------------------------------------------------------*/
+
+OP(move_32_di_d)       { MOVE(32, DI,  D)                      }	// 2140
+OP(lea_32_pcdi)        { LEA(PCDI)                             }	// 41fa
+OP(cmp_16_pi)          { CMP(16, PI)                           }	// b058
+OP(btst_8_s_di)        { BITOP_STATIC(TST, 8, DI)              }	// 0828
+OP(lea_32_ix)          { LEA(IX)                               }	// 41f0
+OP(bra_8)
+{
+	PC += (INT32)(INT8)Opcode;
+	RET(10)
+}
+
+// 6000
+OP(bsr_8)
+{
+	res = GET_PC();
+	PUSH_32_F(res)
+	PC += MAKE_INT_8(Opcode);
+	RET(18)
+}
+
+// 6100
+OP(add_16_er_i)        { ADD_ER(16, I)                         }	// d07c
+
+OP(jsr_32_ai)          { JSR(AI)                               }	// 4e90
+OP(bmi_16)             { Bcc_16(MI)                            }	// 6b00
+OP(rte_32)
+{
+	if (FLAG_S)
+	{
+		POP_16_F(res)
+		SET_SR(res)
+		POP_32_F(res)
+		SET_PC(res)
+		SWAP_SP()
+		RET_INT(20)
+	}
+	SWAP_SP_NOCHECK()
+	EXCEPTION(C68K_PRIVILEGE_VIOLATION_EX)
+	RET(34)
+}
+
+/*-----------------------------------------------------------------------------
+  RTS    Return from Subroutine
+-----------------------------------------------------------------------------*/
+
+// 4e75
+OP(subq_16_d)          { SUBQ(16, D, D)                        }	// 5140
+OP(lsl_32_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_32(DY);
+	CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src >> (24 - sft);
+	res = src << sft;
+	CPU->flag_N = res >> 24;
+	CPU->flag_Z = res;
+	*(UINT32 *)(&DY) = res;
+	RET(8)
+}
+
+// e110
+OP(move_16_d_al)       { MOVE(16, D,   AL)                     }	// 3039
+OP(add_16_er_a)        { ADD_ER(16, A)                         }	// d048
+OP(asr_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = (INT32)(INT16)DY;
+	CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = ((INT32)src) >> sft;
+	CPU->flag_N = res >> 8;
+	CPU->flag_Z = res;
+	*(UINT16 *)(&DY) = res;
+	RET(6)
+}
+
+// e080
+OP(tst_8_al)           { TST(8, AL)                            }	// 4a39
+OP(move_8_d_di)        { MOVE(8, D,   DI)                      }	// 1028
+OP(move_16_di_i)       { MOVE(16, DI,  I)                      }	// 317c
+OP(move_16_al_i)       { MOVE(16, AL,  I)                      }	// 33fc
+
+/*-----------------------------------------------------------------------------
+  MOVEA    Move Address
+-----------------------------------------------------------------------------*/
+
+OP(move_32_d_pi)       { MOVE(32, D,   PI)                     }	// 2018
+OP(tst_8_di)           { TST(8, DI)                            }	// 4a28
+OP(cmpi_16_di)         { CMPI(16, M, DI)                       }	// 0c68
+OP(andi_16_d)          { ANDI(16, D, D)                        }	// 0240
+OP(move_16_ai_d)       { MOVE(16, AI,  D)                      }	// 3080
+OP(or_16_er_ix)        { OR_ER(16, IX)                         }	// 8070
+OP(movea_16_ix)        { MOVEA(16, IX)                         }	// 3070
+OP(add_16_er_di)       { ADD_ER(16, DI)                        }	// d068
+OP(cmp_16_a)           { CMP(16, A)                            }	// b048
+OP(movea_32_ai)        { MOVEA(32, AI)                         }	// 2050
+OP(and_32_er_i)        { AND_ER_RI32(I)                        }	// c0bc
+
+OP(divs_16_d)          { DIVS(D)                               }	// 81c0
+OP(move_16_al_d)       { MOVE(16, AL,  D)                      }	// 33c0
+
+OP(asl_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_16(DY);
+	CPU->flag_X = CPU->flag_C = src >> (8 - sft);
+	res = src << sft;
+	CPU->flag_N = res >> 8;
+	CPU->flag_Z = res & 0xffff;
+	*(UINT16 *)(&DY) = res;
+	CPU->flag_V = 0;
+	{
+		UINT32 msk = (((INT32)0x80000000) >> (sft + 16)) & 0xffff;
+		src &= msk;
+		if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
+	}
+	RET(6)
+}
+
+// e180
+OP(sub_32_er_d)        { SUB_ER_RI32(D)                        }	// 9080
+OP(add_16_re_di)       { ADD_RE(16, DI)                        }	// d168
+OP(movea_32_pcdi)      { MOVEA(32, PCDI)                       }	// 207a
+OP(sub_16_er_i)        { SUB_ER(16, I)                         }	// 907c
+
+OP(movea_32_pi)        { MOVEA(32, PI)                         }	// 2058
+OP(move_8_al_d)        { MOVE(8, AL,  D)                       }	// 13c0
+OP(adda_32_a)          { ADDA_RI32(A)                          }	// 0488
+OP(move_32_pd_a)       { MOVE(32, PD,  A)                      }	// 2108
+OP(trap)
+{
+	SWAP_SP()
+	res = C68K_TRAP_BASE_EX + (Opcode & 0x0f);
+	EXCEPTION(res)
+	RET(34)
+}
+
+/*-----------------------------------------------------------------------------
+  LINK    Link and Allocate
+-----------------------------------------------------------------------------*/
+
+// 4e50
+OP(suba_32_a)          { SUBA_RI32(A)                          }	// 0488
+OP(add_32_er_di)       { ADD_ER(32, DI)                        }	// d0a8
+OP(sub_16_er_a)        { SUB_ER(16, A)                         }	// 9048
+OP(rol_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_16(DY);
+	CPU->flag_V = 0;
+	CPU->flag_C = src >> (8 - sft);
+	res = (src << sft) | (src >> (16 - sft));
+	CPU->flag_N = res >> 8;
+	CPU->flag_Z = res & 0xffff;
+	*(UINT16 *)(&DY) = res;
+	RET(6)
+}
+
+// e198
+OP(bne_16)             { Bcc_16(NE)                            }	// 6600
+OP(adda_16_a)          { ADDA(16, A)                           }	// 0448
+OP(suba_32_d)          { SUBA_RI32(D)                          }	// 0480
+OP(move_8_d_ix)        { MOVE(8, D,   IX)                      }	// 1030
+OP(bpl_16)             { Bcc_16(PL)                            }	// 6a00
+OP(movea_32_al)        { MOVEA(32, AL)                         }	// 2079
+OP(move_32_pi_pi)      { MOVE(32, PI,  PI)                     }	// 20d8
+OP(clr_16_di)          { CLR(16, M, DI)                        }	// 4268
+OP(bls_16)             { Bcc_16(LS)                            }	// 6300
+OP(jsr_32_al)          { JSR(AL)                               }	// 4eb9
+OP(muls_16_di)         { MULS(DI)                              }	// c1e8
+OP(move_32_pi_d)       { MOVE(32, PI,  D)                      }	// 20c0
+OP(bgt_16)             { Bcc_16(GT)                            }	// 6e00
+OP(add_16_er_al)       { ADD_ER(16, AL)                        }	// d079
+OP(cmpi_16_d)          { CMPI(16, D, D)                        }	// 0c40
+OP(addq_16_ai)         { ADDQ(16, M, AI)                       }	// 5050
+OP(move_32_al_a)       { MOVE(32, AL,  A)                      }	// 23c8
+
+OP(neg_16_d)           { NEG(16, D, D)                         }	// 4440
+OP(blt_8)              { Bcc_8(LT)                             }	// 6d01
+OP(subq_32_a)          { SUBQ_A(32)                            }	// 5188
+OP(bclr_8_s_al)        { BITOP_STATIC(CLR, 8, AL)              }	// 08b9
+OP(ext_16)             { EXT(8, 16)                            }	// 4880
+OP(clr_16_pi)          { CLR(16, M, PI)                        }	// 4258
+OP(cmpi_16_ai)         { CMPI(16, M, AI)                       }	// 0c50
+OP(lsr_32_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_32(DY);
+	CPU->flag_N = CPU->flag_V = 0;
+	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = src >> sft;
+	CPU->flag_Z = res;
+	*(UINT32 *)(&DY) = res;
+	RET(8)
+}
+
+// e010
+OP(movea_16_i)         { MOVEA(16, I)                          }	// 307c
+
+/******************************************************************************
+	OPCODE $4xxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  NEGX    Negate with Extend
+-----------------------------------------------------------------------------*/
+
+OP(cmp_32_i)           { CMP(32, I)                            }	// b0bc
+
+/*-----------------------------------------------------------------------------
+  CMPM    Compare Memory
+-----------------------------------------------------------------------------*/
+
+OP(clr_32_d)           { CLR(32, D, D)                         }	// 4280
+OP(tst_32_d)           { TST(32, D)                            }	// 4a80
+OP(movea_32_pcix)      { MOVEA(32, PCIX)                       }	// 207b
+OP(addq_16_di)         { ADDQ(16, M, DI)                       }	// 5068
+OP(exg_32_dd)          { EXG(D, D)                             }	// c140
+OP(bge_8)              { Bcc_8(GE)                             }	// 6c01
+OP(move_8_d_pi)        { MOVE(8, D,   PI)                      }	// 1018
+OP(movea_16_d)         { MOVEA(16, D)                          }	// 3040
+OP(movem_32_er_di)     { MOVEM_ER(32, DI)                      }	// 4ce8
+OP(or_16_er_i)         { OR_ER(16, I)                          }	// 807c
+
+OP(move_32_pd_di)      { MOVE(32, PD,  DI)                     }	// 2128
+OP(and_16_er_d)        { AND_ER(16, D)                         }	// c040
+OP(exg_32_da)          { EXG(D, A)                             }	// c188
+
+/******************************************************************************
+	OPCODE $Dxxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  ADD    Add
+-----------------------------------------------------------------------------*/
+
+OP(move_32_pd_pd)      { MOVE(32, PD,  PD)                     }	// 2120
+OP(pea_32_aw)          { PEA(AW)                               }	// 4878
+OP(tst_16_ai)          { TST(16, AI)                           }	// 4a50
+OP(and_8_er_d)         { AND_ER(8, D)                          }	// c000
+OP(jsr_32_ix)          { JSR(IX)                               }	// 4eb0
+OP(add_8_er_i)         { ADD_ER(8, I)                          }	// d03c
+OP(roxr_8_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_8(DY);
+	src |= (CPU->flag_X & C68K_SR_X) << 0;
+	res = (src >> sft) | (src << (9 - sft));
+	CPU->flag_X = CPU->flag_C = res >> 0;
+	CPU->flag_V = 0;
+	CPU->flag_N = res >> 0;
+	CPU->flag_Z = res & 0xff;
+	*(UINT8 *)(&DY) = res;
+	RET(6)
+}
+
+// e050
+OP(bgt_8)              { Bcc_8(GT)                             }	// 6e01
+OP(add_8_er_d)         { ADD_ER(8, D)                          }	// d000
+OP(btst_8_s_al)        { BITOP_STATIC(TST, 8, AL)              }	// 0839
+OP(ble_8)              { Bcc_8(LE)                             }	// 6f01
+
+OP(move_8_di_i)        { MOVE(8, DI,  I)                       }	// 117c
+OP(move_16_ix_ix)      { MOVE(16, IX,  IX)                     }	// 31b0
+OP(jmp_32_ai)          { JMP(AI)                               }	// 4ed0
+OP(cmp_16_ai)          { CMP(16, AI)                           }	// b050
+OP(pea_32_ix)          { PEA(IX)                               }	// 4870
+OP(exg_32_aa)          { EXG(A, A)                             }	// c148
+OP(move_32_d_di)       { MOVE(32, D,   DI)                     }	// 2028
+OP(move_16_tos_d)      { MOVE_TOS(D)                           }	// 46c0
+OP(ori_16_tos)         { LOGOP_TOS(|=)                         }	// 007c
+
+/*-----------------------------------------------------------------------------
+  ANDI    And Immediate
+-----------------------------------------------------------------------------*/
+
+OP(cmpi_8_d)           { CMPI(8, D, D)                         }	// 0c00
+OP(addq_32_a)          { ADDQ_A(32)                            }	// 5088
+OP(bset_8_s_al)        { BITOP_STATIC(SET, 8, AL)              }	// 08f9
+OP(adda_16_ix)         { ADDA(16, IX)                          }	// 0470
+OP(move_8_pi_d)        { MOVE(8, PI,  D)                       }	// 10c0
+OP(move_32_d_ix)       { MOVE(32, D,   IX)                     }	// 2030
+OP(bhi_16)             { Bcc_16(HI)                            }	// 6200
+OP(move_8_pi_pi)       { MOVE(8, PI,  PI)                      }	// 10d8
+OP(movea_32_ix)        { MOVEA(32, IX)                         }	// 2070
+OP(subq_16_al)         { SUBQ(16, M, AL)                       }	// 5179
+
+OP(move_32_di_a)       { MOVE(32, DI,  A)                      }	// 2148
+OP(move_8_d_al)        { MOVE(8, D,   AL)                      }	// 1039
+OP(move_16_pi_pd)      { MOVE(16, PI,  PD)                     }	// 30e0
+OP(move_16_frs_d)      { MOVE_FRS(D, D)                        }	// 40c0
+OP(sub_16_er_al)       { SUB_ER(16, AL)                        }	// 9079
+OP(subq_16_di)         { SUBQ(16, M, DI)                       }	// 5168
+OP(move_8_al_i)        { MOVE(8, AL,  I)                       }	// 13fc
+OP(asr_16_r)
+{
+	UINT32 sft;
+
+	sft = DX & 0x3f;
+	src = (INT32)(INT16)DY;
+	if (sft)
+	{
+		USE_CYCLES(sft << 1)
+		if (sft < 16)
+		{
+			CPU->flag_V = 0;
+			CPU->flag_X = CPU->flag_C = (src >> (sft - 1)) << C68K_SR_C_SFT;
+			res = ((INT32)src) >> sft;
+			CPU->flag_N = res >> 8;
+			CPU->flag_Z = res;
+			*(UINT16 *)(&DY) = res;
+			RET(6)
+		}
+
+		if (src & (1 << 15))
+		{
+			CPU->flag_N = C68K_SR_N;
+			CPU->flag_Z = 1;
+			CPU->flag_V = 0;
+			CPU->flag_C = C68K_SR_C;
+			CPU->flag_X = C68K_SR_X;
+			res = 0xffff;
+			*(UINT16 *)(&DY) = res;
+			RET(6)
+		}
+
+		CPU->flag_N = 0;
+		CPU->flag_Z = 0;
+		CPU->flag_V = 0;
+		CPU->flag_C = 0;
+		CPU->flag_X = 0;
+		res = 0;
+		*(UINT16 *)(&DY) = res;
+		RET(6)
+	}
+
+	CPU->flag_V = 0;
+	CPU->flag_C = 0;
+	CPU->flag_N = src >> 8;
+	CPU->flag_Z = src;
+	RET(6)
+}
+
+// e0a0
+OP(sne_8_d)            { Scc_D(NE)                             }	// 56c0
+OP(sub_16_er_di)       { SUB_ER(16, DI)                        }	// 9068
+OP(asl_16_r)
+{
+	UINT32 sft;
+
+	sft = DX & 0x3f;
+	src = READ_REG_16(DY);
+	if (sft)
+	{
+		USE_CYCLES(sft << 1)
+		if (sft < 16)
+		{
+			CPU->flag_X = CPU->flag_C = (src << sft) >> 8;
+			res = (src << sft) & 0xffff;
+			CPU->flag_N = res >> 8;
+			CPU->flag_Z = res;
+			*(UINT16 *)(&DY) = res;
+			CPU->flag_V = 0;
+			{
+				UINT32 msk = (((INT32)0x80000000) >> (sft + 16)) & 0xffff;
+				src &= msk;
+				if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
+			}
+			RET(6)
+		}
+
+		if (sft == 65536) CPU->flag_C = src << C68K_SR_C_SFT;
+		else CPU->flag_C = 0;
+		CPU->flag_X = CPU->flag_C;
+		CPU->flag_V = (src) ? C68K_SR_V : 0;
+		*(UINT16 *)(&DY) = 0;
+		CPU->flag_N = 0;
+		CPU->flag_Z = 0;
+		RET(6)
+	}
+
+	CPU->flag_V = 0;
+	CPU->flag_C = 0;
+	CPU->flag_N = src >> 8;
+	CPU->flag_Z = src;
+	RET(6)
+}
+
+// e1a0
+OP(movem_16_re_pd)     { MOVEM_RE_PD(16, Y)                    }	// 48a0
+OP(clr_32_di)          { CLR(32, M, DI)                        }	// 42a8
+OP(or_8_er_d)          { OR_ER(8, D)                           }	// 8000
+OP(move_16_ai_di)      { MOVE(16, AI,  DI)                     }	// 30a8
+OP(move_32_al_i)       { MOVE(32, AL,  I)                      }	// 23fc
+
+/*-----------------------------------------------------------------------------
+  MOVEA    Move Address
+-----------------------------------------------------------------------------*/
+
+OP(eori_8_al)          { EORI(8, M, AL)                        }	// 0a39
+OP(cmp_32_d)           { CMP(32, D)                            }	// b080
+OP(addq_8_d)           { ADDQ(8, D, D)                         }	// 5000
+OP(move_32_di_i)       { MOVE(32, DI,  I)                      }	// 217c
+OP(move_16_pd_i)       { MOVE(16, PD,  I)                      }	// 313c
+OP(move_8_ai_i)        { MOVE(8, AI,  I)                       }	// 10bc
+OP(not_16_d)           { NOT(16, D, D)                         }	// 4640
+OP(bcs_16)             { Bcc_16(CS)                            }	// 6500
+OP(cmp_32_a)           { CMP(32, A)                            }	// b088
+OP(move_8_di_di)       { MOVE(8, DI,  DI)                      }	// 1168
+OP(add_16_er_ix)       { ADD_ER(16, IX)                        }	// d070
+OP(clr_8_pi)           { CLR(8, M, PI)                         }	// 4218
+OP(movem_32_re_di)     { MOVEM_RE(32, DI)                      }	// 48e8
+OP(move_32_d_al)       { MOVE(32, D,   AL)                     }	// 2039
+OP(move_8_d_ai)        { MOVE(8, D,   AI)                      }	// 1010
+OP(move_32_ai_d)       { MOVE(32, AI,  D)                      }	// 2080
+OP(cmpi_8_al)          { CMPI(8, M, AL)                        }	// 0c39
+OP(subq_8_d)           { SUBQ(8, D, D)                         }	// 5100
+OP(move_32_di_di)      { MOVE(32, DI,  DI)                     }	// 2168
+OP(move_16_ix_d)       { MOVE(16, IX,  D)                      }	// 3180
+OP(move_8_al_pcix)     { MOVE(8, AL,  PCIX)                    }	// 13fb
+OP(eori_16_d)          { EORI(16, D, D)                        }	// 0a40
+OP(move_32_d_i)        { MOVE(32, D,   I)                      }	// 203c
+OP(cmp_16_di)          { CMP(16, DI)                           }	// b068
+OP(move_8_di_d)        { MOVE(8, DI,  D)                       }	// 1140
+OP(clr_16_al)          { CLR(16, M, AL)                        }	// 4279
+
+OP(movem_16_er_pi)     { MOVEM_ER_PI(16, Y)                    }	// 4c98
+OP(link_16)
+{
+	EA_AI(32, Y)
+	PUSH_32_F(adr)
+	AY = A7;
+	A7 += READSX_I(16, NA);
+	RET(16)
+}
+
+// 4e57
+OP(unlk_32)
+{
+	EA_AI(32, Y)
+	A7 = adr + 4;
+	AY = READ_MEM_32(adr);
+	RET(12)
+}
+
+// 4e5f
+OP(sub_16_er_ix)       { SUB_ER(16, IX)                        }	// 9070
+OP(movea_16_pi)        { MOVEA(16, PI)                         }	// 3058
+OP(mulu_16_i)          { MULU(I)                               }	// c0fc
+
+/*-----------------------------------------------------------------------------
+  MULS    Signed Multiply
+-----------------------------------------------------------------------------*/
+
+OP(move_8_al_ix)       { MOVE(8, AL,  IX)                      }	// 13f0
+OP(tst_8_ai)           { TST(8, AI)                            }	// 4a10
+OP(ror_16_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_16(DY);
+	CPU->flag_V = 0;
+	CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = (src >> sft) | (src << (16 - sft));
+	CPU->flag_N = res >> 8;
+	CPU->flag_Z = res & 0xffff;
+	*(UINT16 *)(&DY) = res;
+	RET(6)
+}
+
+// e098
+OP(sub_16_re_pi)       { SUB_RE(16, PI)                        }	// 9158
+OP(or_8_er_di)         { OR_ER(8, DI)                          }	// 8028
+OP(cmpi_8_ai)          { CMPI(8, M, AI)                        }	// 0c10
+OP(move_16_pi_i)       { MOVE(16, PI,  I)                      }	// 30fc
+OP(add_32_re_di)       { ADD_RE(32, DI)                        }	// d1a8
+OP(move_32_d_a)        { MOVE(32, D,   A)                      }	// 2008
+OP(bls_8)              { Bcc_8(LS)                             }	// 6301
+OP(mulu_16_di)         { MULU(DI)                              }	// c0e8
+OP(or_16_er_di)        { OR_ER(16, DI)                         }	// 8068
+OP(movea_16_ai)        { MOVEA(16, AI)                         }	// 3050
+OP(movea_32_i)         { MOVEA(32, I)                          }	// 207c
+
+/******************************************************************************
+	OPCODE $3xxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  MOVE    Move Data from Source to Destination
+-----------------------------------------------------------------------------*/
+
+OP(move_8_ix_d)        { MOVE(8, IX,  D)                       }	// 1180
+OP(cmpa_32_al)         { CMPA(32, AL)                          }	// b1f9
+OP(adda_16_al)         { ADDA(16, AL)                          }	// 0479
+OP(move_8_di_ix)       { MOVE(8, DI,  IX)                      }	// 1170
+OP(bcc_16)             { Bcc_16(CC)                            }	// 6400
+OP(movem_16_er_ai)     { MOVEM_ER(16, AI)                      }	// 4c90
+OP(movem_16_re_di)     { MOVEM_RE(16, DI)                      }	// 48a8
+OP(move_16_al_ix)      { MOVE(16, AL,  IX)                     }	// 33f0
+
+OP(move_16_d_pcix)     { MOVE(16, D,   PCIX)                   }	// 303b
+OP(move_8_d_d)         { MOVE(8, D,   D)                       }	// 1000
+OP(move_32_ai_a)       { MOVE(32, AI,  A)                      }	// 2088
+OP(move_32_al_d)       { MOVE(32, AL,  D)                      }	// 23c0
+
+OP(and_16_er_di)       { AND_ER(16, DI)                        }	// c068
+OP(movem_32_re_ai)     { MOVEM_RE(32, AI)                      }	// 48d0
+OP(addq_16_al)         { ADDQ(16, M, AL)                       }	// 5079
+
+OP(movem_16_er_di)     { MOVEM_ER(16, DI)                      }	// 4ca8
+OP(move_16_di_di)      { MOVE(16, DI,  DI)                     }	// 3168
+OP(add_32_er_a)        { ADD_ER_RI32(A)                        }	// d088
+OP(bset_32_s_d)        { BITOP_STATIC(SET, 32, D)              }	// 08c0
+OP(add_8_re_di)        { ADD_RE(8, DI)                         }	// d128
+OP(cmp_8_d)            { CMP(8, D)                             }	// b000
+OP(addq_8_di)          { ADDQ(8, M, DI)                        }	// 5028
+OP(tst_16_pi)          { TST(16, PI)                           }	// 4a58
+OP(cmp_16_ix)          { CMP(16, IX)                           }	// b070
+OP(cmpa_16_i)          { CMPA(16, I)                           }	// b0fc
+
+OP(ror_8_s)
+{
+	UINT32 sft;
+
+	sft = (((Opcode >> 9) - 1) & 7) + 1;
+	USE_CYCLES(sft << 1)
+	src = READ_REG_8(DY);
+	CPU->flag_V = 0;
+	CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
+	res = (src >> sft) | (src << (8 - sft));
+	CPU->flag_N = res >> 0;
+	CPU->flag_Z = res & 0xff;
+	*(UINT8 *)(&DY) = res;
+	RET(6)
+}
+
+// e058
+OP(move_32_pi_a)       { MOVE(32, PI,  A)                      }	// 20c8
+OP(move_8_di_pi7)      { MOVE(8, DI,  PI7)                     }	// 115f
+OP(cmpa_32_i)          { CMPA(32, I)                           }	// b1fc
+
+/******************************************************************************
+	OPCODE $Cxxx
+******************************************************************************/
+
+/*-----------------------------------------------------------------------------
+  AND    AND logical
+-----------------------------------------------------------------------------*/
+
+OP(andi_8_di)          { ANDI(8, M, DI)                        }	// 0228
+OP(move_8_pd7_di)      { MOVE(8, PD7, DI)                      }	// 1f28
+
+OP(subq_16_a)          { SUBQ_A(16)                            }	// 5148
+OP(add_16_re_ai)       { ADD_RE(16, AI)                        }	// d150
+OP(clr_32_ai)          { CLR(32, M, AI)                        }	// 4290
+OP(and_8_er_di)        { AND_ER(8, DI)                         }	// c028
+OP(move_16_ai_ai)      { MOVE(16, AI,  AI)                     }	// 3090
+OP(move_8_al_di)       { MOVE(8, AL,  DI)                      }	// 13e8
+OP(or_16_er_pcix)      { OR_ER(16, PCIX)                       }	// 807b
+OP(subq_8_di)          { SUBQ(8, M, DI)                        }	// 5128
+OP(clr_16_ai)          { CLR(16, M, AI)                        }	// 4250
+OP(move_32_ix_d)       { MOVE(32, IX,  D)                      }	// 2180
+OP(cmp_32_pi)          { CMP(32, PI)                           }	// b098
+
+#undef C68K_INL
+#define C68K_INL 1
+
 OP(ori_8_d)            { ORI(8, D, D)                          }	// 0000
 OP(ori_8_ai)           { ORI(8, M, AI)                         }	// 0010
 OP(ori_8_pi)           { ORI(8, M, PI)                         }	// 0018
@@ -44,24 +916,16 @@ OP(ori_32_aw)          { ORI(32, M, AW)                        }	// 00b8
 OP(ori_32_al)          { ORI(32, M, AL)                        }	// 00b9
 
 OP(ori_16_toc)         { LOGOP_TOC(|=)                         }	// 003c
-OP(ori_16_tos)         { LOGOP_TOS(|=)                         }	// 007c
-
-/*-----------------------------------------------------------------------------
-  ANDI    And Immediate
------------------------------------------------------------------------------*/
-
 OP(andi_8_d)           { ANDI(8, D, D)                         }	// 0200
 OP(andi_8_ai)          { ANDI(8, M, AI)                        }	// 0210
 OP(andi_8_pi)          { ANDI(8, M, PI)                        }	// 0218
 OP(andi_8_pd)          { ANDI(8, M, PD)                        }	// 0220
-OP(andi_8_di)          { ANDI(8, M, DI)                        }	// 0228
 OP(andi_8_ix)          { ANDI(8, M, IX)                        }	// 0230
 OP(andi_8_aw)          { ANDI(8, M, AW)                        }	// 0238
 OP(andi_8_al)          { ANDI(8, M, AL)                        }	// 0239
 OP(andi_8_pi7)         { ANDI(8, M, PI7)                       }	// 021f
 OP(andi_8_pd7)         { ANDI(8, M, PD7)                       }	// 0227
 
-OP(andi_16_d)          { ANDI(16, D, D)                        }	// 0240
 OP(andi_16_ai)         { ANDI(16, M, AI)                       }	// 0250
 OP(andi_16_pi)         { ANDI(16, M, PI)                       }	// 0258
 OP(andi_16_pd)         { ANDI(16, M, PD)                       }	// 0260
@@ -93,11 +957,9 @@ OP(eori_8_pd)          { EORI(8, M, PD)                        }	// 0a20
 OP(eori_8_di)          { EORI(8, M, DI)                        }	// 0a28
 OP(eori_8_ix)          { EORI(8, M, IX)                        }	// 0a30
 OP(eori_8_aw)          { EORI(8, M, AW)                        }	// 0a38
-OP(eori_8_al)          { EORI(8, M, AL)                        }	// 0a39
 OP(eori_8_pi7)         { EORI(8, M, PI7)                       }	// 0a1f
 OP(eori_8_pd7)         { EORI(8, M, PD7)                       }	// 0a27
 
-OP(eori_16_d)          { EORI(16, D, D)                        }	// 0a40
 OP(eori_16_ai)         { EORI(16, M, AI)                       }	// 0a50
 OP(eori_16_pi)         { EORI(16, M, PI)                       }	// 0a58
 OP(eori_16_pd)         { EORI(16, M, PD)                       }	// 0a60
@@ -188,22 +1050,16 @@ OP(addi_32_al)         { ADDI(32, M, AL)                       }	// 06b9
   CMPI    Compare Immediate
 -----------------------------------------------------------------------------*/
 
-OP(cmpi_8_d)           { CMPI(8, D, D)                         }	// 0c00
-OP(cmpi_8_ai)          { CMPI(8, M, AI)                        }	// 0c10
 OP(cmpi_8_pi)          { CMPI(8, M, PI)                        }	// 0c18
 OP(cmpi_8_pd)          { CMPI(8, M, PD)                        }	// 0c20
 OP(cmpi_8_di)          { CMPI(8, M, DI)                        }	// 0c28
 OP(cmpi_8_ix)          { CMPI(8, M, IX)                        }	// 0c30
 OP(cmpi_8_aw)          { CMPI(8, M, AW)                        }	// 0c38
-OP(cmpi_8_al)          { CMPI(8, M, AL)                        }	// 0c39
 OP(cmpi_8_pi7)         { CMPI(8, M, PI7)                       }	// 0c1f
 OP(cmpi_8_pd7)         { CMPI(8, M, PD7)                       }	// 0c27
 
-OP(cmpi_16_d)          { CMPI(16, D, D)                        }	// 0c40
-OP(cmpi_16_ai)         { CMPI(16, M, AI)                       }	// 0c50
 OP(cmpi_16_pi)         { CMPI(16, M, PI)                       }	// 0c58
 OP(cmpi_16_pd)         { CMPI(16, M, PD)                       }	// 0c60
-OP(cmpi_16_di)         { CMPI(16, M, DI)                       }	// 0c68
 OP(cmpi_16_ix)         { CMPI(16, M, IX)                       }	// 0c70
 OP(cmpi_16_aw)         { CMPI(16, M, AW)                       }	// 0c78
 OP(cmpi_16_al)         { CMPI(16, M, AL)                       }	// 0c79
@@ -224,14 +1080,11 @@ OP(cmpi_32_al)         { CMPI(32, M, AL)                       }	// 0cb9
   BSET    Test a Bit and Set
 -----------------------------------------------------------------------------*/
 
-OP(btst_32_s_d)        { BITOP_STATIC(TST, 32, D)              }	// 0800
 OP(btst_8_s_ai)        { BITOP_STATIC(TST, 8, AI)              }	// 0810
 OP(btst_8_s_pi)        { BITOP_STATIC(TST, 8, PI)              }	// 0818
 OP(btst_8_s_pd)        { BITOP_STATIC(TST, 8, PD)              }	// 0820
-OP(btst_8_s_di)        { BITOP_STATIC(TST, 8, DI)              }	// 0828
 OP(btst_8_s_ix)        { BITOP_STATIC(TST, 8, IX)              }	// 0830
 OP(btst_8_s_aw)        { BITOP_STATIC(TST, 8, AW)              }	// 0838
-OP(btst_8_s_al)        { BITOP_STATIC(TST, 8, AL)              }	// 0839
 OP(btst_8_s_pcdi)      { BITOP_STATIC(TST, 8, PCDI)            }	// 083a
 OP(btst_8_s_pcix)      { BITOP_STATIC(TST, 8, PCIX)            }	// 083b
 OP(btst_8_s_pi7)       { BITOP_STATIC(TST, 8, PI7)             }	// 081f
@@ -255,18 +1108,15 @@ OP(bclr_8_s_pd)        { BITOP_STATIC(CLR, 8, PD)              }	// 08a0
 OP(bclr_8_s_di)        { BITOP_STATIC(CLR, 8, DI)              }	// 08a8
 OP(bclr_8_s_ix)        { BITOP_STATIC(CLR, 8, IX)              }	// 08b0
 OP(bclr_8_s_aw)        { BITOP_STATIC(CLR, 8, AW)              }	// 08b8
-OP(bclr_8_s_al)        { BITOP_STATIC(CLR, 8, AL)              }	// 08b9
 OP(bclr_8_s_pi7)       { BITOP_STATIC(CLR, 8, PI7)             }	// 089f
 OP(bclr_8_s_pd7)       { BITOP_STATIC(CLR, 8, PD7)             }	// 08a7
 
-OP(bset_32_s_d)        { BITOP_STATIC(SET, 32, D)              }	// 08c0
 OP(bset_8_s_ai)        { BITOP_STATIC(SET, 8, AI)              }	// 08d0
 OP(bset_8_s_pi)        { BITOP_STATIC(SET, 8, PI)              }	// 08d8
 OP(bset_8_s_pd)        { BITOP_STATIC(SET, 8, PD)              }	// 08e0
 OP(bset_8_s_di)        { BITOP_STATIC(SET, 8, DI)              }	// 08e8
 OP(bset_8_s_ix)        { BITOP_STATIC(SET, 8, IX)              }	// 08f0
 OP(bset_8_s_aw)        { BITOP_STATIC(SET, 8, AW)              }	// 08f8
-OP(bset_8_s_al)        { BITOP_STATIC(SET, 8, AL)              }	// 08f9
 OP(bset_8_s_pi7)       { BITOP_STATIC(SET, 8, PI7)             }	// 08df
 OP(bset_8_s_pd7)       { BITOP_STATIC(SET, 8, PD7)             }	// 08e7
 
@@ -381,18 +1231,12 @@ OP(movep_32_re)
   MOVE    Move Data from Source to Destination
 -----------------------------------------------------------------------------*/
 
-OP(move_8_d_d)         { MOVE(8, D,   D)                       }	// 1000
 OP(move_8_ai_d)        { MOVE(8, AI,  D)                       }	// 1080
-OP(move_8_pi_d)        { MOVE(8, PI,  D)                       }	// 10c0
 OP(move_8_pd_d)        { MOVE(8, PD,  D)                       }	// 1100
-OP(move_8_di_d)        { MOVE(8, DI,  D)                       }	// 1140
-OP(move_8_ix_d)        { MOVE(8, IX,  D)                       }	// 1180
 OP(move_8_aw_d)        { MOVE(8, AW,  D)                       }	// 11c0
-OP(move_8_al_d)        { MOVE(8, AL,  D)                       }	// 13c0
 OP(move_8_pi7_d)       { MOVE(8, PI7, D)                       }	// 1ec0
 OP(move_8_pd7_d)       { MOVE(8, PD7, D)                       }	// 1f00
 
-OP(move_8_d_ai)        { MOVE(8, D,   AI)                      }	// 1010
 OP(move_8_ai_ai)       { MOVE(8, AI,  AI)                      }	// 1090
 OP(move_8_pi_ai)       { MOVE(8, PI,  AI)                      }	// 10d0
 OP(move_8_pd_ai)       { MOVE(8, PD,  AI)                      }	// 1110
@@ -403,9 +1247,7 @@ OP(move_8_al_ai)       { MOVE(8, AL,  AI)                      }	// 13d0
 OP(move_8_pi7_ai)      { MOVE(8, PI7, AI)                      }	// 1ed0
 OP(move_8_pd7_ai)      { MOVE(8, PD7, AI)                      }	// 1f10
 
-OP(move_8_d_pi)        { MOVE(8, D,   PI)                      }	// 1018
 OP(move_8_ai_pi)       { MOVE(8, AI,  PI)                      }	// 1098
-OP(move_8_pi_pi)       { MOVE(8, PI,  PI)                      }	// 10d8
 OP(move_8_pd_pi)       { MOVE(8, PD,  PI)                      }	// 1118
 OP(move_8_di_pi)       { MOVE(8, DI,  PI)                      }	// 1158
 OP(move_8_ix_pi)       { MOVE(8, IX,  PI)                      }	// 1198
@@ -425,25 +1267,17 @@ OP(move_8_al_pd)       { MOVE(8, AL,  PD)                      }	// 13e0
 OP(move_8_pi7_pd)      { MOVE(8, PI7, PD)                      }	// 1ee0
 OP(move_8_pd7_pd)      { MOVE(8, PD7, PD)                      }	// 1f20
 
-OP(move_8_d_di)        { MOVE(8, D,   DI)                      }	// 1028
 OP(move_8_ai_di)       { MOVE(8, AI,  DI)                      }	// 10a8
 OP(move_8_pi_di)       { MOVE(8, PI,  DI)                      }	// 10e8
 OP(move_8_pd_di)       { MOVE(8, PD,  DI)                      }	// 1128
-OP(move_8_di_di)       { MOVE(8, DI,  DI)                      }	// 1168
 OP(move_8_ix_di)       { MOVE(8, IX,  DI)                      }	// 11a8
 OP(move_8_aw_di)       { MOVE(8, AW,  DI)                      }	// 11e8
-OP(move_8_al_di)       { MOVE(8, AL,  DI)                      }	// 13e8
 OP(move_8_pi7_di)      { MOVE(8, PI7, DI)                      }	// 1ee8
-OP(move_8_pd7_di)      { MOVE(8, PD7, DI)                      }	// 1f28
-
-OP(move_8_d_ix)        { MOVE(8, D,   IX)                      }	// 1030
 OP(move_8_ai_ix)       { MOVE(8, AI,  IX)                      }	// 10b0
 OP(move_8_pi_ix)       { MOVE(8, PI,  IX)                      }	// 10f0
 OP(move_8_pd_ix)       { MOVE(8, PD,  IX)                      }	// 1130
-OP(move_8_di_ix)       { MOVE(8, DI,  IX)                      }	// 1170
 OP(move_8_ix_ix)       { MOVE(8, IX,  IX)                      }	// 11b0
 OP(move_8_aw_ix)       { MOVE(8, AW,  IX)                      }	// 11f0
-OP(move_8_al_ix)       { MOVE(8, AL,  IX)                      }	// 13f0
 OP(move_8_pi7_ix)      { MOVE(8, PI7, IX)                      }	// 1ef0
 OP(move_8_pd7_ix)      { MOVE(8, PD7, IX)                      }	// 1f30
 
@@ -458,7 +1292,6 @@ OP(move_8_al_aw)       { MOVE(8, AL,  AW)                      }	// 13f8
 OP(move_8_pi7_aw)      { MOVE(8, PI7, AW)                      }	// 1ef8
 OP(move_8_pd7_aw)      { MOVE(8, PD7, AW)                      }	// 1f38
 
-OP(move_8_d_al)        { MOVE(8, D,   AL)                      }	// 1039
 OP(move_8_ai_al)       { MOVE(8, AI,  AL)                      }	// 10b9
 OP(move_8_pi_al)       { MOVE(8, PI,  AL)                      }	// 10f9
 OP(move_8_pd_al)       { MOVE(8, PD,  AL)                      }	// 1139
@@ -487,18 +1320,14 @@ OP(move_8_pd_pcix)     { MOVE(8, PD,  PCIX)                    }	// 113b
 OP(move_8_di_pcix)     { MOVE(8, DI,  PCIX)                    }	// 117b
 OP(move_8_ix_pcix)     { MOVE(8, IX,  PCIX)                    }	// 11bb
 OP(move_8_aw_pcix)     { MOVE(8, AW,  PCIX)                    }	// 11fb
-OP(move_8_al_pcix)     { MOVE(8, AL,  PCIX)                    }	// 13fb
 OP(move_8_pi7_pcix)    { MOVE(8, PI7, PCIX)                    }	// 1efb
 OP(move_8_pd7_pcix)    { MOVE(8, PD7, PCIX)                    }	// 1f3b
 
 OP(move_8_d_i)         { MOVE(8, D,   I)                       }	// 103c
-OP(move_8_ai_i)        { MOVE(8, AI,  I)                       }	// 10bc
 OP(move_8_pi_i)        { MOVE(8, PI,  I)                       }	// 10fc
 OP(move_8_pd_i)        { MOVE(8, PD,  I)                       }	// 113c
-OP(move_8_di_i)        { MOVE(8, DI,  I)                       }	// 117c
 OP(move_8_ix_i)        { MOVE(8, IX,  I)                       }	// 11bc
 OP(move_8_aw_i)        { MOVE(8, AW,  I)                       }	// 11fc
-OP(move_8_al_i)        { MOVE(8, AL,  I)                       }	// 13fc
 OP(move_8_pi7_i)       { MOVE(8, PI7, I)                       }	// 1efc
 OP(move_8_pd7_i)       { MOVE(8, PD7, I)                       }	// 1f3c
 
@@ -506,7 +1335,6 @@ OP(move_8_d_pi7)       { MOVE(8, D,   PI7)                     }	// 101f
 OP(move_8_ai_pi7)      { MOVE(8, AI,  PI7)                     }	// 109f
 OP(move_8_pi_pi7)      { MOVE(8, PI,  PI7)                     }	// 10df
 OP(move_8_pd_pi7)      { MOVE(8, PD,  PI7)                     }	// 111f
-OP(move_8_di_pi7)      { MOVE(8, DI,  PI7)                     }	// 115f
 OP(move_8_ix_pi7)      { MOVE(8, IX,  PI7)                     }	// 119f
 OP(move_8_aw_pi7)      { MOVE(8, AW,  PI7)                     }	// 11df
 OP(move_8_al_pi7)      { MOVE(8, AL,  PI7)                     }	// 13df
@@ -532,25 +1360,9 @@ OP(move_8_pd7_pd7)     { MOVE(8, PD7, PD7)                     }	// 1f27
   MOVE    Move Data from Source to Destination
 -----------------------------------------------------------------------------*/
 
-OP(move_32_d_d)        { MOVE(32, D,   D)                      }	// 2000
-OP(move_32_ai_d)       { MOVE(32, AI,  D)                      }	// 2080
-OP(move_32_pi_d)       { MOVE(32, PI,  D)                      }	// 20c0
-OP(move_32_pd_d)       { MOVE(32, PD,  D)                      }	// 2100
-OP(move_32_di_d)       { MOVE(32, DI,  D)                      }	// 2140
-OP(move_32_ix_d)       { MOVE(32, IX,  D)                      }	// 2180
 OP(move_32_aw_d)       { MOVE(32, AW,  D)                      }	// 21c0
-OP(move_32_al_d)       { MOVE(32, AL,  D)                      }	// 23c0
-
-OP(move_32_d_a)        { MOVE(32, D,   A)                      }	// 2008
-OP(move_32_ai_a)       { MOVE(32, AI,  A)                      }	// 2088
-OP(move_32_pi_a)       { MOVE(32, PI,  A)                      }	// 20c8
-OP(move_32_pd_a)       { MOVE(32, PD,  A)                      }	// 2108
-OP(move_32_di_a)       { MOVE(32, DI,  A)                      }	// 2148
 OP(move_32_ix_a)       { MOVE(32, IX,  A)                      }	// 2188
 OP(move_32_aw_a)       { MOVE(32, AW,  A)                      }	// 21c8
-OP(move_32_al_a)       { MOVE(32, AL,  A)                      }	// 23c8
-
-OP(move_32_d_ai)       { MOVE(32, D,   AI)                     }	// 2010
 OP(move_32_ai_ai)      { MOVE(32, AI,  AI)                     }	// 2090
 OP(move_32_pi_ai)      { MOVE(32, PI,  AI)                     }	// 20d0
 OP(move_32_pd_ai)      { MOVE(32, PD,  AI)                     }	// 2110
@@ -559,9 +1371,7 @@ OP(move_32_ix_ai)      { MOVE(32, IX,  AI)                     }	// 2190
 OP(move_32_aw_ai)      { MOVE(32, AW,  AI)                     }	// 21d0
 OP(move_32_al_ai)      { MOVE(32, AL,  AI)                     }	// 23d0
 
-OP(move_32_d_pi)       { MOVE(32, D,   PI)                     }	// 2018
 OP(move_32_ai_pi)      { MOVE(32, AI,  PI)                     }	// 2098
-OP(move_32_pi_pi)      { MOVE(32, PI,  PI)                     }	// 20d8
 OP(move_32_pd_pi)      { MOVE(32, PD,  PI)                     }	// 2118
 OP(move_32_di_pi)      { MOVE(32, DI,  PI)                     }	// 2158
 OP(move_32_ix_pi)      { MOVE(32, IX,  PI)                     }	// 2198
@@ -571,22 +1381,17 @@ OP(move_32_al_pi)      { MOVE(32, AL,  PI)                     }	// 23d8
 OP(move_32_d_pd)       { MOVE(32, D,   PD)                     }	// 2020
 OP(move_32_ai_pd)      { MOVE(32, AI,  PD)                     }	// 20a0
 OP(move_32_pi_pd)      { MOVE(32, PI,  PD)                     }	// 20e0
-OP(move_32_pd_pd)      { MOVE(32, PD,  PD)                     }	// 2120
 OP(move_32_di_pd)      { MOVE(32, DI,  PD)                     }	// 2160
 OP(move_32_ix_pd)      { MOVE(32, IX,  PD)                     }	// 21a0
 OP(move_32_aw_pd)      { MOVE(32, AW,  PD)                     }	// 21e0
 OP(move_32_al_pd)      { MOVE(32, AL,  PD)                     }	// 23e0
 
-OP(move_32_d_di)       { MOVE(32, D,   DI)                     }	// 2028
 OP(move_32_ai_di)      { MOVE(32, AI,  DI)                     }	// 20a8
 OP(move_32_pi_di)      { MOVE(32, PI,  DI)                     }	// 20e8
-OP(move_32_pd_di)      { MOVE(32, PD,  DI)                     }	// 2128
-OP(move_32_di_di)      { MOVE(32, DI,  DI)                     }	// 2168
 OP(move_32_ix_di)      { MOVE(32, IX,  DI)                     }	// 21a8
 OP(move_32_aw_di)      { MOVE(32, AW,  DI)                     }	// 21e8
 OP(move_32_al_di)      { MOVE(32, AL,  DI)                     }	// 23e8
 
-OP(move_32_d_ix)       { MOVE(32, D,   IX)                     }	// 2030
 OP(move_32_ai_ix)      { MOVE(32, AI,  IX)                     }	// 20b0
 OP(move_32_pi_ix)      { MOVE(32, PI,  IX)                     }	// 20f0
 OP(move_32_pd_ix)      { MOVE(32, PD,  IX)                     }	// 2130
@@ -604,7 +1409,6 @@ OP(move_32_ix_aw)      { MOVE(32, IX,  AW)                     }	// 21b8
 OP(move_32_aw_aw)      { MOVE(32, AW,  AW)                     }	// 21f8
 OP(move_32_al_aw)      { MOVE(32, AL,  AW)                     }	// 23f8
 
-OP(move_32_d_al)       { MOVE(32, D,   AL)                     }	// 2039
 OP(move_32_ai_al)      { MOVE(32, AI,  AL)                     }	// 20b9
 OP(move_32_pi_al)      { MOVE(32, PI,  AL)                     }	// 20f9
 OP(move_32_pd_al)      { MOVE(32, PD,  AL)                     }	// 2139
@@ -631,50 +1435,14 @@ OP(move_32_ix_pcix)    { MOVE(32, IX,  PCIX)                   }	// 21bb
 OP(move_32_aw_pcix)    { MOVE(32, AW,  PCIX)                   }	// 21fb
 OP(move_32_al_pcix)    { MOVE(32, AL,  PCIX)                   }	// 23fb
 
-OP(move_32_d_i)        { MOVE(32, D,   I)                      }	// 203c
 OP(move_32_ai_i)       { MOVE(32, AI,  I)                      }	// 20bc
 OP(move_32_pi_i)       { MOVE(32, PI,  I)                      }	// 20fc
 OP(move_32_pd_i)       { MOVE(32, PD,  I)                      }	// 213c
-OP(move_32_di_i)       { MOVE(32, DI,  I)                      }	// 217c
 OP(move_32_ix_i)       { MOVE(32, IX,  I)                      }	// 21bc
 OP(move_32_aw_i)       { MOVE(32, AW,  I)                      }	// 21fc
-OP(move_32_al_i)       { MOVE(32, AL,  I)                      }	// 23fc
-
-/*-----------------------------------------------------------------------------
-  MOVEA    Move Address
------------------------------------------------------------------------------*/
-
-OP(movea_32_d)         { MOVEA(32, D)                          }	// 2040
-OP(movea_32_a)         { MOVEA(32, A)                          }	// 2048
-OP(movea_32_ai)        { MOVEA(32, AI)                         }	// 2050
-OP(movea_32_pi)        { MOVEA(32, PI)                         }	// 2058
 OP(movea_32_pd)        { MOVEA(32, PD)                         }	// 2060
-OP(movea_32_di)        { MOVEA(32, DI)                         }	// 2068
-OP(movea_32_ix)        { MOVEA(32, IX)                         }	// 2070
 OP(movea_32_aw)        { MOVEA(32, AW)                         }	// 2078
-OP(movea_32_al)        { MOVEA(32, AL)                         }	// 2079
-OP(movea_32_pcdi)      { MOVEA(32, PCDI)                       }	// 207a
-OP(movea_32_pcix)      { MOVEA(32, PCIX)                       }	// 207b
-OP(movea_32_i)         { MOVEA(32, I)                          }	// 207c
-
-/******************************************************************************
-	OPCODE $3xxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  MOVE    Move Data from Source to Destination
------------------------------------------------------------------------------*/
-
-OP(move_16_d_d)        { MOVE(16, D,   D)                      }	// 3000
-OP(move_16_ai_d)       { MOVE(16, AI,  D)                      }	// 3080
-OP(move_16_pi_d)       { MOVE(16, PI,  D)                      }	// 30c0
-OP(move_16_pd_d)       { MOVE(16, PD,  D)                      }	// 3100
-OP(move_16_di_d)       { MOVE(16, DI,  D)                      }	// 3140
-OP(move_16_ix_d)       { MOVE(16, IX,  D)                      }	// 3180
 OP(move_16_aw_d)       { MOVE(16, AW,  D)                      }	// 31c0
-OP(move_16_al_d)       { MOVE(16, AL,  D)                      }	// 33c0
-
-OP(move_16_d_a)        { MOVE(16, D,   A)                      }	// 3008
 OP(move_16_ai_a)       { MOVE(16, AI,  A)                      }	// 3088
 OP(move_16_pi_a)       { MOVE(16, PI,  A)                      }	// 30c8
 OP(move_16_pd_a)       { MOVE(16, PD,  A)                      }	// 3108
@@ -683,8 +1451,6 @@ OP(move_16_ix_a)       { MOVE(16, IX,  A)                      }	// 3188
 OP(move_16_aw_a)       { MOVE(16, AW,  A)                      }	// 31c8
 OP(move_16_al_a)       { MOVE(16, AL,  A)                      }	// 33c8
 
-OP(move_16_d_ai)       { MOVE(16, D,   AI)                     }	// 3010
-OP(move_16_ai_ai)      { MOVE(16, AI,  AI)                     }	// 3090
 OP(move_16_pi_ai)      { MOVE(16, PI,  AI)                     }	// 30d0
 OP(move_16_pd_ai)      { MOVE(16, PD,  AI)                     }	// 3110
 OP(move_16_di_ai)      { MOVE(16, DI,  AI)                     }	// 3150
@@ -692,7 +1458,6 @@ OP(move_16_ix_ai)      { MOVE(16, IX,  AI)                     }	// 3190
 OP(move_16_aw_ai)      { MOVE(16, AW,  AI)                     }	// 31d0
 OP(move_16_al_ai)      { MOVE(16, AL,  AI)                     }	// 33d0
 
-OP(move_16_d_pi)       { MOVE(16, D,   PI)                     }	// 3018
 OP(move_16_ai_pi)      { MOVE(16, AI,  PI)                     }	// 3098
 OP(move_16_pi_pi)      { MOVE(16, PI,  PI)                     }	// 30d8
 OP(move_16_pd_pi)      { MOVE(16, PD,  PI)                     }	// 3118
@@ -703,31 +1468,23 @@ OP(move_16_al_pi)      { MOVE(16, AL,  PI)                     }	// 33d8
 
 OP(move_16_d_pd)       { MOVE(16, D,   PD)                     }	// 3020
 OP(move_16_ai_pd)      { MOVE(16, AI,  PD)                     }	// 30a0
-OP(move_16_pi_pd)      { MOVE(16, PI,  PD)                     }	// 30e0
 OP(move_16_pd_pd)      { MOVE(16, PD,  PD)                     }	// 3120
 OP(move_16_di_pd)      { MOVE(16, DI,  PD)                     }	// 3160
 OP(move_16_ix_pd)      { MOVE(16, IX,  PD)                     }	// 31a0
 OP(move_16_aw_pd)      { MOVE(16, AW,  PD)                     }	// 31e0
 OP(move_16_al_pd)      { MOVE(16, AL,  PD)                     }	// 33e0
 
-OP(move_16_d_di)       { MOVE(16, D,   DI)                     }	// 3028
-OP(move_16_ai_di)      { MOVE(16, AI,  DI)                     }	// 30a8
 OP(move_16_pi_di)      { MOVE(16, PI,  DI)                     }	// 30e8
 OP(move_16_pd_di)      { MOVE(16, PD,  DI)                     }	// 3128
-OP(move_16_di_di)      { MOVE(16, DI,  DI)                     }	// 3168
 OP(move_16_ix_di)      { MOVE(16, IX,  DI)                     }	// 31a8
 OP(move_16_aw_di)      { MOVE(16, AW,  DI)                     }	// 31e8
 OP(move_16_al_di)      { MOVE(16, AL,  DI)                     }	// 33e8
 
-OP(move_16_d_ix)       { MOVE(16, D,   IX)                     }	// 3030
 OP(move_16_ai_ix)      { MOVE(16, AI,  IX)                     }	// 30b0
 OP(move_16_pi_ix)      { MOVE(16, PI,  IX)                     }	// 30f0
 OP(move_16_pd_ix)      { MOVE(16, PD,  IX)                     }	// 3130
 OP(move_16_di_ix)      { MOVE(16, DI,  IX)                     }	// 3170
-OP(move_16_ix_ix)      { MOVE(16, IX,  IX)                     }	// 31b0
 OP(move_16_aw_ix)      { MOVE(16, AW,  IX)                     }	// 31f0
-OP(move_16_al_ix)      { MOVE(16, AL,  IX)                     }	// 33f0
-
 OP(move_16_d_aw)       { MOVE(16, D,   AW)                     }	// 3038
 OP(move_16_ai_aw)      { MOVE(16, AI,  AW)                     }	// 30b8
 OP(move_16_pi_aw)      { MOVE(16, PI,  AW)                     }	// 30f8
@@ -737,7 +1494,6 @@ OP(move_16_ix_aw)      { MOVE(16, IX,  AW)                     }	// 31b8
 OP(move_16_aw_aw)      { MOVE(16, AW,  AW)                     }	// 31f8
 OP(move_16_al_aw)      { MOVE(16, AL,  AW)                     }	// 33f8
 
-OP(move_16_d_al)       { MOVE(16, D,   AL)                     }	// 3039
 OP(move_16_ai_al)      { MOVE(16, AI,  AL)                     }	// 30b9
 OP(move_16_pi_al)      { MOVE(16, PI,  AL)                     }	// 30f9
 OP(move_16_pd_al)      { MOVE(16, PD,  AL)                     }	// 3139
@@ -755,7 +1511,6 @@ OP(move_16_ix_pcdi)    { MOVE(16, IX,  PCDI)                   }	// 31ba
 OP(move_16_aw_pcdi)    { MOVE(16, AW,  PCDI)                   }	// 31fa
 OP(move_16_al_pcdi)    { MOVE(16, AL,  PCDI)                   }	// 33fa
 
-OP(move_16_d_pcix)     { MOVE(16, D,   PCIX)                   }	// 303b
 OP(move_16_ai_pcix)    { MOVE(16, AI,  PCIX)                   }	// 30bb
 OP(move_16_pi_pcix)    { MOVE(16, PI,  PCIX)                   }	// 30fb
 OP(move_16_pd_pcix)    { MOVE(16, PD,  PCIX)                   }	// 313b
@@ -764,40 +1519,16 @@ OP(move_16_ix_pcix)    { MOVE(16, IX,  PCIX)                   }	// 31bb
 OP(move_16_aw_pcix)    { MOVE(16, AW,  PCIX)                   }	// 31fb
 OP(move_16_al_pcix)    { MOVE(16, AL,  PCIX)                   }	// 33fb
 
-OP(move_16_d_i)        { MOVE(16, D,   I)                      }	// 303c
 OP(move_16_ai_i)       { MOVE(16, AI,  I)                      }	// 30bc
-OP(move_16_pi_i)       { MOVE(16, PI,  I)                      }	// 30fc
-OP(move_16_pd_i)       { MOVE(16, PD,  I)                      }	// 313c
-OP(move_16_di_i)       { MOVE(16, DI,  I)                      }	// 317c
 OP(move_16_ix_i)       { MOVE(16, IX,  I)                      }	// 31bc
 OP(move_16_aw_i)       { MOVE(16, AW,  I)                      }	// 31fc
-OP(move_16_al_i)       { MOVE(16, AL,  I)                      }	// 33fc
-
-/*-----------------------------------------------------------------------------
-  MOVEA    Move Address
------------------------------------------------------------------------------*/
-
-OP(movea_16_d)         { MOVEA(16, D)                          }	// 3040
 OP(movea_16_a)         { MOVEA(16, A)                          }	// 3048
-OP(movea_16_ai)        { MOVEA(16, AI)                         }	// 3050
-OP(movea_16_pi)        { MOVEA(16, PI)                         }	// 3058
 OP(movea_16_pd)        { MOVEA(16, PD)                         }	// 3060
 OP(movea_16_di)        { MOVEA(16, DI)                         }	// 3068
-OP(movea_16_ix)        { MOVEA(16, IX)                         }	// 3070
 OP(movea_16_aw)        { MOVEA(16, AW)                         }	// 3078
 OP(movea_16_al)        { MOVEA(16, AL)                         }	// 3079
 OP(movea_16_pcdi)      { MOVEA(16, PCDI)                       }	// 307a
 OP(movea_16_pcix)      { MOVEA(16, PCIX)                       }	// 307b
-OP(movea_16_i)         { MOVEA(16, I)                          }	// 307c
-
-/******************************************************************************
-	OPCODE $4xxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  NEGX    Negate with Extend
------------------------------------------------------------------------------*/
-
 OP(negx_8_d)           { NEGX(8, D, D)                         }	// 4000
 OP(negx_8_ai)          { NEGX(8, M, AI)                        }	// 4010
 OP(negx_8_pi)          { NEGX(8, M, PI)                        }	// 4018
@@ -833,7 +1564,6 @@ OP(negx_32_al)         { NEGX(32, M, AL)                       }	// 40b9
 
 OP(clr_8_d)            { CLR(8, D, D)                          }	// 4200
 OP(clr_8_ai)           { CLR(8, M, AI)                         }	// 4210
-OP(clr_8_pi)           { CLR(8, M, PI)                         }	// 4218
 OP(clr_8_pd)           { CLR(8, M, PD)                         }	// 4220
 OP(clr_8_di)           { CLR(8, M, DI)                         }	// 4228
 OP(clr_8_ix)           { CLR(8, M, IX)                         }	// 4230
@@ -842,20 +1572,11 @@ OP(clr_8_al)           { CLR(8, M, AL)                         }	// 4239
 OP(clr_8_pi7)          { CLR(8, M, PI7)                        }	// 421f
 OP(clr_8_pd7)          { CLR(8, M, PD7)                        }	// 4227
 
-OP(clr_16_d)           { CLR(16, D, D)                         }	// 4240
-OP(clr_16_ai)          { CLR(16, M, AI)                        }	// 4250
-OP(clr_16_pi)          { CLR(16, M, PI)                        }	// 4258
 OP(clr_16_pd)          { CLR(16, M, PD)                        }	// 4260
-OP(clr_16_di)          { CLR(16, M, DI)                        }	// 4268
 OP(clr_16_ix)          { CLR(16, M, IX)                        }	// 4270
 OP(clr_16_aw)          { CLR(16, M, AW)                        }	// 4278
-OP(clr_16_al)          { CLR(16, M, AL)                        }	// 4279
-
-OP(clr_32_d)           { CLR(32, D, D)                         }	// 4280
-OP(clr_32_ai)          { CLR(32, M, AI)                        }	// 4290
 OP(clr_32_pi)          { CLR(32, M, PI)                        }	// 4298
 OP(clr_32_pd)          { CLR(32, M, PD)                        }	// 42a0
-OP(clr_32_di)          { CLR(32, M, DI)                        }	// 42a8
 OP(clr_32_ix)          { CLR(32, M, IX)                        }	// 42b0
 OP(clr_32_aw)          { CLR(32, M, AW)                        }	// 42b8
 OP(clr_32_al)          { CLR(32, M, AL)                        }	// 42b9
@@ -875,7 +1596,6 @@ OP(neg_8_al)           { NEG(8, M, AL)                         }	// 4439
 OP(neg_8_pi7)          { NEG(8, M, PI7)                        }	// 441f
 OP(neg_8_pd7)          { NEG(8, M, PD7)                        }	// 4427
 
-OP(neg_16_d)           { NEG(16, D, D)                         }	// 4440
 OP(neg_16_ai)          { NEG(16, M, AI)                        }	// 4450
 OP(neg_16_pi)          { NEG(16, M, PI)                        }	// 4458
 OP(neg_16_pd)          { NEG(16, M, PD)                        }	// 4460
@@ -908,7 +1628,6 @@ OP(not_8_al)           { NOT(8, M, AL)                         }	// 4639
 OP(not_8_pi7)          { NOT(8, M, PI7)                        }	// 461f
 OP(not_8_pd7)          { NOT(8, M, PD7)                        }	// 4627
 
-OP(not_16_d)           { NOT(16, D, D)                         }	// 4640
 OP(not_16_ai)          { NOT(16, M, AI)                        }	// 4650
 OP(not_16_pi)          { NOT(16, M, PI)                        }	// 4658
 OP(not_16_pd)          { NOT(16, M, PD)                        }	// 4660
@@ -930,7 +1649,6 @@ OP(not_32_al)          { NOT(32, M, AL)                        }	// 46b9
   MOVE from SR    Move from the Status Register
 -----------------------------------------------------------------------------*/
 
-OP(move_16_frs_d)      { MOVE_FRS(D, D)                        }	// 40c0
 OP(move_16_frs_ai)     { MOVE_FRS(M, AI)                       }	// 40d0
 OP(move_16_frs_pi)     { MOVE_FRS(M, PI)                       }	// 40d8
 OP(move_16_frs_pd)     { MOVE_FRS(M, PD)                       }	// 40e0
@@ -959,7 +1677,6 @@ OP(move_16_toc_i)      { MOVE_TOC(I)                           }	// 44fc
   MOVE to SR    Move to the Status Register
 -----------------------------------------------------------------------------*/
 
-OP(move_16_tos_d)      { MOVE_TOS(D)                           }	// 46c0
 OP(move_16_tos_ai)     { MOVE_TOS(AI)                          }	// 46d0
 OP(move_16_tos_pi)     { MOVE_TOS(PI)                          }	// 46d8
 OP(move_16_tos_pd)     { MOVE_TOS(PD)                          }	// 46e0
@@ -992,8 +1709,6 @@ OP(nbcd_8_pd7)         { NBCD(M, PD7)                          }	// 4827
 
 OP(pea_32_ai)          { PEA(AI)                               }	// 4850
 OP(pea_32_di)          { PEA(DI)                               }	// 4868
-OP(pea_32_ix)          { PEA(IX)                               }	// 4870
-OP(pea_32_aw)          { PEA(AW)                               }	// 4878
 OP(pea_32_al)          { PEA(AL)                               }	// 4879
 OP(pea_32_pcdi)        { PEA(PCDI)                             }	// 487a
 OP(pea_32_pcix)        { PEA(PCIX)                             }	// 487b
@@ -1003,29 +1718,11 @@ OP(pea_32_pcix)        { PEA(PCIX)                             }	// 487b
 -----------------------------------------------------------------------------*/
 
 // 4840
-OP(swap_32)
-{
-	EA_READ_D(32, Y, res);
-	res = (res >> 16) | (res << 16);
-	FLAGS(32)
-	EA_WRITE_RESULT(32, D, Y)
-	RET(4)
-}
-
-/*-----------------------------------------------------------------------------
-  MOVEM    Move from Multiple Registers
------------------------------------------------------------------------------*/
-
 OP(movem_16_re_ai)     { MOVEM_RE(16, AI)                      }	// 4890
-OP(movem_16_re_pd)     { MOVEM_RE_PD(16, Y)                    }	// 48a0
-OP(movem_16_re_di)     { MOVEM_RE(16, DI)                      }	// 48a8
 OP(movem_16_re_ix)     { MOVEM_RE(16, IX)                      }	// 48b0
 OP(movem_16_re_aw)     { MOVEM_RE(16, AW)                      }	// 48b8
 OP(movem_16_re_al)     { MOVEM_RE(16, AL)                      }	// 48b9
 
-OP(movem_32_re_ai)     { MOVEM_RE(32, AI)                      }	// 48d0
-OP(movem_32_re_pd)     { MOVEM_RE_PD(32, Y)                    }	// 48e0
-OP(movem_32_re_di)     { MOVEM_RE(32, DI)                      }	// 48e8
 OP(movem_32_re_ix)     { MOVEM_RE(32, IX)                      }	// 48f0
 OP(movem_32_re_aw)     { MOVEM_RE(32, AW)                      }	// 48f8
 OP(movem_32_re_al)     { MOVEM_RE(32, AL)                      }	// 48f9
@@ -1034,34 +1731,17 @@ OP(movem_32_re_al)     { MOVEM_RE(32, AL)                      }	// 48f9
   EXT    Sign-Extend
 -----------------------------------------------------------------------------*/
 
-OP(ext_16)             { EXT(8, 16)                            }	// 4880
-OP(ext_32)             { EXT(16, 32)                           }	// 48c0
-
-/*-----------------------------------------------------------------------------
-  TST    Test an Operand
------------------------------------------------------------------------------*/
-
 OP(tst_8_d)            { TST(8, D)                             }	// 4a00
-OP(tst_8_ai)           { TST(8, AI)                            }	// 4a10
 OP(tst_8_pi)           { TST(8, PI)                            }	// 4a18
 OP(tst_8_pd)           { TST(8, PD)                            }	// 4a20
-OP(tst_8_di)           { TST(8, DI)                            }	// 4a28
 OP(tst_8_ix)           { TST(8, IX)                            }	// 4a30
 OP(tst_8_aw)           { TST(8, AW)                            }	// 4a38
-OP(tst_8_al)           { TST(8, AL)                            }	// 4a39
 OP(tst_8_pi7)          { TST(8, PI7)                           }	// 4a1f
 OP(tst_8_pd7)          { TST(8, PD7)                           }	// 4a27
 
-OP(tst_16_d)           { TST(16, D)                            }	// 4a40
-OP(tst_16_ai)          { TST(16, AI)                           }	// 4a50
-OP(tst_16_pi)          { TST(16, PI)                           }	// 4a58
 OP(tst_16_pd)          { TST(16, PD)                           }	// 4a60
-OP(tst_16_di)          { TST(16, DI)                           }	// 4a68
 OP(tst_16_ix)          { TST(16, IX)                           }	// 4a70
 OP(tst_16_aw)          { TST(16, AW)                           }	// 4a78
-OP(tst_16_al)          { TST(16, AL)                           }	// 4a79
-
-OP(tst_32_d)           { TST(32, D)                            }	// 4a80
 OP(tst_32_ai)          { TST(32, AI)                           }	// 4a90
 OP(tst_32_pi)          { TST(32, PI)                           }	// 4a98
 OP(tst_32_pd)          { TST(32, PD)                           }	// 4aa0
@@ -1102,9 +1782,6 @@ OP(illegal)
   MOVEM    Move to Multiple Registers
 -----------------------------------------------------------------------------*/
 
-OP(movem_16_er_ai)     { MOVEM_ER(16, AI)                      }	// 4c90
-OP(movem_16_er_pi)     { MOVEM_ER_PI(16, Y)                    }	// 4c98
-OP(movem_16_er_di)     { MOVEM_ER(16, DI)                      }	// 4ca8
 OP(movem_16_er_ix)     { MOVEM_ER(16, IX)                      }	// 4cb0
 OP(movem_16_er_aw)     { MOVEM_ER(16, AW)                      }	// 4cb8
 OP(movem_16_er_al)     { MOVEM_ER(16, AL)                      }	// 4cb9
@@ -1112,8 +1789,6 @@ OP(movem_16_er_pcdi)   { MOVEM_ER(16, PCDI)                    }	// 4cba
 OP(movem_16_er_pcix)   { MOVEM_ER(16, PCIX)                    }	// 4cbb
 
 OP(movem_32_er_ai)     { MOVEM_ER(32, AI)                      }	// 4cd0
-OP(movem_32_er_pi)     { MOVEM_ER_PI(32, Y)                    }	// 4cd8
-OP(movem_32_er_di)     { MOVEM_ER(32, DI)                      }	// 4ce8
 OP(movem_32_er_ix)     { MOVEM_ER(32, IX)                      }	// 4cf0
 OP(movem_32_er_aw)     { MOVEM_ER(32, AW)                      }	// 4cf8
 OP(movem_32_er_al)     { MOVEM_ER(32, AL)                      }	// 4cf9
@@ -1125,29 +1800,6 @@ OP(movem_32_er_pcix)   { MOVEM_ER(32, PCIX)                    }	// 4cfb
 -----------------------------------------------------------------------------*/
 
 // 4e40
-OP(trap)
-{
-	SWAP_SP()
-	res = C68K_TRAP_BASE_EX + (Opcode & 0x0f);
-	EXCEPTION(res)
-	RET(34)
-}
-
-/*-----------------------------------------------------------------------------
-  LINK    Link and Allocate
------------------------------------------------------------------------------*/
-
-// 4e50
-OP(link_16)
-{
-	EA_AI(32, Y)
-	PUSH_32_F(adr)
-	AY = A7;
-	A7 += READSX_I(16, NA);
-	RET(16)
-}
-
-// 4e57
 OP(link_16_a7)
 {
 	A7 -= 4;
@@ -1161,15 +1813,6 @@ OP(link_16_a7)
 -----------------------------------------------------------------------------*/
 
 // 4e58
-OP(unlk_32)
-{
-	EA_AI(32, Y)
-	A7 = adr + 4;
-	AY = READ_MEM_32(adr);
-	RET(12)
-}
-
-// 4e5f
 OP(unlk_32_a7)
 {
 	A7 = READ_MEM_32(A7);
@@ -1234,39 +1877,6 @@ OP(stop)
 -----------------------------------------------------------------------------*/
 
 // 4e73
-OP(rte_32)
-{
-	if (FLAG_S)
-	{
-		POP_16_F(res)
-		SET_SR(res)
-		POP_32_F(res)
-		SET_PC(res)
-		SWAP_SP()
-		RET_INT(20)
-	}
-	SWAP_SP_NOCHECK()
-	EXCEPTION(C68K_PRIVILEGE_VIOLATION_EX)
-	RET(34)
-}
-
-/*-----------------------------------------------------------------------------
-  RTS    Return from Subroutine
------------------------------------------------------------------------------*/
-
-// 4e75
-OP(rts_32)
-{
-	POP_32_F(res)
-	SET_PC(res)
-	RET(16)
-}
-
-/*-----------------------------------------------------------------------------
-  TRAPV    Trap on Overflow
------------------------------------------------------------------------------*/
-
-// 4e76
 OP(trapv)
 {
 	if (COND_VS())
@@ -1296,11 +1906,8 @@ OP(rtr_32)
   JSR    Jump to Subroutine
 -----------------------------------------------------------------------------*/
 
-OP(jsr_32_ai)          { JSR(AI)                               }	// 4e90
 OP(jsr_32_di)          { JSR(DI)                               }	// 4ea8
-OP(jsr_32_ix)          { JSR(IX)                               }	// 4eb0
 OP(jsr_32_aw)          { JSR(AW)                               }	// 4eb8
-OP(jsr_32_al)          { JSR(AL)                               }	// 4eb9
 OP(jsr_32_pcdi)        { JSR(PCDI)                             }	// 4eba
 OP(jsr_32_pcix)        { JSR(PCIX)                             }	// 4ebb
 
@@ -1308,18 +1915,11 @@ OP(jsr_32_pcix)        { JSR(PCIX)                             }	// 4ebb
   JMP    Jump
 -----------------------------------------------------------------------------*/
 
-OP(jmp_32_ai)          { JMP(AI)                               }	// 4ed0
 OP(jmp_32_di)          { JMP(DI)                               }	// 4ee8
 OP(jmp_32_ix)          { JMP(IX)                               }	// 4ef0
 OP(jmp_32_aw)          { JMP(AW)                               }	// 4ef8
 OP(jmp_32_al)          { JMP(AL)                               }	// 4ef9
 OP(jmp_32_pcdi)        { JMP(PCDI)                             }	// 4efa
-OP(jmp_32_pcix)        { JMP(PCIX)                             }	// 4efb
-
-/*-----------------------------------------------------------------------------
-  CHK    Check Register Against Bounds
------------------------------------------------------------------------------*/
-
 OP(chk_16_d)           { CHK(D)                                }	// 4180
 OP(chk_16_ai)          { CHK(AI)                               }	// 4190
 OP(chk_16_pi)          { CHK(PI)                               }	// 4198
@@ -1337,11 +1937,7 @@ OP(chk_16_i)           { CHK(I)                                }	// 41bc
 -----------------------------------------------------------------------------*/
 
 OP(lea_32_ai)          { LEA(AI)                               }	// 41d0
-OP(lea_32_di)          { LEA(DI)                               }	// 41e8
-OP(lea_32_ix)          { LEA(IX)                               }	// 41f0
 OP(lea_32_aw)          { LEA(AW)                               }	// 41f8
-OP(lea_32_al)          { LEA(AL)                               }	// 41f9
-OP(lea_32_pcdi)        { LEA(PCDI)                             }	// 41fa
 OP(lea_32_pcix)        { LEA(PCIX)                             }	// 41fb
 
 /******************************************************************************
@@ -1358,7 +1954,6 @@ OP(shi_8_d)            { Scc_D(HI)                             }	// 52c0
 OP(sls_8_d)            { Scc_D(LS)                             }	// 53c0
 OP(scc_8_d)            { Scc_D(CC)                             }	// 54c0
 OP(scs_8_d)            { Scc_D(CS)                             }	// 55c0
-OP(sne_8_d)            { Scc_D(NE)                             }	// 56c0
 OP(seq_8_d)            { Scc_D(EQ)                             }	// 57c0
 OP(svc_8_d)            { Scc_D(VC)                             }	// 58c0
 OP(svs_8_d)            { Scc_D(VS)                             }	// 59c0
@@ -1527,7 +2122,6 @@ OP(sle_8_pd7)          { Scc(PD7, LE)                          }	// 5fe7
 -----------------------------------------------------------------------------*/
 
 OP(dbt_16)             { DBT()                                 }	// 50c8
-OP(dbf_16)             { DBF()                                 }	// 51c8
 OP(dbhi_16)            { DBcc(HI)                              }	// 52c8
 OP(dbls_16)            { DBcc(LS)                              }	// 53c8
 OP(dbcc_16)            { DBcc(CC)                              }	// 54c8
@@ -1547,29 +2141,20 @@ OP(dble_16)            { DBcc(LE)                              }	// 5fc8
   ADDQ    Add Quick
 -----------------------------------------------------------------------------*/
 
-OP(addq_8_d)           { ADDQ(8, D, D)                         }	// 5000
 OP(addq_8_ai)          { ADDQ(8, M, AI)                        }	// 5010
 OP(addq_8_pi)          { ADDQ(8, M, PI)                        }	// 5018
 OP(addq_8_pd)          { ADDQ(8, M, PD)                        }	// 5020
-OP(addq_8_di)          { ADDQ(8, M, DI)                        }	// 5028
 OP(addq_8_ix)          { ADDQ(8, M, IX)                        }	// 5030
 OP(addq_8_aw)          { ADDQ(8, M, AW)                        }	// 5038
 OP(addq_8_al)          { ADDQ(8, M, AL)                        }	// 5039
 OP(addq_8_pi7)         { ADDQ(8, M, PI7)                       }	// 501f
 OP(addq_8_pd7)         { ADDQ(8, M, PD7)                       }	// 5027
 
-OP(addq_16_d)          { ADDQ(16, D, D)                        }	// 5040
-OP(addq_16_a)          { ADDQ_A(16)                            }	// 5048
-OP(addq_16_ai)         { ADDQ(16, M, AI)                       }	// 5050
 OP(addq_16_pi)         { ADDQ(16, M, PI)                       }	// 5058
 OP(addq_16_pd)         { ADDQ(16, M, PD)                       }	// 5060
-OP(addq_16_di)         { ADDQ(16, M, DI)                       }	// 5068
 OP(addq_16_ix)         { ADDQ(16, M, IX)                       }	// 5070
 OP(addq_16_aw)         { ADDQ(16, M, AW)                       }	// 5078
-OP(addq_16_al)         { ADDQ(16, M, AL)                       }	// 5079
-
 OP(addq_32_d)          { ADDQ(32, D, D)                        }	// 5080
-OP(addq_32_a)          { ADDQ_A(32)                            }	// 5088
 OP(addq_32_ai)         { ADDQ(32, M, AI)                       }	// 5090
 OP(addq_32_pi)         { ADDQ(32, M, PI)                       }	// 5098
 OP(addq_32_pd)         { ADDQ(32, M, PD)                       }	// 50a0
@@ -1582,29 +2167,20 @@ OP(addq_32_al)         { ADDQ(32, M, AL)                       }	// 50b9
   SUBQ    Subtract Quick
 -----------------------------------------------------------------------------*/
 
-OP(subq_8_d)           { SUBQ(8, D, D)                         }	// 5100
 OP(subq_8_ai)          { SUBQ(8, M, AI)                        }	// 5110
 OP(subq_8_pi)          { SUBQ(8, M, PI)                        }	// 5118
 OP(subq_8_pd)          { SUBQ(8, M, PD)                        }	// 5120
-OP(subq_8_di)          { SUBQ(8, M, DI)                        }	// 5128
 OP(subq_8_ix)          { SUBQ(8, M, IX)                        }	// 5130
 OP(subq_8_aw)          { SUBQ(8, M, AW)                        }	// 5138
 OP(subq_8_al)          { SUBQ(8, M, AL)                        }	// 5139
 OP(subq_8_pi7)         { SUBQ(8, M, PI7)                       }	// 511f
 OP(subq_8_pd7)         { SUBQ(8, M, PD7)                       }	// 5127
 
-OP(subq_16_d)          { SUBQ(16, D, D)                        }	// 5140
-OP(subq_16_a)          { SUBQ_A(16)                            }	// 5148
-OP(subq_16_ai)         { SUBQ(16, M, AI)                       }	// 5150
 OP(subq_16_pi)         { SUBQ(16, M, PI)                       }	// 5158
 OP(subq_16_pd)         { SUBQ(16, M, PD)                       }	// 5160
-OP(subq_16_di)         { SUBQ(16, M, DI)                       }	// 5168
 OP(subq_16_ix)         { SUBQ(16, M, IX)                       }	// 5170
 OP(subq_16_aw)         { SUBQ(16, M, AW)                       }	// 5178
-OP(subq_16_al)         { SUBQ(16, M, AL)                       }	// 5179
-
 OP(subq_32_d)          { SUBQ(32, D, D)                        }	// 5180
-OP(subq_32_a)          { SUBQ_A(32)                            }	// 5188
 OP(subq_32_ai)         { SUBQ(32, M, AI)                       }	// 5190
 OP(subq_32_pi)         { SUBQ(32, M, PI)                       }	// 5198
 OP(subq_32_pd)         { SUBQ(32, M, PD)                       }	// 51a0
@@ -1621,113 +2197,13 @@ OP(subq_32_al)         { SUBQ(32, M, AL)                       }	// 51b9
   Bcc    Branch Conditionally
 -----------------------------------------------------------------------------*/
 
-OP(bhi_8)              { Bcc_8(HI)                             }	// 6201
-OP(bls_8)              { Bcc_8(LS)                             }	// 6301
-OP(bcc_8)              { Bcc_8(CC)                             }	// 6401
-OP(bcs_8)              { Bcc_8(CS)                             }	// 6501
-OP(bne_8)              { Bcc_8(NE)                             }	// 6601
-OP(beq_8)              { Bcc_8(EQ)                             }	// 6701
 OP(bvc_8)              { Bcc_8(VC)                             }	// 6801
 OP(bvs_8)              { Bcc_8(VS)                             }	// 6901
-OP(bpl_8)              { Bcc_8(PL)                             }	// 6a01
-OP(bmi_8)              { Bcc_8(MI)                             }	// 6b01
-OP(bge_8)              { Bcc_8(GE)                             }	// 6c01
-OP(blt_8)              { Bcc_8(LT)                             }	// 6d01
-OP(bgt_8)              { Bcc_8(GT)                             }	// 6e01
-OP(ble_8)              { Bcc_8(LE)                             }	// 6f01
-
-OP(bhi_16)             { Bcc_16(HI)                            }	// 6200
-OP(bls_16)             { Bcc_16(LS)                            }	// 6300
-OP(bcc_16)             { Bcc_16(CC)                            }	// 6400
-OP(bcs_16)             { Bcc_16(CS)                            }	// 6500
-OP(bne_16)             { Bcc_16(NE)                            }	// 6600
-OP(beq_16)             { Bcc_16(EQ)                            }	// 6700
 OP(bvc_16)             { Bcc_16(VC)                            }	// 6800
 OP(bvs_16)             { Bcc_16(VS)                            }	// 6900
-OP(bpl_16)             { Bcc_16(PL)                            }	// 6a00
-OP(bmi_16)             { Bcc_16(MI)                            }	// 6b00
-OP(bge_16)             { Bcc_16(GE)                            }	// 6c00
-OP(blt_16)             { Bcc_16(LT)                            }	// 6d00
-OP(bgt_16)             { Bcc_16(GT)                            }	// 6e00
-OP(ble_16)             { Bcc_16(LE)                            }	// 6f00
-
-/*-----------------------------------------------------------------------------
-  BRA    Branch Always
------------------------------------------------------------------------------*/
-
-// 6001
-OP(bra_8)
-{
-	PC += (INT32)(INT8)Opcode;
-	RET(10)
-}
-
-// 6000
-OP(bra_16)
-{
-	PC += READSX_IMM_16();
-	ADJUST_PC()
-	SET_PC(PC)
-	RET(10)
-}
-
-/*-----------------------------------------------------------------------------
-  BSR    Branch to Subroutine
------------------------------------------------------------------------------*/
-
-// 6101
-OP(bsr_8)
-{
-	res = GET_PC();
-	PUSH_32_F(res)
-	PC += MAKE_INT_8(Opcode);
-	RET(18)
-}
-
-// 6100
-OP(bsr_16)
-{
-	res = READSX_IMM_16();
-	ADJUST_PC()
-	PUSH_32_F(PC + 2)
-	PC += res;
-	SET_PC(PC)
-	RET(18)
-}
-
-/******************************************************************************
-	OPCODE $7xxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  MOVEQ    Move Quick
------------------------------------------------------------------------------*/
-
-// 7000
-OP(moveq_32)
-{
-	res = MAKE_INT_8(Opcode);
-	FLAG_C = CFLAG_CLEAR;
-	FLAG_V = VFLAG_CLEAR;
-	FLAG_N = res;
-	FLAG_Z = res;
-	EA_WRITE_RESULT(32, D, X)
-	RET(4)
-}
-
-/******************************************************************************
-	OPCODE $8xxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  OR    inclusive-OR logical
------------------------------------------------------------------------------*/
-
-OP(or_8_er_d)          { OR_ER(8, D)                           }	// 8000
 OP(or_8_er_ai)         { OR_ER(8, AI)                          }	// 8010
 OP(or_8_er_pi)         { OR_ER(8, PI)                          }	// 8018
 OP(or_8_er_pd)         { OR_ER(8, PD)                          }	// 8020
-OP(or_8_er_di)         { OR_ER(8, DI)                          }	// 8028
 OP(or_8_er_ix)         { OR_ER(8, IX)                          }	// 8030
 OP(or_8_er_aw)         { OR_ER(8, AW)                          }	// 8038
 OP(or_8_er_al)         { OR_ER(8, AL)                          }	// 8039
@@ -1737,18 +2213,12 @@ OP(or_8_er_i)          { OR_ER(8, I)                           }	// 803c
 OP(or_8_er_pi7)        { OR_ER(8, PI7)                         }	// 801f
 OP(or_8_er_pd7)        { OR_ER(8, PD7)                         }	// 8027
 
-OP(or_16_er_d)         { OR_ER(16, D)                          }	// 8040
 OP(or_16_er_ai)        { OR_ER(16, AI)                         }	// 8050
 OP(or_16_er_pi)        { OR_ER(16, PI)                         }	// 8058
 OP(or_16_er_pd)        { OR_ER(16, PD)                         }	// 8060
-OP(or_16_er_di)        { OR_ER(16, DI)                         }	// 8068
-OP(or_16_er_ix)        { OR_ER(16, IX)                         }	// 8070
 OP(or_16_er_aw)        { OR_ER(16, AW)                         }	// 8078
 OP(or_16_er_al)        { OR_ER(16, AL)                         }	// 8079
 OP(or_16_er_pcdi)      { OR_ER(16, PCDI)                       }	// 807a
-OP(or_16_er_pcix)      { OR_ER(16, PCIX)                       }	// 807b
-OP(or_16_er_i)         { OR_ER(16, I)                          }	// 807c
-
 OP(or_32_er_d)         { OR_ER_RI32(D)                         }	// 8080
 OP(or_32_er_ai)        { OR_ER_RI32(AI)                        }	// 8090
 OP(or_32_er_pi)        { OR_ER(32, PI)                         }	// 8098
@@ -1817,7 +2287,6 @@ OP(divu_16_i)          { DIVU(I)                               }	// 80fc
   DIVS    Signed Divide
 -----------------------------------------------------------------------------*/
 
-OP(divs_16_d)          { DIVS(D)                               }	// 81c0
 OP(divs_16_ai)         { DIVS(AI)                              }	// 81d0
 OP(divs_16_pi)         { DIVS(PI)                              }	// 81d8
 OP(divs_16_pd)         { DIVS(PD)                              }	// 81e0
@@ -1851,20 +2320,12 @@ OP(sub_8_er_i)         { SUB_ER(8, I)                          }	// 903c
 OP(sub_8_er_pi7)       { SUB_ER(8, PI7)                        }	// 901f
 OP(sub_8_er_pd7)       { SUB_ER(8, PD7)                        }	// 9027
 
-OP(sub_16_er_d)        { SUB_ER(16, D)                         }	// 9040
-OP(sub_16_er_a)        { SUB_ER(16, A)                         }	// 9048
 OP(sub_16_er_ai)       { SUB_ER(16, AI)                        }	// 9050
 OP(sub_16_er_pi)       { SUB_ER(16, PI)                        }	// 9058
 OP(sub_16_er_pd)       { SUB_ER(16, PD)                        }	// 9060
-OP(sub_16_er_di)       { SUB_ER(16, DI)                        }	// 9068
-OP(sub_16_er_ix)       { SUB_ER(16, IX)                        }	// 9070
 OP(sub_16_er_aw)       { SUB_ER(16, AW)                        }	// 9078
-OP(sub_16_er_al)       { SUB_ER(16, AL)                        }	// 9079
 OP(sub_16_er_pcdi)     { SUB_ER(16, PCDI)                      }	// 907a
 OP(sub_16_er_pcix)     { SUB_ER(16, PCIX)                      }	// 907b
-OP(sub_16_er_i)        { SUB_ER(16, I)                         }	// 907c
-
-OP(sub_32_er_d)        { SUB_ER_RI32(D)                        }	// 9080
 OP(sub_32_er_a)        { SUB_ER_RI32(A)                        }	// 9088
 OP(sub_32_er_ai)       { SUB_ER(32, AI)                        }	// 9090
 OP(sub_32_er_pi)       { SUB_ER(32, PI)                        }	// 9098
@@ -1888,7 +2349,6 @@ OP(sub_8_re_pi7)       { SUB_RE(8, PI7)                        }	// 911f
 OP(sub_8_re_pd7)       { SUB_RE(8, PD7)                        }	// 9127
 
 OP(sub_16_re_ai)       { SUB_RE(16, AI)                        }	// 9150
-OP(sub_16_re_pi)       { SUB_RE(16, PI)                        }	// 9158
 OP(sub_16_re_pd)       { SUB_RE(16, PD)                        }	// 9160
 OP(sub_16_re_di)       { SUB_RE(16, DI)                        }	// 9168
 OP(sub_16_re_ix)       { SUB_RE(16, IX)                        }	// 9170
@@ -1936,8 +2396,6 @@ OP(suba_16_pcdi)       { SUBA(16, PCDI)                        }	// 047a
 OP(suba_16_pcix)       { SUBA(16, PCIX)                        }	// 047b
 OP(suba_16_i)          { SUBA(16, I)                           }	// 047c
 
-OP(suba_32_d)          { SUBA_RI32(D)                          }	// 0480
-OP(suba_32_a)          { SUBA_RI32(A)                          }	// 0488
 OP(suba_32_ai)         { SUBA(32, AI)                          }	// 0490
 OP(suba_32_pi)         { SUBA(32, PI)                          }	// 0498
 OP(suba_32_pd)         { SUBA(32, PD)                          }	// 04a0
@@ -1974,7 +2432,6 @@ OP(1010)
   CMP    Compare
 -----------------------------------------------------------------------------*/
 
-OP(cmp_8_d)            { CMP(8, D)                             }	// b000
 OP(cmp_8_ai)           { CMP(8, AI)                            }	// b010
 OP(cmp_8_pi)           { CMP(8, PI)                            }	// b018
 OP(cmp_8_pd)           { CMP(8, PD)                            }	// b020
@@ -1988,23 +2445,11 @@ OP(cmp_8_i)            { CMP(8, I)                             }	// b03c
 OP(cmp_8_pi7)          { CMP(8, PI7)                           }	// b01f
 OP(cmp_8_pd7)          { CMP(8, PD7)                           }	// b027
 
-OP(cmp_16_d)           { CMP(16, D)                            }	// b040
-OP(cmp_16_a)           { CMP(16, A)                            }	// b048
-OP(cmp_16_ai)          { CMP(16, AI)                           }	// b050
-OP(cmp_16_pi)          { CMP(16, PI)                           }	// b058
 OP(cmp_16_pd)          { CMP(16, PD)                           }	// b060
-OP(cmp_16_di)          { CMP(16, DI)                           }	// b068
-OP(cmp_16_ix)          { CMP(16, IX)                           }	// b070
 OP(cmp_16_aw)          { CMP(16, AW)                           }	// b078
 OP(cmp_16_al)          { CMP(16, AL)                           }	// b079
-OP(cmp_16_pcdi)        { CMP(16, PCDI)                         }	// b07a
 OP(cmp_16_pcix)        { CMP(16, PCIX)                         }	// b07b
-OP(cmp_16_i)           { CMP(16, I)                            }	// b07c
-
-OP(cmp_32_d)           { CMP(32, D)                            }	// b080
-OP(cmp_32_a)           { CMP(32, A)                            }	// b088
 OP(cmp_32_ai)          { CMP(32, AI)                           }	// b090
-OP(cmp_32_pi)          { CMP(32, PI)                           }	// b098
 OP(cmp_32_pd)          { CMP(32, PD)                           }	// b0a0
 OP(cmp_32_di)          { CMP(32, DI)                           }	// b0a8
 OP(cmp_32_ix)          { CMP(32, IX)                           }	// b0b0
@@ -2012,12 +2457,6 @@ OP(cmp_32_aw)          { CMP(32, AW)                           }	// b0b8
 OP(cmp_32_al)          { CMP(32, AL)                           }	// b0b9
 OP(cmp_32_pcdi)        { CMP(32, PCDI)                         }	// b0ba
 OP(cmp_32_pcix)        { CMP(32, PCIX)                         }	// b0bb
-OP(cmp_32_i)           { CMP(32, I)                            }	// b0bc
-
-/*-----------------------------------------------------------------------------
-  CMPM    Compare Memory
------------------------------------------------------------------------------*/
-
 OP(cmpm_8)             { CMPM(8,  PI, PI)                      }	// b108
 OP(cmpm_16)            { CMPM(16, PI, PI)                      }	// b148
 OP(cmpm_32)            { CMPM(32, PI, PI)                      }	// b188
@@ -2074,8 +2513,6 @@ OP(cmpa_16_aw)         { CMPA(16, AW)                          }	// b0f8
 OP(cmpa_16_al)         { CMPA(16, AL)                          }	// b0f9
 OP(cmpa_16_pcdi)       { CMPA(16, PCDI)                        }	// b0fa
 OP(cmpa_16_pcix)       { CMPA(16, PCIX)                        }	// b0fb
-OP(cmpa_16_i)          { CMPA(16, I)                           }	// b0fc
-
 OP(cmpa_32_d)          { CMPA(32, D)                           }	// b1c0
 OP(cmpa_32_a)          { CMPA(32, A)                           }	// b1c8
 OP(cmpa_32_ai)         { CMPA(32, AI)                          }	// b1d0
@@ -2084,24 +2521,11 @@ OP(cmpa_32_pd)         { CMPA(32, PD)                          }	// b1e0
 OP(cmpa_32_di)         { CMPA(32, DI)                          }	// b1e8
 OP(cmpa_32_ix)         { CMPA(32, IX)                          }	// b1f0
 OP(cmpa_32_aw)         { CMPA(32, AW)                          }	// b1f8
-OP(cmpa_32_al)         { CMPA(32, AL)                          }	// b1f9
 OP(cmpa_32_pcdi)       { CMPA(32, PCDI)                        }	// b1fa
 OP(cmpa_32_pcix)       { CMPA(32, PCIX)                        }	// b1fb
-OP(cmpa_32_i)          { CMPA(32, I)                           }	// b1fc
-
-/******************************************************************************
-	OPCODE $Cxxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  AND    AND logical
------------------------------------------------------------------------------*/
-
-OP(and_8_er_d)         { AND_ER(8, D)                          }	// c000
 OP(and_8_er_ai)        { AND_ER(8, AI)                         }	// c010
 OP(and_8_er_pi)        { AND_ER(8, PI)                         }	// c018
 OP(and_8_er_pd)        { AND_ER(8, PD)                         }	// c020
-OP(and_8_er_di)        { AND_ER(8, DI)                         }	// c028
 OP(and_8_er_ix)        { AND_ER(8, IX)                         }	// c030
 OP(and_8_er_aw)        { AND_ER(8, AW)                         }	// c038
 OP(and_8_er_al)        { AND_ER(8, AL)                         }	// c039
@@ -2111,18 +2535,14 @@ OP(and_8_er_i)         { AND_ER(8, I)                          }	// c03c
 OP(and_8_er_pi7)       { AND_ER(8, PI7)                        }	// c01f
 OP(and_8_er_pd7)       { AND_ER(8, PD7)                        }	// c027
 
-OP(and_16_er_d)        { AND_ER(16, D)                         }	// c040
 OP(and_16_er_ai)       { AND_ER(16, AI)                        }	// c050
 OP(and_16_er_pi)       { AND_ER(16, PI)                        }	// c058
 OP(and_16_er_pd)       { AND_ER(16, PD)                        }	// c060
-OP(and_16_er_di)       { AND_ER(16, DI)                        }	// c068
 OP(and_16_er_ix)       { AND_ER(16, IX)                        }	// c070
 OP(and_16_er_aw)       { AND_ER(16, AW)                        }	// c078
 OP(and_16_er_al)       { AND_ER(16, AL)                        }	// c079
 OP(and_16_er_pcdi)     { AND_ER(16, PCDI)                      }	// c07a
 OP(and_16_er_pcix)     { AND_ER(16, PCIX)                      }	// c07b
-OP(and_16_er_i)        { AND_ER(16, I)                         }	// c07c
-
 OP(and_32_er_d)        { AND_ER_RI32(D)                        }	// c080
 OP(and_32_er_ai)       { AND_ER(32, AI)                        }	// c090
 OP(and_32_er_pi)       { AND_ER(32, PI)                        }	// c098
@@ -2133,8 +2553,6 @@ OP(and_32_er_aw)       { AND_ER(32, AW)                        }	// c0b8
 OP(and_32_er_al)       { AND_ER(32, AL)                        }	// c0b9
 OP(and_32_er_pcdi)     { AND_ER(32, PCDI)                      }	// c0ba
 OP(and_32_er_pcix)     { AND_ER(32, PCIX)                      }	// c0bb
-OP(and_32_er_i)        { AND_ER_RI32(I)                        }	// c0bc
-
 OP(and_8_re_ai)        { AND_RE(8, AI)                         }	// c110
 OP(and_8_re_pi)        { AND_RE(8, PI)                         }	// c118
 OP(and_8_re_pd)        { AND_RE(8, PD)                         }	// c120
@@ -2179,47 +2597,19 @@ OP(mulu_16_d)          { MULU(D)                               }	// c0c0
 OP(mulu_16_ai)         { MULU(AI)                              }	// c0d0
 OP(mulu_16_pi)         { MULU(PI)                              }	// c0d8
 OP(mulu_16_pd)         { MULU(PD)                              }	// c0e0
-OP(mulu_16_di)         { MULU(DI)                              }	// c0e8
 OP(mulu_16_ix)         { MULU(IX)                              }	// c0f0
 OP(mulu_16_aw)         { MULU(AW)                              }	// c0f8
 OP(mulu_16_al)         { MULU(AL)                              }	// c0f9
 OP(mulu_16_pcdi)       { MULU(PCDI)                            }	// c0fa
 OP(mulu_16_pcix)       { MULU(PCIX)                            }	// c0fb
-OP(mulu_16_i)          { MULU(I)                               }	// c0fc
-
-/*-----------------------------------------------------------------------------
-  MULS    Signed Multiply
------------------------------------------------------------------------------*/
-
-OP(muls_16_d)          { MULS(D)                               }	// c1c0
 OP(muls_16_ai)         { MULS(AI)                              }	// c1d0
 OP(muls_16_pi)         { MULS(PI)                              }	// c1d8
 OP(muls_16_pd)         { MULS(PD)                              }	// c1e0
-OP(muls_16_di)         { MULS(DI)                              }	// c1e8
 OP(muls_16_ix)         { MULS(IX)                              }	// c1f0
 OP(muls_16_aw)         { MULS(AW)                              }	// c1f8
 OP(muls_16_al)         { MULS(AL)                              }	// c1f9
 OP(muls_16_pcdi)       { MULS(PCDI)                            }	// c1fa
 OP(muls_16_pcix)       { MULS(PCIX)                            }	// c1fb
-OP(muls_16_i)          { MULS(I)                               }	// c1fc
-
-/*-----------------------------------------------------------------------------
-  EXG    Exchange Registers
------------------------------------------------------------------------------*/
-
-OP(exg_32_dd)          { EXG(D, D)                             }	// c140
-OP(exg_32_aa)          { EXG(A, A)                             }	// c148
-OP(exg_32_da)          { EXG(D, A)                             }	// c188
-
-/******************************************************************************
-	OPCODE $Dxxx
-******************************************************************************/
-
-/*-----------------------------------------------------------------------------
-  ADD    Add
------------------------------------------------------------------------------*/
-
-OP(add_8_er_d)         { ADD_ER(8, D)                          }	// d000
 OP(add_8_er_ai)        { ADD_ER(8, AI)                         }	// d010
 OP(add_8_er_pi)        { ADD_ER(8, PI)                         }	// d018
 OP(add_8_er_pd)        { ADD_ER(8, PD)                         }	// d020
@@ -2229,50 +2619,33 @@ OP(add_8_er_aw)        { ADD_ER(8, AW)                         }	// d038
 OP(add_8_er_al)        { ADD_ER(8, AL)                         }	// d039
 OP(add_8_er_pcdi)      { ADD_ER(8, PCDI)                       }	// d03a
 OP(add_8_er_pcix)      { ADD_ER(8, PCIX)                       }	// d03b
-OP(add_8_er_i)         { ADD_ER(8, I)                          }	// d03c
 OP(add_8_er_pi7)       { ADD_ER(8, PI7)                        }	// d01f
 OP(add_8_er_pd7)       { ADD_ER(8, PD7)                        }	// d027
 
-OP(add_16_er_d)        { ADD_ER(16, D)                         }	// d040
-OP(add_16_er_a)        { ADD_ER(16, A)                         }	// d048
 OP(add_16_er_ai)       { ADD_ER(16, AI)                        }	// d050
 OP(add_16_er_pi)       { ADD_ER(16, PI)                        }	// d058
 OP(add_16_er_pd)       { ADD_ER(16, PD)                        }	// d060
-OP(add_16_er_di)       { ADD_ER(16, DI)                        }	// d068
-OP(add_16_er_ix)       { ADD_ER(16, IX)                        }	// d070
 OP(add_16_er_aw)       { ADD_ER(16, AW)                        }	// d078
-OP(add_16_er_al)       { ADD_ER(16, AL)                        }	// d079
 OP(add_16_er_pcdi)     { ADD_ER(16, PCDI)                      }	// d07a
 OP(add_16_er_pcix)     { ADD_ER(16, PCIX)                      }	// d07b
-OP(add_16_er_i)        { ADD_ER(16, I)                         }	// d07c
-
-OP(add_32_er_d)        { ADD_ER_RI32(D)                        }	// d080
-OP(add_32_er_a)        { ADD_ER_RI32(A)                        }	// d088
-OP(add_32_er_ai)       { ADD_ER(32, AI)                        }	// d090
 OP(add_32_er_pi)       { ADD_ER(32, PI)                        }	// d098
 OP(add_32_er_pd)       { ADD_ER(32, PD)                        }	// d0a0
-OP(add_32_er_di)       { ADD_ER(32, DI)                        }	// d0a8
 OP(add_32_er_ix)       { ADD_ER(32, IX)                        }	// d0b0
 OP(add_32_er_aw)       { ADD_ER(32, AW)                        }	// d0b8
 OP(add_32_er_al)       { ADD_ER(32, AL)                        }	// d0b9
 OP(add_32_er_pcdi)     { ADD_ER(32, PCDI)                      }	// d0ba
 OP(add_32_er_pcix)     { ADD_ER(32, PCIX)                      }	// d0bb
-OP(add_32_er_i)        { ADD_ER_RI32(I)                        }	// d0bc
-
 OP(add_8_re_ai)        { ADD_RE(8, AI)                         }	// d110
 OP(add_8_re_pi)        { ADD_RE(8, PI)                         }	// d118
 OP(add_8_re_pd)        { ADD_RE(8, PD)                         }	// d120
-OP(add_8_re_di)        { ADD_RE(8, DI)                         }	// d128
 OP(add_8_re_ix)        { ADD_RE(8, IX)                         }	// d130
 OP(add_8_re_aw)        { ADD_RE(8, AW)                         }	// d138
 OP(add_8_re_al)        { ADD_RE(8, AL)                         }	// d139
 OP(add_8_re_pi7)       { ADD_RE(8, PI7)                        }	// d11f
 OP(add_8_re_pd7)       { ADD_RE(8, PD7)                        }	// d127
 
-OP(add_16_re_ai)       { ADD_RE(16, AI)                        }	// d150
 OP(add_16_re_pi)       { ADD_RE(16, PI)                        }	// d158
 OP(add_16_re_pd)       { ADD_RE(16, PD)                        }	// d160
-OP(add_16_re_di)       { ADD_RE(16, DI)                        }	// d168
 OP(add_16_re_ix)       { ADD_RE(16, IX)                        }	// d170
 OP(add_16_re_aw)       { ADD_RE(16, AW)                        }	// d178
 OP(add_16_re_al)       { ADD_RE(16, AL)                        }	// d179
@@ -2280,7 +2653,6 @@ OP(add_16_re_al)       { ADD_RE(16, AL)                        }	// d179
 OP(add_32_re_ai)       { ADD_RE(32, AI)                        }	// d190
 OP(add_32_re_pi)       { ADD_RE(32, PI)                        }	// d198
 OP(add_32_re_pd)       { ADD_RE(32, PD)                        }	// d1a0
-OP(add_32_re_di)       { ADD_RE(32, DI)                        }	// d1a8
 OP(add_32_re_ix)       { ADD_RE(32, IX)                        }	// d1b0
 OP(add_32_re_aw)       { ADD_RE(32, AW)                        }	// d1b8
 OP(add_32_re_al)       { ADD_RE(32, AL)                        }	// d1b9
@@ -2305,21 +2677,13 @@ OP(addx_8_mm_axy7)     { ADDX(8,  M, PD7, PD7)                 }	// df0f
   ADDA    Add Address
 -----------------------------------------------------------------------------*/
 
-OP(adda_16_d)          { ADDA(16, D)                           }	// 0440
-OP(adda_16_a)          { ADDA(16, A)                           }	// 0448
 OP(adda_16_ai)         { ADDA(16, AI)                          }	// 0450
 OP(adda_16_pi)         { ADDA(16, PI)                          }	// 0458
 OP(adda_16_pd)         { ADDA(16, PD)                          }	// 0460
 OP(adda_16_di)         { ADDA(16, DI)                          }	// 0468
-OP(adda_16_ix)         { ADDA(16, IX)                          }	// 0470
 OP(adda_16_aw)         { ADDA(16, AW)                          }	// 0478
-OP(adda_16_al)         { ADDA(16, AL)                          }	// 0479
 OP(adda_16_pcdi)       { ADDA(16, PCDI)                        }	// 047a
 OP(adda_16_pcix)       { ADDA(16, PCIX)                        }	// 047b
-OP(adda_16_i)          { ADDA(16, I)                           }	// 047c
-
-OP(adda_32_d)          { ADDA_RI32(D)                          }	// 0480
-OP(adda_32_a)          { ADDA_RI32(A)                          }	// 0488
 OP(adda_32_ai)         { ADDA(32, AI)                          }	// 0490
 OP(adda_32_pi)         { ADDA(32, PI)                          }	// 0498
 OP(adda_32_pd)         { ADDA(32, PD)                          }	// 04a0
@@ -2329,13 +2693,6 @@ OP(adda_32_aw)         { ADDA(32, AW)                          }	// 04b8
 OP(adda_32_al)         { ADDA(32, AL)                          }	// 04b9
 OP(adda_32_pcdi)       { ADDA(32, PCDI)                        }	// 04ba
 OP(adda_32_pcix)       { ADDA(32, PCIX)                        }	// 04bb
-OP(adda_32_i)          { ADDA_RI32(I)                          }	// 04bc
-
-/******************************************************************************
-	OPCODE $Exxx
-******************************************************************************/
-
-// e000
 OP(asr_8_s)
 {
 	UINT32 sft;
@@ -2353,40 +2710,6 @@ OP(asr_8_s)
 }
 
 // e040
-OP(asr_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = (INT32)(INT16)DY;
-	CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = ((INT32)src) >> sft;
-	CPU->flag_N = res >> 8;
-	CPU->flag_Z = res;
-	*(UINT16 *)(&DY) = res;
-	RET(6)
-}
-
-// e080
-OP(asr_32_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = (INT32)DY;
-	CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = ((INT32)src) >> sft;
-	CPU->flag_N = res >> 24;
-	CPU->flag_Z = res;
-	*(UINT32 *)(&DY) = res;
-	RET(8)
-}
-
-// e008
 OP(lsr_8_s)
 {
 	UINT32 sft;
@@ -2403,56 +2726,6 @@ OP(lsr_8_s)
 }
 
 // e048
-OP(lsr_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_16(DY);
-	CPU->flag_N = CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = src >> sft;
-	CPU->flag_Z = res;
-	*(UINT16 *)(&DY) = res;
-	RET(6)
-}
-
-// e088
-OP(lsr_32_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_32(DY);
-	CPU->flag_N = CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = src >> sft;
-	CPU->flag_Z = res;
-	*(UINT32 *)(&DY) = res;
-	RET(8)
-}
-
-// e010
-OP(roxr_8_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_8(DY);
-	src |= (CPU->flag_X & C68K_SR_X) << 0;
-	res = (src >> sft) | (src << (9 - sft));
-	CPU->flag_X = CPU->flag_C = res >> 0;
-	CPU->flag_V = 0;
-	CPU->flag_N = res >> 0;
-	CPU->flag_Z = res & 0xff;
-	*(UINT8 *)(&DY) = res;
-	RET(6)
-}
-
-// e050
 OP(roxr_16_s)
 {
 	UINT32 sft;
@@ -2490,40 +2763,6 @@ OP(roxr_32_s)
 }
 
 // e018
-OP(ror_8_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_8(DY);
-	CPU->flag_V = 0;
-	CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = (src >> sft) | (src << (8 - sft));
-	CPU->flag_N = res >> 0;
-	CPU->flag_Z = res & 0xff;
-	*(UINT8 *)(&DY) = res;
-	RET(6)
-}
-
-// e058
-OP(ror_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_16(DY);
-	CPU->flag_V = 0;
-	CPU->flag_C = src << ((C68K_SR_C_SFT + 1) - sft);
-	res = (src >> sft) | (src << (16 - sft));
-	CPU->flag_N = res >> 8;
-	CPU->flag_Z = res & 0xffff;
-	*(UINT16 *)(&DY) = res;
-	RET(6)
-}
-
-// e098
 OP(ror_32_s)
 {
 	UINT32 sft;
@@ -2577,50 +2816,6 @@ OP(asl_8_s)
 }
 
 // e140
-OP(asl_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_16(DY);
-	CPU->flag_X = CPU->flag_C = src >> (8 - sft);
-	res = src << sft;
-	CPU->flag_N = res >> 8;
-	CPU->flag_Z = res & 0xffff;
-	*(UINT16 *)(&DY) = res;
-	CPU->flag_V = 0;
-	{
-		UINT32 msk = (((INT32)0x80000000) >> (sft + 16)) & 0xffff;
-		src &= msk;
-		if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
-	}
-	RET(6)
-}
-
-// e180
-OP(asl_32_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_32(DY);
-	CPU->flag_X = CPU->flag_C = src >> (24 - sft);
-	res = src << sft;
-	CPU->flag_N = res >> 24;
-	CPU->flag_Z = res;
-	*(UINT32 *)(&DY) = res;
-	CPU->flag_V = 0;
-	{
-		UINT32 msk = (((INT32)0x80000000) >> (sft + 0));
-		src &= msk;
-		if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
-	}
-	RET(8)
-}
-
-// e108
 OP(lsl_8_s)
 {
 	UINT32 sft;
@@ -2638,40 +2833,6 @@ OP(lsl_8_s)
 }
 
 // e148
-OP(lsl_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_16(DY);
-	CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src >> (8 - sft);
-	res = src << sft;
-	CPU->flag_N = res >> 8;
-	CPU->flag_Z = res & 0xffff;
-	*(UINT16 *)(&DY) = res;
-	RET(6)
-}
-
-// e188
-OP(lsl_32_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_32(DY);
-	CPU->flag_V = 0;
-	CPU->flag_X = CPU->flag_C = src >> (24 - sft);
-	res = src << sft;
-	CPU->flag_N = res >> 24;
-	CPU->flag_Z = res;
-	*(UINT32 *)(&DY) = res;
-	RET(8)
-}
-
-// e110
 OP(roxl_8_s)
 {
 	UINT32 sft;
@@ -2744,23 +2905,6 @@ OP(rol_8_s)
 }
 
 // e158
-OP(rol_16_s)
-{
-	UINT32 sft;
-
-	sft = (((Opcode >> 9) - 1) & 7) + 1;
-	USE_CYCLES(sft << 1)
-	src = READ_REG_16(DY);
-	CPU->flag_V = 0;
-	CPU->flag_C = src >> (8 - sft);
-	res = (src << sft) | (src >> (16 - sft));
-	CPU->flag_N = res >> 8;
-	CPU->flag_Z = res & 0xffff;
-	*(UINT16 *)(&DY) = res;
-	RET(6)
-}
-
-// e198
 OP(rol_32_s)
 {
 	UINT32 sft;
@@ -2828,56 +2972,6 @@ OP(asr_8_r)
 }
 
 // e060
-OP(asr_16_r)
-{
-	UINT32 sft;
-
-	sft = DX & 0x3f;
-	src = (INT32)(INT16)DY;
-	if (sft)
-	{
-		USE_CYCLES(sft << 1)
-		if (sft < 16)
-		{
-			CPU->flag_V = 0;
-			CPU->flag_X = CPU->flag_C = (src >> (sft - 1)) << C68K_SR_C_SFT;
-			res = ((INT32)src) >> sft;
-			CPU->flag_N = res >> 8;
-			CPU->flag_Z = res;
-			*(UINT16 *)(&DY) = res;
-			RET(6)
-		}
-
-		if (src & (1 << 15))
-		{
-			CPU->flag_N = C68K_SR_N;
-			CPU->flag_Z = 1;
-			CPU->flag_V = 0;
-			CPU->flag_C = C68K_SR_C;
-			CPU->flag_X = C68K_SR_X;
-			res = 0xffff;
-			*(UINT16 *)(&DY) = res;
-			RET(6)
-		}
-
-		CPU->flag_N = 0;
-		CPU->flag_Z = 0;
-		CPU->flag_V = 0;
-		CPU->flag_C = 0;
-		CPU->flag_X = 0;
-		res = 0;
-		*(UINT16 *)(&DY) = res;
-		RET(6)
-	}
-
-	CPU->flag_V = 0;
-	CPU->flag_C = 0;
-	CPU->flag_N = src >> 8;
-	CPU->flag_Z = src;
-	RET(6)
-}
-
-// e0a0
 OP(asr_32_r)
 {
 	UINT32 sft;
@@ -3257,92 +3351,6 @@ OP(asl_8_r)
 }
 
 // e160
-OP(asl_16_r)
-{
-	UINT32 sft;
-
-	sft = DX & 0x3f;
-	src = READ_REG_16(DY);
-	if (sft)
-	{
-		USE_CYCLES(sft << 1)
-		if (sft < 16)
-		{
-			CPU->flag_X = CPU->flag_C = (src << sft) >> 8;
-			res = (src << sft) & 0xffff;
-			CPU->flag_N = res >> 8;
-			CPU->flag_Z = res;
-			*(UINT16 *)(&DY) = res;
-			CPU->flag_V = 0;
-			{
-				UINT32 msk = (((INT32)0x80000000) >> (sft + 16)) & 0xffff;
-				src &= msk;
-				if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
-			}
-			RET(6)
-		}
-
-		if (sft == 65536) CPU->flag_C = src << C68K_SR_C_SFT;
-		else CPU->flag_C = 0;
-		CPU->flag_X = CPU->flag_C;
-		CPU->flag_V = (src) ? C68K_SR_V : 0;
-		*(UINT16 *)(&DY) = 0;
-		CPU->flag_N = 0;
-		CPU->flag_Z = 0;
-		RET(6)
-	}
-
-	CPU->flag_V = 0;
-	CPU->flag_C = 0;
-	CPU->flag_N = src >> 8;
-	CPU->flag_Z = src;
-	RET(6)
-}
-
-// e1a0
-OP(asl_32_r)
-{
-	UINT32 sft;
-
-	sft = DX & 0x3f;
-	src = READ_REG_32(DY);
-	if (sft)
-	{
-		USE_CYCLES(sft << 1)
-		if (sft < 32)
-		{
-			CPU->flag_X = CPU->flag_C = (src >> (32 - sft)) << C68K_SR_C_SFT;
-			res = src << sft;
-			CPU->flag_N = res >> 24;
-			CPU->flag_Z = res;
-			*(UINT32 *)(&DY) = res;
-			CPU->flag_V = 0;
-			{
-				UINT32 msk = (((INT32)0x80000000) >> (sft + 0));
-				src &= msk;
-				if ((src) && (src != msk)) CPU->flag_V = C68K_SR_V;
-			}
-			RET(8)
-		}
-
-		if (sft == 0) CPU->flag_C = src << C68K_SR_C_SFT;
-		else CPU->flag_C = 0;
-		CPU->flag_X = CPU->flag_C;
-		CPU->flag_V = (src) ? C68K_SR_V : 0;
-		*(UINT32 *)(&DY) = 0;
-		CPU->flag_N = 0;
-		CPU->flag_Z = 0;
-		RET(8)
-	}
-
-	CPU->flag_V = 0;
-	CPU->flag_C = 0;
-	CPU->flag_N = src >> 24;
-	CPU->flag_Z = src;
-	RET(8)
-}
-
-// e128
 OP(lsl_8_r)
 {
 	UINT32 sft;
@@ -3649,105 +3657,6 @@ OP(rol_32_r)
 	RET(8)
 }
 
-#if 0
-
-/*-----------------------------------------------------------------------------
-  ASR (EA)   Arithmetic Shift Right
------------------------------------------------------------------------------*/
-
-OP(asr_16_ai)          { ASR_EA(AI)                            }	// e0d0
-OP(asr_16_pi)          { ASR_EA(PI)                            }	// e0d8
-OP(asr_16_pd)          { ASR_EA(PD)                            }	// e0e0
-OP(asr_16_di)          { ASR_EA(DI)                            }	// e0e8
-OP(asr_16_ix)          { ASR_EA(IX)                            }	// e0f0
-OP(asr_16_aw)          { ASR_EA(AW)                            }	// e0f8
-OP(asr_16_al)          { ASR_EA(AL)                            }	// e0f9
-
-/*-----------------------------------------------------------------------------
-  LSR (EA)   Logical Shift Right
------------------------------------------------------------------------------*/
-
-OP(lsr_16_ai)          { LSR_EA(AI)                            }	// e2d0
-OP(lsr_16_pi)          { LSR_EA(PI)                            }	// e2d8
-OP(lsr_16_pd)          { LSR_EA(PD)                            }	// e2e0
-OP(lsr_16_di)          { LSR_EA(DI)                            }	// e2e8
-OP(lsr_16_ix)          { LSR_EA(IX)                            }	// e2f0
-OP(lsr_16_aw)          { LSR_EA(AW)                            }	// e2f8
-OP(lsr_16_al)          { LSR_EA(AL)                            }	// e2f9
-
-/*-----------------------------------------------------------------------------
-  ROXR (EA)   Rotate Right with Extend
------------------------------------------------------------------------------*/
-
-OP(roxr_16_ai)         { ROXR_EA(AI)                           }	// e4d0
-OP(roxr_16_pi)         { ROXR_EA(PI)                           }	// e4d8
-OP(roxr_16_pd)         { ROXR_EA(PD)                           }	// e4e0
-OP(roxr_16_di)         { ROXR_EA(DI)                           }	// e4e8
-OP(roxr_16_ix)         { ROXR_EA(IX)                           }	// e4f0
-OP(roxr_16_aw)         { ROXR_EA(AW)                           }	// e4f8
-OP(roxr_16_al)         { ROXR_EA(AL)                           }	// e4f9
-
-/*-----------------------------------------------------------------------------
-  ROR (EA)   Rotate Right
------------------------------------------------------------------------------*/
-
-OP(ror_16_ai)          { ROR_EA(AI)                            }	// e6d0
-OP(ror_16_pi)          { ROR_EA(PI)                            }	// e6d8
-OP(ror_16_pd)          { ROR_EA(PD)                            }	// e6e0
-OP(ror_16_di)          { ROR_EA(DI)                            }	// e6e8
-OP(ror_16_ix)          { ROR_EA(IX)                            }	// e6f0
-OP(ror_16_aw)          { ROR_EA(AW)                            }	// e6f8
-OP(ror_16_al)          { ROR_EA(AL)                            }	// e6f9
-
-/*-----------------------------------------------------------------------------
-  ASL (EA)   Arithmetic Shift Left
------------------------------------------------------------------------------*/
-
-OP(asl_16_ai)          { ASL_EA(AI)                            }	// e1d0
-OP(asl_16_pi)          { ASL_EA(PI)                            }	// e1d8
-OP(asl_16_pd)          { ASL_EA(PD)                            }	// e1e0
-OP(asl_16_di)          { ASL_EA(DI)                            }	// e1e8
-OP(asl_16_ix)          { ASL_EA(IX)                            }	// e1f0
-OP(asl_16_aw)          { ASL_EA(AW)                            }	// e1f8
-OP(asl_16_al)          { ASL_EA(AL)                            }	// e1f9
-
-/*-----------------------------------------------------------------------------
-  LSL (EA)   Logical Shift Left
------------------------------------------------------------------------------*/
-
-OP(lsl_16_ai)          { LSL_EA(AI)                            }	// e3d0
-OP(lsl_16_pi)          { LSL_EA(PI)                            }	// e3d8
-OP(lsl_16_pd)          { LSL_EA(PD)                            }	// e3e0
-OP(lsl_16_di)          { LSL_EA(DI)                            }	// e3e8
-OP(lsl_16_ix)          { LSL_EA(IX)                            }	// e3f0
-OP(lsl_16_aw)          { LSL_EA(AW)                            }	// e3f8
-OP(lsl_16_al)          { LSL_EA(AL)                            }	// e3f9
-
-/*-----------------------------------------------------------------------------
-  ROXL (EA)   Rotate Right with Extend
------------------------------------------------------------------------------*/
-
-OP(roxl_16_ai)         { ROXL_EA(AI)                           }	// e5d0
-OP(roxl_16_pi)         { ROXL_EA(PI)                           }	// e5d8
-OP(roxl_16_pd)         { ROXL_EA(PD)                           }	// e5e0
-OP(roxl_16_di)         { ROXL_EA(DI)                           }	// e5e8
-OP(roxl_16_ix)         { ROXL_EA(IX)                           }	// e5f0
-OP(roxl_16_aw)         { ROXL_EA(AW)                           }	// e5f8
-OP(roxl_16_al)         { ROXL_EA(AL)                           }	// e5f9
-
-/*-----------------------------------------------------------------------------
-  ROL (EA)   Rotate Left
------------------------------------------------------------------------------*/
-
-OP(rol_16_ai)          { ROL_EA(AI)                            }	// e7d0
-OP(rol_16_pi)          { ROL_EA(PI)                            }	// e7d8
-OP(rol_16_pd)          { ROL_EA(PD)                            }	// e7e0
-OP(rol_16_di)          { ROL_EA(DI)                            }	// e7e8
-OP(rol_16_ix)          { ROL_EA(IX)                            }	// e7f0
-OP(rol_16_aw)          { ROL_EA(AW)                            }	// e7f8
-OP(rol_16_al)          { ROL_EA(AL)                            }	// e7f9
-
-#else
 
 // e0d0
 OP(asr_16_ai)
@@ -4574,7 +4483,6 @@ OP(rol_16_al)
 	RET(20)
 }
 
-#endif
 
 /******************************************************************************
 	OPCODE $Fxxx
@@ -4592,6 +4500,11 @@ OP(1111)
 	EXCEPTION(C68K_1111_EX)
 	RET(34)
 }
+
+
+
+#undef C68K_INL
+#define C68K_INL 1
 
 #ifdef BUILD_NCDZPSP
 
