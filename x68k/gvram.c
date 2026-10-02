@@ -959,6 +959,9 @@ void GVRAM_Init(void)
 	int i;
 
 	ZeroMemory(GVRAM, 0x80000);
+#ifdef PSP
+	GE_GGenAll++;	/* the GE's copies (psp/gecomp.c) */
+#endif
 	for (i=0; i<128; i++)			// 16bit color パレットアドレス計算用
 	{
 		Pal16Adr[i*2] = i*4;
@@ -976,6 +979,9 @@ void FASTCALL GVRAM_FastClear(void)
 	DWORD v, h;
 
 	GE_GUARD_FULL(GE_ST_FASTCLR);
+#ifdef PSP
+	GE_GGenAll++;
+#endif
 	v = ((CRTC_Regs[0x29]&4)?512:256);
 	h = ((CRTC_Regs[0x29]&3)?512:256);
 	// やっぱちゃんと範囲指定しないと変になるものもある（ダイナマイトデュークとか）
@@ -1135,6 +1141,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD temp;
 
 	GE_GUARD_GVRAM(adr);
+	GE_GVRAM_TOUCH(adr);
 	adr ^= 1;
 	adr -= 0xc00000;
 

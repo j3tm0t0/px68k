@@ -33,11 +33,29 @@ extern int GE_PalDirty;		/* set by TVRAM_SetAllDirty: palettes/registers may hav
 
 /* windraw.c: draw the waiting bands now and wait until the GE is done */
 void WinDraw_GESync(void);
+/* windraw.c: wait until the GE is done (with what it was given) */
+void WinDraw_GEWait(void);
+/* windraw.c: hand the waiting bands to the GE without waiting (if GE_CanKick) */
+void WinDraw_GEKick(void);
+/* windraw.c: GE_Done() if the GE is done, without waiting */
+void WinDraw_GEPoll(void);
 
 void GE_GvramGuard(DWORD adr);	/* GVRAM_Write, its address */
 void GE_TvramGuard(DWORD adr);	/* TVRAM_Write, its address */
 void GE_SpriteGuard(void);	/* a sprite register changes */
 void GE_FullGuard(int why);	/* anything else: wait (why: GE_ST_*) */
+
+/*
+ * Generations of the GVRAM rows (16 colour 512 dot layout) and TextDrawWork
+ * rows, bumped by every write (the GE's copies of them in VRAM are only
+ * refreshed when they changed); *GenAll: all rows.
+ */
+extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
+#define GE_GVRAM_TOUCH(a)	do { if (CRTC_Regs[0x28] & 0x0f) GE_GGenAll++; \
+				     else GE_GRowGen[((a) >> 10) & 511]++; } while (0)
+#define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
+/* windraw.c: ScrBufL row y was written by the CPU */
+void GE_ScrRowWritten(DWORD y);
 
 #define GE_GUARD_GVRAM(a)	do { if (GE_Guard) GE_GvramGuard(a); } while (0)
 #define GE_GUARD_TVRAM(a)	do { if (GE_Guard) GE_TvramGuard(a); } while (0)
@@ -59,6 +77,10 @@ int GE_Pending(void);
  */
 void *GE_Build(void *fbp, int passes);
 int GE_Room(void);
+/* GE_Room, and no BG writes wait for the GE's lists: a list may be queued now */
+int GE_CanKick(void);
+/* list memory (64-byte aligned), for a direct list that calls a GE_Build list */
+void *GE_ListMem(int size);
 void GE_Done(void);
 
 /* GE_Render passes, in this order ("ge time" times them one by one) */
@@ -107,7 +129,8 @@ enum {
 	GE_ST_LINE_WAITS,	/* CPU lines that waited for the GE */
 	GE_ST_LINE_WAIT_US,	/* ... and how long */
 	GE_ST_DONE_US,		/* CPU time of GE_Done (queued BG writes) */
-	GE_ST_FRAMES,		/* frames shown */
+	GE_ST_BUILD_US,		/* + 0-4: CPU time of the build: CLUTs/setup, copy, layer, screen, D-cache */
+	GE_ST_FRAMES = GE_ST_BUILD_US + 5,	/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
 };
@@ -138,6 +161,8 @@ void GE_LogStats(void);
 #define GE_GUARD_TVRAM(a)	do { } while (0)
 #define GE_GUARD_SPRITE()	do { } while (0)
 #define GE_GUARD_FULL(why)	do { } while (0)
+#define GE_GVRAM_TOUCH(a)	do { } while (0)
+#define GE_TVRAM_TOUCH(a)	do { } while (0)
 
 #endif /* PSP */
 

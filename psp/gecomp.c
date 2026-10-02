@@ -38,6 +38,7 @@
  * dithering, no filtering, no blending.
  */
 
+#include <stddef.h>
 #include <string.h>
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -292,15 +293,23 @@ int GE_Pending(void)
  *     updated when the GE is done (queued meanwhile);
  *   sprite registers: copied for the waiting bands at the first write.
  * Anything else (fast clear, raster copy, other GVRAM layouts) waits.
+ *
+ * The masks of the waiting bands and of those handed to the GE are kept
+ * apart: a write that only hits the latter waits for the GE (if it is not
+ * done already) but does not draw the waiting bands, and the GE may still
+ * draw the last frame while the lines of this one are recorded.
  */
 
 static int ge_inflight;		/* bands handed to the GE, not done yet */
 static int ge_voff, ge_coff;	/* list memory used (see ge_mem) */
 static int ge_vneed;		/* ge_varena bytes the waiting bands may take */
 static int ge_bgfly;		/* ... and some of them read the BG patterns */
-static DWORD ge_grow[4][16], ge_gcol[4][16];	/* GVRAM rows/columns read, per page */
-static DWORD ge_trow[32], ge_tcol[4];		/* TextDrawWork rows, 8-dot columns read */
-static int ge_masks;		/* the masks above are not all 0 */
+typedef struct {
+	DWORD	grow[4][16], gcol[4][16];	/* GVRAM rows/columns read, per page */
+	DWORD	trow[32], tcol[4];		/* TextDrawWork rows, 8-dot columns read */
+	int	any;				/* not all 0 */
+} GE_Masks;
+static GE_Masks ge_mk[2];	/* 0: the waiting bands, 1: the bands handed to the GE */
 static int ge_bgpend;		/* waiting bands with BG/sprites */
 
 #define GE_BIT(m, i)	((m)[(i) >> 5] & (1u << ((i) & 31)))
@@ -322,13 +331,21 @@ static int ge_nq;
 
 unsigned GE_Stat[GE_ST_N];
 
-static void ge_clear_masks(void)
+/* the waiting bands were handed to the GE */
+static void ge_handed(void)
 {
-	memset(ge_grow, 0, sizeof(ge_grow));
-	memset(ge_gcol, 0, sizeof(ge_gcol));
-	memset(ge_trow, 0, sizeof(ge_trow));
-	memset(ge_tcol, 0, sizeof(ge_tcol));
-	ge_masks = 0;
+	GE_Masks *const w = &ge_mk[0], *const f = &ge_mk[1];
+
+	if (w->any) {
+		DWORD *d = &f->grow[0][0];
+		const DWORD *s = &w->grow[0][0];
+		int i;
+
+		for (i = 0; i < (int)(offsetof(GE_Masks, any) / sizeof(DWORD)); i++)
+			d[i] |= s[i];
+		f->any = 1;
+		memset(w, 0, sizeof(*w));
+	}
 	ge_bgpend = 0;
 	ge_usevalid = 0;
 	ge_nspr = 0;
@@ -342,6 +359,8 @@ void GE_Done(void)
 	ge_inflight = 0;
 	ge_bgfly = 0;
 	ge_voff = ge_coff = 0;	/* the GE is idle */
+	if (ge_mk[1].any)
+		memset(&ge_mk[1], 0, sizeof(ge_mk[1]));
 	if (ge_nq) {
 		const unsigned t0 = sceKernelGetSystemTimeLow();
 
@@ -350,21 +369,28 @@ void GE_Done(void)
 		ge_nq = 0;
 		GE_Stat[GE_ST_DONE_US] += sceKernelGetSystemTimeLow() - t0;
 	}
-	if (!ge_nband)
-		ge_clear_masks();
 	GE_Guard = ge_nband != 0;
 }
 
+/* draw the waiting bands and wait until the GE is done */
 static void ge_sync(int why)
 {
 	GE_Stat[why]++;
 	WinDraw_GESync();
 }
 
+/* wait until the GE is done (with the bands handed to it) */
+static void ge_wait(int why)
+{
+	GE_Stat[why]++;
+	WinDraw_GEWait();
+}
+
 /* the masks for line VLINE of band b (new: the band starts here) */
 static void ge_mark_line(const GE_Band *b, int new)
 {
 	const GE_State *s = &b->st;
+	GE_Masks *const m = &ge_mk[0];
 	int k, i;
 
 	if (s->mode == GE_G || s->mode == GE_GM) {
@@ -373,23 +399,23 @@ static void ge_mark_line(const GE_Band *b, int new)
 			const int row = (s->gy[p] + VLINE) & 511;
 			const int quirk = 511 - s->gx[p] < s->dotx;
 
-			GE_SET(ge_grow[p], row);
+			GE_SET(m->grow[p], row);
 			if (quirk)
-				GE_SET(ge_grow[p], (row - 1) & 511);
+				GE_SET(m->grow[p], (row - 1) & 511);
 			if (new) {
 				for (i = 0; i < s->dotx; i++)
-					GE_SET(ge_gcol[p], (s->gx[p] + i) & 511);
-				GE_SET(ge_gcol[p], 511);
+					GE_SET(m->gcol[p], (s->gx[p] + i) & 511);
+				GE_SET(m->gcol[p], 511);
 			}
 		}
-		ge_masks = 1;
+		m->any = 1;
 	}
 	if ((s->mode == GE_M || s->mode == GE_GM) && s->ton) {
-		GE_SET(ge_trow, (s->ty + VLINE) & 1023);
+		GE_SET(m->trow, (s->ty + VLINE) & 1023);
 		if (new)
 			for (i = s->tx >> 3; i <= (s->tx + s->dotx - 1) >> 3; i++)
-				GE_SET(ge_tcol, i);
-		ge_masks = 1;
+				GE_SET(m->tcol, i);
+		m->any = 1;
 	}
 	if ((s->mode == GE_M || s->mode == GE_GM) && s->bgon) {
 		ge_bgpend = 1;
@@ -401,8 +427,9 @@ void GE_GvramGuard(DWORD adr)
 {
 	const DWORD a = (adr ^ 1) - 0xc00000;
 	const int r28 = CRTC_Regs[0x28];
+	int k;
 
-	if (!ge_masks)
+	if (!ge_mk[0].any && !ge_mk[1].any)
 		return;
 	if ((r28 & 8) || (r28 & 7)) {
 		ge_sync(GE_ST_GVRAM_MODE);	/* not the 16 colour 512 dot layout */
@@ -410,18 +437,35 @@ void GE_GvramGuard(DWORD adr)
 	}
 	if (a & 1)
 		return;		/* not written in this mode */
-	{
+	for (k = 0; k < 2; k++) {
+		const GE_Masks *const m = &ge_mk[k];
 		const int p = (a >> 19) & 3, row = (a >> 10) & 511, col = (a >> 1) & 511;
 
-		if (GE_BIT(ge_grow[p], row) && GE_BIT(ge_gcol[p], col))
-			ge_sync(GE_ST_GVRAM);
+		if (m->any && GE_BIT(m->grow[p], row) && GE_BIT(m->gcol[p], col)) {
+			if (k == 0)
+				ge_sync(GE_ST_GVRAM);
+			else
+				ge_wait(GE_ST_GVRAM);
+			return;
+		}
 	}
 }
 
 void GE_TvramGuard(DWORD adr)
 {
-	if (ge_masks && GE_BIT(ge_trow, (adr >> 7) & 0x3ff) && GE_BIT(ge_tcol, adr & 0x7f))
-		ge_sync(GE_ST_TVRAM);
+	int k;
+
+	for (k = 0; k < 2; k++) {
+		const GE_Masks *const m = &ge_mk[k];
+
+		if (m->any && GE_BIT(m->trow, (adr >> 7) & 0x3ff) && GE_BIT(m->tcol, adr & 0x7f)) {
+			if (k == 0)
+				ge_sync(GE_ST_TVRAM);
+			else
+				ge_wait(GE_ST_TVRAM);
+			return;
+		}
+	}
 }
 
 void GE_FullGuard(int why)
@@ -461,8 +505,16 @@ void GE_BGData(DWORD adr, BYTE data)
 		if (!ge_usevalid)
 			ge_mark_bg();
 		if (GE_BIT(ge_usemap, adr >> 1) || GE_BIT(ge_use16, adr >> 7) ||
-		    (adr < 0x2000 && GE_BIT(ge_use8, adr >> 5)))
-			ge_sync(GE_ST_BG);
+		    (adr < 0x2000 && GE_BIT(ge_use8, adr >> 5))) {
+			/*
+			 * The CPU reads the maps when it builds the list, the GE
+			 * the pattern copies, which change once it is done: the
+			 * bands are handed to the GE, nobody waits (unless BG
+			 * writes are queued for the GE's last lists already).
+			 */
+			GE_Stat[GE_ST_BG]++;
+			WinDraw_GEKick();
+		}
 	}
 	if (ge_inflight && ge_bgfly) {
 		if (ge_nq == GE_NQ)
@@ -499,8 +551,8 @@ int GE_Line(void)
 		GE_Stat[GE_ST_CPU_REASON + r]++;
 		return 0;
 	}
-	if (ge_inflight)
-		ge_sync(GE_ST_INFLIGHT);	/* the last frame's bands: normally done long ago */
+	if (ge_inflight && !(VLINE & 15))
+		WinDraw_GEPoll();	/* done with the last frame? */
 	vb = ge_vband(&s);
 	vl = ge_vline(&s);
 	if (ge_nband == GE_NBAND || ge_vneed + vb + vl + GE_VPAL > GE_VARENA)
@@ -999,30 +1051,148 @@ static int ge_tcopy_x(const GE_State *s)	/* first dot copied, or -1 */
 	return (s->tx - ws) + s->dotx <= 512 ? ws : -1;
 }
 
+/* the 32-word columns of GVRAM words a .. e - 1, as bits */
+static unsigned ge_chunks(int a, int e)
+{
+	return ((1u << ((e + 31) >> 5)) - 1) & ~((1u << (a >> 5)) - 1);
+}
+
+/* the 32-word columns of the GVRAM rows the pages textured from the copy read (ge_grp) */
+static unsigned ge_gcopy_cols(const GE_State *s)
+{
+	unsigned m = 0;
+	int k;
+
+	for (k = 0; k < s->ng; k++) {
+		const int p = s->gpage[k];
+		const int x = s->gx[p];
+		int n1 = 511 - x;
+
+		if (!ge_gcopy_ok(s, p))
+			continue;
+		if (n1 > s->dotx)
+			n1 = s->dotx;
+		if (n1 > 0)
+			m |= ge_chunks(x, x + n1);
+		if (n1 + 1 < s->dotx)
+			m |= ge_chunks(0, s->dotx - n1 - 1);
+	}
+	return m;
+}
+
+/*
+ * What the copies hold, per row y: the source row, its generation (GE_GRowGen,
+ * GE_TRowGen, bumped by every write to it) and the columns copied.  The rows
+ * and columns that still hold what the band reads are not copied again: a
+ * still graphic or text screen is not copied at all, one that scrolls
+ * sideways only for the columns that come into view.  (A write between the
+ * build and the copy may leave a newer row than recorded: copied again.)
+ */
+DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
+
+typedef struct {
+	DWORD	gen, all;
+	WORD	src;
+	WORD	cols;		/* 32-word columns held, 0: nothing */
+} GE_GCopy;
+
+typedef struct {
+	DWORD	gen, all;
+	WORD	src, ws;	/* bytes ws .. ws + 2 * w - 1 of row src */
+	WORD	w;		/* 0: nothing */
+} GE_TCopy;
+
+static GE_GCopy ge_gc[256];
+static GE_TCopy ge_tc[256];
+
+void GE_ScrRowWritten(DWORD y)
+{
+	if (y >= 256 && y < 512)
+		ge_gc[y - 256].cols = 0;	/* the GVRAM copy's row */
+}
+
+/* the columns row y misses of need (bit 16: it holds nothing of row src) */
+static unsigned ge_gmiss(int y, int src, unsigned need)
+{
+	const GE_GCopy *g = &ge_gc[y];
+
+	if (g->cols && g->src == src && g->gen == GE_GRowGen[src] && g->all == GE_GGenAll)
+		return need & ~g->cols;
+	return need | 0x10000;
+}
+
+static int ge_tmiss(int y, int src, int ws, int w)
+{
+	const GE_TCopy *t = &ge_tc[y];
+
+	return !(t->w >= w && t->src == src && t->ws == ws && t->gen == GE_TRowGen[src] && t->all == GE_TGenAll);
+}
+
 static void ge_copy(const GE_Band *b)
 {
 	const GE_State *s = &b->st;
-	int i, row, n;
+	int i, k, n;
 
 	if ((s->mode == GE_G || s->mode == GE_GM) && ge_gcopy_ok(s, s->gpage[0])) {
+		/* the columns read only (a 256 dot screen reads half of them) */
+		const unsigned need = ge_gcopy_cols(s);
+		const int gy = s->gy[s->gpage[0]];
+
 		for (i = 0; i < b->h; i += n) {
-			row = (s->gy[s->gpage[0]] + b->y0 + i) & 511;
-			n = (512 - row < b->h - i) ? 512 - row : b->h - i;
-			sceGuCopyImage(GU_PSM_5650, 0, row, 512, n, 512, GVRAM, 0, b->y0 + i, 512, GE_VRAM(GE_GCOPY));
+			const int y = b->y0 + i, row = (gy + y) & 511;
+			const unsigned miss = ge_gmiss(y, row, need), m = miss & 0xffff;
+			int c0, c1;
+
+			/* the rows after it that miss the same, up to the wrap */
+			for (n = 1; i + n < b->h && row + n < 512 && ge_gmiss(y + n, row + n, need) == miss; n++)
+				;
+			for (k = 0; k < n; k++) {
+				GE_GCopy *g = &ge_gc[y + k];
+
+				g->cols = (miss & 0x10000) ? need : g->cols | need;
+				g->src = row + k;
+				g->gen = GE_GRowGen[row + k];
+				g->all = GE_GGenAll;
+			}
+			for (c0 = 0; c0 < 16; c0 = c1) {
+				if (!(m & (1u << c0))) {
+					c1 = c0 + 1;
+					continue;
+				}
+				for (c1 = c0 + 1; c1 < 16 && (m & (1u << c1)); c1++)
+					;
+				sceGuCopyImage(GU_PSM_5650, c0 * 32, row, (c1 - c0) * 32, n, 512, GVRAM,
+					       c0 * 32, y, 512, GE_VRAM(GE_GCOPY));
+				GE_Stat[GE_ST_COPY_BYTES] += n * (c1 - c0) * 64;
+			}
 		}
-		GE_Stat[GE_ST_COPY_BYTES] += b->h * 1024;
 	}
 	if ((s->mode == GE_M || s->mode == GE_GM) && s->ton && ge_tcopy_x(s) >= 0) {
 		const int ws = ge_tcopy_x(s);
+		/* the bytes read (ge_text): tx - ws .. tx - ws + dotx - 1, as 16-bit dots */
+		const int w = (s->tx - ws + s->dotx + 1) >> 1;
 
 		for (i = 0; i < b->h; i += n) {
-			row = (s->ty + b->y0 + i) & 1023;
-			n = (1024 - row < b->h - i) ? 1024 - row : b->h - i;
-			/* bytes copied as 16-bit dots */
-			sceGuCopyImage(GU_PSM_5650, ws / 2, row, 256, n, 512, TextDrawWork, 0, b->y0 + i, 256,
+			const int y = b->y0 + i, row = (s->ty + y) & 1023;
+			const int miss = ge_tmiss(y, row, ws, w);
+
+			for (n = 1; i + n < b->h && row + n < 1024 && ge_tmiss(y + n, row + n, ws, w) == miss; n++)
+				;
+			if (!miss)
+				continue;
+			for (k = 0; k < n; k++) {
+				GE_TCopy *t = &ge_tc[y + k];
+
+				t->src = row + k;
+				t->ws = ws;
+				t->w = w;
+				t->gen = GE_TRowGen[row + k];
+				t->all = GE_TGenAll;
+			}
+			sceGuCopyImage(GU_PSM_5650, ws / 2, row, w, n, 512, TextDrawWork, 0, y, 256,
 				       GE_VRAM(GE_TCOPY));
+			GE_Stat[GE_ST_COPY_BYTES] += n * w * 2;
 		}
-		GE_Stat[GE_ST_COPY_BYTES] += b->h * 512;
 	}
 }
 
@@ -1134,10 +1304,13 @@ static void GE_Render(void *fbp, int passes)
 {
 	unsigned int *tclut[GE_NPAL], *gclut[GE_NPAL];
 	const int dither = sceGuGetStatus(GU_DITHER);
+	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
 	int i, k;
 
 	if (!ge_nband)
 		return;
+#define GE_BUILD_TIME(n)	do { t1 = sceKernelGetSystemTimeLow(); \
+				     GE_Stat[GE_ST_BUILD_US + (n)] += t1 - t0; t0 = t1; } while (0)
 
 	/* CLUTs: alpha 0 for dot 0 (transparent where drawn so) */
 	for (i = 0; i < ge_npal; i++) {
@@ -1159,12 +1332,14 @@ static void GE_Render(void *fbp, int passes)
 	sceGuColorFunc(GU_NOTEQUAL, 0, 0xffffff);
 	sceGuDepthMask(GU_FALSE);	/* depth writes on (only with the test on) */
 	sceGuTexFlush();
+	GE_BUILD_TIME(0);
 
 	if (passes & GE_P_COPY) {
 		for (i = 0; i < ge_nband; i++)
 			ge_copy(&ge_band[i]);
 		sceGuTexSync();
 	}
+	GE_BUILD_TIME(1);
 
 	/*
 	 * The text/BG layers: per band the fill, then BG and text in the order
@@ -1198,6 +1373,7 @@ static void GE_Render(void *fbp, int passes)
 		sceGuTexSync();
 		sceGuTexFlush();
 	}
+	GE_BUILD_TIME(2);
 
 	/* the screen */
 	if (passes & (GE_P_GRP | GE_P_COMP)) {
@@ -1227,6 +1403,8 @@ static void GE_Render(void *fbp, int passes)
 			}
 		}
 	}
+	GE_BUILD_TIME(3);
+#undef GE_BUILD_TIME
 
 	/* back to what WinDraw_Draw expects */
 	sceGuDisable(GU_ALPHA_TEST);
@@ -1249,6 +1427,7 @@ static void GE_Render(void *fbp, int passes)
 	ge_nband = 0;
 	ge_npal = 0;
 	ge_vneed = 0;
+	ge_handed();
 	ge_inflight = 1;	/* until GE_Done() */
 	GE_Guard = 1;
 	GE_Stat[GE_ST_RENDERS]++;
@@ -1257,6 +1436,19 @@ static void GE_Render(void *fbp, int passes)
 int GE_Room(void)
 {
 	return ge_voff + ge_vneed <= GE_VARENA && ge_coff + ge_nband * GE_CBAND + GE_CFIXED <= GE_CLIST;
+}
+
+int GE_CanKick(void)
+{
+	return !ge_nq && GE_Room();
+}
+
+void *GE_ListMem(int size)
+{
+	unsigned int *l = ge_clist + ge_coff / 4;
+
+	ge_coff += (size + 63) & ~63;
+	return l;
 }
 
 void *GE_Build(void *fbp, int passes)
@@ -1295,10 +1487,12 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_RENDERS] / f, GE_Stat[GE_ST_RENDERS] * 100 / f % 100, GE_Stat[GE_ST_DRAWS] / f,
 		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
 		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
-	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us\n",
+	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us; "
+		   "build us: setup %u copy %u layer %u screen %u dcache %u\n",
 		   GE_Stat[GE_ST_FRAME_WAIT_US] / f, GE_Stat[GE_ST_LINE_WAITS] / f,
 		   GE_Stat[GE_ST_LINE_WAITS] * 100 / f % 100, GE_Stat[GE_ST_LINE_WAIT_US] / f,
-		   GE_Stat[GE_ST_DONE_US] / f);
+		   GE_Stat[GE_ST_DONE_US] / f, GE_Stat[GE_ST_BUILD_US] / f, GE_Stat[GE_ST_BUILD_US + 1] / f,
+		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f);
 	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
 		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,

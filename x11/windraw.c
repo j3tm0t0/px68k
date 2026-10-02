@@ -330,10 +330,12 @@ static unsigned psp_ge_wait(void)
  */
 static void *psp_ge_build(int passes)
 {
-	unsigned t0 = sceKernelGetSystemTimeLow();
+	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
 	void *l = GE_Build(psp_drawbuf, passes);
 
+	t1 = sceKernelGetSystemTimeLow();
 	sceKernelDcacheWritebackAll();
+	GE_Stat[GE_ST_BUILD_US + 4] += sceKernelGetSystemTimeLow() - t1;
 	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
 	return l;
 }
@@ -364,6 +366,44 @@ void WinDraw_GESync(void)
 		GE_Done();
 		GE_StatFlushes++;
 	}
+}
+
+/* wait until the GE is done with the lists it was given (not the waiting lines) */
+void WinDraw_GEWait(void)
+{
+	GE_Stat[GE_ST_WAIT_US] += psp_ge_wait();
+}
+
+/* if the GE is done with its lists, finish them (GE_Done) without waiting */
+void WinDraw_GEPoll(void)
+{
+	if (!psp_ge_busy || sceGuSync(0, 1) == 0)
+		psp_ge_wait();
+}
+
+/*
+ * Hand the lines waiting for the GE to it now, without waiting: their list
+ * is queued behind the GE's others, from a direct list of its own in the
+ * GE's list memory.  If that cannot be (GE_CanKick), as WinDraw_GESync.
+ */
+void WinDraw_GEKick(void)
+{
+	void *l, *d;
+
+	WinDraw_GEPoll();
+	if (!GE_Pending())
+		return;
+	if (!GE_CanKick()) {
+		WinDraw_GESync();
+		return;
+	}
+	l = psp_ge_build(GE_P_ALL);
+	d = GE_ListMem(64);
+	sceGuStart(GU_DIRECT, d);
+	sceGuCallList(l);
+	sceGuFinish();
+	psp_ge_busy = 1;
+	GE_StatFlushes++;
 }
 
 #endif // PSP
@@ -989,6 +1029,7 @@ static void psp_flush_line(void)
 	}
 	if (VLINE >= PSP_SCRBUF_ROWS)
 		return;		/* below the textures */
+	GE_ScrRowWritten(VLINE);	/* the GE's GVRAM copy may use the row */
 	psp_copy_line(ScrBufL + VLINE * 512, psp_line, (n > 512) ? 512 : n);
 	if (n > 512)
 		psp_copy_line(ScrBufR + VLINE * 256, psp_line + 512, n - 512);
