@@ -579,6 +579,14 @@ cpu_idle_read_byte(DWORD addr, UINT32 *v)
 		*v = MEM[a ^ 1];
 		return 1;
 	}
+	/*
+	 * MFP GPIP: what rm_main reads there (MemReadTable: MFP_Read), with no
+	 * side effect, the same until the CPU slice ends (see C68k_Idle_Loop)
+	 */
+	if (a == 0x00e88001 && !(BusErrFlag & 1)) {
+		*v = MFP_Read(a);
+		return 1;
+	}
 	return 0;
 }
 
