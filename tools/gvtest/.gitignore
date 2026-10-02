@@ -1,0 +1,11 @@
+old.c
+new.c
+harness
+orig_gvram.c
+*.o
+*.elf
+*.dis
+*.dylib
+py
+dbg.py
+__pycache__/
