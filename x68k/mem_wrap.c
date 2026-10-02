@@ -252,8 +252,16 @@ cpu_writemem24_word_slow(DWORD addr, WORD val)
 
 	BusErrFlag = 0;
 
-	wm_cnt(addr, (val >> 8) & 0xff);
-	wm_main(addr + 1, val & 0xff);
+	if ((addr & 0x00ffffff) - 0x00c00000 < 0x00200000) {
+		/*
+		 * GVRAM: what wm_cnt / wm_main do there (GVRAM_Write does not
+		 * touch BusErrFlag, so the low byte is always written)
+		 */
+		GVRAM_WriteWord(addr & 0x00ffffff, val);
+	} else {
+		wm_cnt(addr, (val >> 8) & 0xff);
+		wm_main(addr + 1, val & 0xff);
+	}
 
 	if (BusErrFlag & 2) {
 		Memory_ErrTrace();
@@ -508,7 +516,16 @@ cpu_readmem24_long(DWORD addr)
 static void FASTCALL NOINLINE
 cpu_writemem24_long_slow(DWORD addr, DWORD val)
 {
+	DWORD a = addr & 0x00ffffff;
 
+	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
+		/* both words in GVRAM: what the two cpu_writemem24_word do */
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		GVRAM_WriteWord(a, val >> 16);
+		GVRAM_WriteWord(a + 2, val);
+		return;
+	}
 	cpu_writemem24_word(addr, val >> 16);
 	cpu_writemem24_word(addr + 2, val);
 }
@@ -531,7 +548,16 @@ cpu_writemem24_long(DWORD addr, DWORD val)
 static void FASTCALL NOINLINE
 cpu_writemem24_long_pd_slow(DWORD addr, DWORD val)
 {
+	DWORD a = addr & 0x00ffffff;
 
+	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
+		/* both words in GVRAM (movem.l -(An) fills): as above */
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		GVRAM_WriteWord(a + 2, val);
+		GVRAM_WriteWord(a, val >> 16);
+		return;
+	}
 	cpu_writemem24_word(addr + 2, val);
 	cpu_writemem24_word(addr, val >> 16);
 }

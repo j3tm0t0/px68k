@@ -1253,6 +1253,51 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	}
 }
 
+/*
+ * A CPU word write (adr even, $c00000-$dfffff): the same as
+ * GVRAM_Write(adr, data >> 8) then GVRAM_Write(adr + 1, data & 0xff), as
+ * mem_wrap.c did, in one go (3D games fill GVRAM a word at a time).  The
+ * GE hooks once per word (gecomp.h): both bytes are in the same word, row
+ * and column.
+ */
+typedef WORD __attribute__((may_alias)) GVRAM_WORD;
+
+void FASTCALL GVRAM_WriteWord(DWORD adr, WORD data)
+{
+	DWORD a = adr - 0xc00000;	/* the low byte's offset; the high byte is at a + 1 */
+	const BYTE r28 = CRTC_Regs[0x28];
+
+	if ( (r28&8) || (r28&3)==3 ) {		/* 65536 colours: both bytes stored */
+		GE_GUARD_GVRAM(adr);
+		if ( a<0x80000 ) {
+#ifdef PSP
+			if ( *(GVRAM_WORD *)&GVRAM[a]!=data ) {
+				*(GVRAM_WORD *)&GVRAM[a] = data;
+				GE_GVRAM_ROW(a);
+			}
+#else
+			*(GVRAM_WORD *)&GVRAM[a] = data;
+#endif
+			if ( !(r28&8) )
+				TextDirtyLine[((a>>10)-GrphScrollY[0])&511] = 1;
+		} else if ( !(r28&8) )
+			TextDirtyLine[1023] = 1;
+		return;
+	}
+	if ( !(r28&4) ) {
+		/*
+		 * 16 / 256 colours, 512 dots: the high byte (odd offset in
+		 * GVRAM_Write) is not stored, only line 1023 is marked; its
+		 * guard does nothing (odd offset).
+		 */
+		TextDirtyLine[1023] = 1;
+		GVRAM_Write(adr + 1, (BYTE)data);
+		return;
+	}
+	GVRAM_Write(adr, (BYTE)(data >> 8));
+	GVRAM_Write(adr + 1, (BYTE)data);
+}
+
 
 // -----------------------------------------------------------------------
 //   こっから後はライン単位での画面展開部
