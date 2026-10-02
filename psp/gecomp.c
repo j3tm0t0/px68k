@@ -122,6 +122,9 @@ typedef struct {
 	BYTE	pal;		/* palette snapshot */
 	BYTE	spr;		/* sprite register snapshot, GE_LIVE: Sprite_Regs */
 	BYTE	gm;		/* graphics: 0 16 colours (gpage: 4-bit pages), 1 256 colours (bytes), 2 65536 */
+	BYTE	prio;		/* GE_GM, graphics between text and BG: see ge_prio */
+	BYTE	pbefore;	/* ... the layer is drawn (opaque) before the graphics */
+	BYTE	pafter;		/* ... and after them where: 1 text dot, 2 BG/sprite dot (flags), 4 not 0 */
 	WORD	dotx;
 	WORD	gx[4], gy[4];	/* graphic scroll, & 511 */
 	WORD	tx, ty;		/* text scroll, & 1023 */
@@ -156,7 +159,7 @@ static int ge_eval(GE_State *s)
 {
 	const int v1 = VCReg1[0], v11 = VCReg1[1], v21 = VCReg2[1];
 	int gp, tp, sp, text_on, bg_on, ton, bgon, gon, tdrawed = 0;
-	int nops = 0, gfirst = 0, mseen = 0, mfull = 0, bad = 0;
+	int nops = 0, mseen = 0, gpos = -1, before = 0, after = 0;
 
 	memset(s, 0, sizeof(*s));
 	s->spr = GE_LIVE;
@@ -214,46 +217,62 @@ static int ge_eval(GE_State *s)
 	ton = text_on;
 	bgon = s->mcase ? 1 : bg_on;	/* text above BG: BG_LineBuf is always filled */
 
-	/* the drawing steps of DrawLine; G: graphics, M(mask): BG_LineBuf */
-#define OPG()	do { if (mseen) bad = 1; else if (!nops) gfirst = 1; nops++; } while (0)
-#define OPM(m)	do { if (!nops || !(m)) mfull = 1; mseen = 1; nops++; } while (0)
+	/*
+	 * The drawing steps of DrawLine; G: graphics (once), M: BG_LineBuf (the
+	 * layer), by its BG step (k 2) or its text step (k 1), all of it or
+	 * (m) only where Text_TrFlag & k.  All M steps draw the same layer: the
+	 * first step is opaque, the others draw where the layer is not 0.  So
+	 * the line is: before the graphics, the layer (if it came first), then
+	 * the graphics where not 0, then the layer where the steps after the
+	 * graphics draw it ("after": 4 all of it, else the flags).
+	 */
+#define OPG()	do { gpos = nops++; } while (0)
+#define OPM(m, k)	do { if (gpos < 0) before |= !nops; else after |= (m) ? (k) : 4; \
+			     mseen = 1; nops++; } while (0)
 	if ((gp & 2) && gon)
 		OPG();
 	if ((sp & 2) && bgon) {
-		OPM(tdrawed);
+		OPM(tdrawed, 2);
 		tdrawed = 1;
 	}
 	if ((tp & 2) && ton) {
-		OPM(tdrawed);
+		OPM(tdrawed, 1);
 		tdrawed = 1;
 	}
 	if (gp == 1 && gon)
 		OPG();
 	if (sp == 1 && bgon) {
-		OPM(tp == 2);
+		OPM(tp == 2, 2);
 		tdrawed = 1;
 	}
 	if (tp == 1 && ton) {
-		OPM(sp >= 1);
+		OPM(sp >= 1, 1);
 		tdrawed = 1;
 	}
 	if (gp == 0 && gon)
 		OPG();
 	if (sp == 0 && bgon)
-		OPM(tp >= 1);
+		OPM(tp >= 1, 2);
 	if (tp == 0 && ton)
-		OPM(1);
+		OPM(1, 1);
 #undef OPG
 #undef OPM
-	if (bad || (mseen && !mfull))
-		return GE_R_PRIO;	/* graphics between text and BG */
 
 	if (!nops)
 		s->mode = GE_ZERO;
-	else if (gfirst)
-		s->mode = mseen ? GE_GM : GE_G;
-	else
+	else if (gpos < 0)
 		s->mode = GE_M;
+	else if (!mseen)
+		s->mode = GE_G;
+	else {
+		s->mode = GE_GM;
+		if (before || !(after & 4)) {
+			/* not "graphics, then the layer where not 0": ge_prio */
+			s->prio = 1;
+			s->pbefore = before;
+			s->pafter = (after & 4) ? 4 : after;
+		}
+	}
 
 	if (s->mode == GE_G || s->mode == GE_GM) {
 		int p;
@@ -607,8 +626,8 @@ void GE_BGData(DWORD adr, BYTE data)
 
 /* list memory (see ge_mem) */
 #define GE_VARENA	(1024 * 1024)	/* vertices and CLUTs */
-#define GE_CLIST	(288 * 1024)	/* the lists */
-#define GE_CBAND	8192		/* list bytes per band, at most */
+#define GE_CLIST	(400 * 1024)	/* the lists */
+#define GE_CBAND	12288		/* list bytes per band, at most */
 #define GE_CFIXED	4096		/* ... and per list */
 #define GE_VPAL		(2 * 256 * 4 + 32)	/* CLUT bytes per palette */
 
@@ -771,12 +790,14 @@ static int ge_vband(const GE_State *s)
 		if (s->bgon)	/* sprites, tile batches (16 blocks each, aligned), "gd" */
 			n += 128 * 2 * sizeof(GE_TV) + 5 * 16 * 16 + 2 * 16 + 2 * ge_vtilerow(s);
 	}
+	if (s->prio)	/* ge_prio draws the text / BG again, the layer, the fills */
+		n = 2 * n + 4 * (16 + GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 	return n;
 }
 
 static int ge_vline(const GE_State *s)
 {
-	return (ge_vtilerow(s) + 7) / 8;
+	return (s->prio ? 2 : 1) * ((ge_vtilerow(s) + 7) / 8);
 }
 
 /* RGB565 value -> 8888 that the GE writes back as the same value */
@@ -887,6 +908,22 @@ static void ge_draw(GE_TV *start, GE_TV *end)
  */
 #define GE_MAXQ		(65 * 34 + 128)	/* tiles of a plane: 512 dots, 256 lines of 8x8; or sprites */
 static GE_TV ge_sq[GE_MAXQ * 2];
+
+/*
+ * ge_prio: the layer's draws only mark the depth buffer (the colour is
+ * masked): what they draw gets their z (not 0xffff), whatever was there.
+ */
+static int ge_zmask;
+
+/* the depth test as the layer's draws without one need it */
+static void ge_nodepth(void)
+{
+	if (ge_zmask) {
+		sceGuEnable(GU_DEPTH_TEST);
+		sceGuDepthFunc(GU_ALWAYS);
+	} else
+		sceGuDisable(GU_DEPTH_TEST);
+}
 static BYTE ge_sb[GE_MAXQ];
 static GE_CV ge_cq[GE_MAXQ * 2];
 
@@ -1092,7 +1129,7 @@ static void ge_spritelevel(const GE_Band *b, const BYTE *lst, int cnt)
 	}
 	sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
 	sceGuEnable(GU_DEPTH_TEST);
-	sceGuDepthFunc(GU_LEQUAL);
+	sceGuDepthFunc(ge_zmask ? GU_ALWAYS : GU_LEQUAL);
 	ge_sorted_draw(nq, n);
 }
 
@@ -1106,7 +1143,7 @@ static void ge_bgplane(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy
 		sceGuTexImage(0, 512, 32, 512, GE_VRAM(GE_ATLAS8));
 	else
 		sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
-	sceGuDisable(GU_DEPTH_TEST);
+	ge_nodepth();
 	ge_sorted_draw(nq, n);
 }
 
@@ -1121,7 +1158,7 @@ static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, 
 	memcpy(v, ge_cq, n * 2 * sizeof(GE_CV));
 	sceGuDisable(GU_TEXTURE_2D);
 	sceGuDisable(GU_ALPHA_TEST);
-	sceGuDisable(GU_DEPTH_TEST);
+	ge_nodepth();
 	sceGuDrawArray(GU_SPRITES, GE_CVFMT, n * 2, 0, v);
 	GE_Stat[GE_ST_DRAWS]++;
 	GE_Stat[GE_ST_VERTS] += n * 2;
@@ -1380,7 +1417,7 @@ static void ge_text(const GE_Band *b, int opaque)
 
 	sceGuTexMode(GU_PSM_T8, 0, 0, 0);
 	sceGuClutMode(GU_PSM_8888, 0, 0x0f, 0);
-	sceGuDisable(GU_DEPTH_TEST);
+	ge_nodepth();
 	if (opaque)
 		sceGuDisable(GU_ALPHA_TEST);
 	else
@@ -1562,6 +1599,84 @@ static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 	}
 }
 
+/* the layer over the band's lines of the screen, at depth z */
+static void ge_layer_quad(const GE_Band *b, int z)
+{
+	GE_TV *v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
+
+	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+	sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_LAYER));
+	ge_draw(v, ge_quad(v, 0, b->y0, b->st.dotx, b->h, 0, b->y0, 0, 0, z));
+}
+
+/*
+ * Graphics between text and BG (DrawLine, ge_eval): the screen holds the
+ * graphics (Grp_LineBuf); the line is
+ *	the layer where a step after the graphics draws it (pafter), else
+ *	the graphics where they are not 0, else
+ *	the layer if it came before them (pbefore), else the graphics.
+ * The depth buffer (free after the layer pass) holds the masks: 0xffff
+ * cleared (the colour masked), then z 0 where the graphics are not 0
+ * (the screen as the texture, colour test); the layer is drawn where z is
+ * 0xffff.  Then 0xffff again, and the text (Text_TrFlag 1: its dots not 0)
+ * or the BG and sprites (2: their dots not 0, the "gd" tiles) are drawn
+ * with their own z; the layer is drawn where it is not 0 and z is not
+ * 0xffff.
+ */
+static void ge_prio(const GE_Band *b, const unsigned int *tclut)
+{
+	const GE_State *s = &b->st;
+
+	if (s->pbefore) {
+		GE_TV *v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
+
+		sceGuPixelMask(0xffffffff);
+		ge_fill(0, b->y0, s->dotx, b->h, 0, 1);		/* z 0xffff */
+		sceGuTexFlush();
+		sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+		sceGuTexImage(0, 512, 512, 512, GE_VRAM(GE_SCRBUF_L));
+		sceGuDisable(GU_ALPHA_TEST);
+		sceGuEnable(GU_COLOR_TEST);			/* not 0 */
+		sceGuEnable(GU_DEPTH_TEST);
+		sceGuDepthFunc(GU_ALWAYS);
+		ge_draw(v, ge_quad(v, 0, b->y0, s->dotx, b->h, 0, b->y0, 0, 0, 0));
+		sceGuDisable(GU_COLOR_TEST);
+		sceGuPixelMask(0);
+		sceGuTexFlush();
+		sceGuDepthFunc(GU_EQUAL);
+		ge_layer_quad(b, 0xffff);			/* where the graphics are 0 */
+	}
+	if (s->pafter & 4) {
+		sceGuDisable(GU_DEPTH_TEST);
+		sceGuDisable(GU_ALPHA_TEST);
+		sceGuEnable(GU_COLOR_TEST);
+		ge_layer_quad(b, 0);
+		sceGuDisable(GU_COLOR_TEST);
+	} else if (s->pafter) {
+		sceGuPixelMask(0xffffffff);
+		ge_fill(0, b->y0, s->dotx, b->h, 0, 1);		/* z 0xffff */
+		ge_zmask = 1;
+		if ((s->pafter & 1) && s->ton) {
+			sceGuClutLoad(256 / 8, tclut);
+			ge_text(b, 0);
+		}
+		if ((s->pafter & 2) && s->bgon) {
+			sceGuClutLoad(256 / 8, tclut);
+			ge_bg(b, s->mcase, &ge_pal[s->pal]);
+		}
+		ge_zmask = 0;
+		sceGuPixelMask(0);
+		sceGuEnable(GU_DEPTH_TEST);
+		sceGuDepthFunc(GU_NOTEQUAL);
+		sceGuDisable(GU_ALPHA_TEST);
+		sceGuEnable(GU_COLOR_TEST);
+		ge_layer_quad(b, 0xffff);
+		sceGuDisable(GU_COLOR_TEST);
+	}
+	sceGuDisable(GU_DEPTH_TEST);
+	sceGuDisable(GU_ALPHA_TEST);
+}
+
 static int ge_layer_band(const GE_State *s)
 {
 	return s->mode == GE_M || s->mode == GE_GM;
@@ -1658,7 +1773,9 @@ static void GE_Render(void *fbp, int passes)
 				s->gm == 2 ? ge_grp16(b) : ge_grp(b, gclut[s->pal]);
 			if ((passes & GE_P_COMP) && s->mode == GE_ZERO)
 				ge_fill(0, b->y0, s->dotx, b->h, 0, 0);
-			if ((passes & GE_P_COMP) && ge_layer_band(s)) {
+			if ((passes & GE_P_COMP) && s->prio)
+				ge_prio(b, tclut[s->pal]);
+			else if ((passes & GE_P_COMP) && ge_layer_band(s)) {
 				GE_TV *v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 
 				sceGuTexMode(GU_PSM_5650, 0, 0, 0);
