@@ -1532,9 +1532,18 @@ static WORD ge_g16cols[512];
 static WORD ge_g16lo[256], ge_g16hi[256];	/* Pal_Regs[Pal16Adr[lo]], Pal_Regs[Pal16Adr[hi] + 2] << 8 */
 static BYTE ge_g16regs[512];
 static DWORD ge_g16tab = 1, ge_g16p16 = (DWORD)-1;
+/*
+ * Pal16 is a bit permutation (Pal_SetColor) unless the contrast scales it:
+ * when Pal16[h << 8 | l] == Pal16[l] | Pal16[h << 8] for all h, l (checked
+ * when Pal16 changes), a dot is ge_g16cl[lo] | ge_g16ch[hi], two lookups in
+ * 512 byte tables instead of one in Pal16 (128 KB: D-cache misses).
+ */
+static int ge_g16sep;
+static WORD ge_g16cl[256], ge_g16ch[256];	/* Pal16[ge_g16lo[lo]], Pal16[ge_g16hi[hi]] */
 
 /* 65536 colours, one dot (Grp16_Col with the tables) */
-#define GE_G16DOT(w)	((w) ? Pal16[ge_g16lo[(w) & 0xff] | ge_g16hi[(w) >> 8]] : 0)
+#define GE_G16DOT(w)	((w) ? (ge_g16sep ? ge_g16cl[(w) & 0xff] | ge_g16ch[(w) >> 8] : \
+				Pal16[ge_g16lo[(w) & 0xff] | ge_g16hi[(w) >> 8]]) : 0)
 
 /*
  * GVRAM_Write (GE_GVRAM_ROW): the word at byte offset a changed.  A row
@@ -1599,11 +1608,58 @@ static void ge_g16_table(const GE_Pal *pal)
 	if (ge_g16p16 == GE_Pal16Gen && !memcmp(ge_g16regs, pal->regs, sizeof(ge_g16regs)))
 		return;
 	memcpy(ge_g16regs, pal->regs, sizeof(ge_g16regs));
+	if (ge_g16p16 != GE_Pal16Gen) {
+		DWORD h, l;
+
+		ge_g16sep = 1;
+		for (h = 0; h < 256 && ge_g16sep; h++)
+			for (l = 0; l < 256; l++)
+				if (Pal16[h << 8 | l] != (Pal16[l] | Pal16[h << 8])) {
+					ge_g16sep = 0;
+					break;
+				}
+	}
 	ge_g16p16 = GE_Pal16Gen;
 	ge_g16tab++;
 	for (i = 0; i < 256; i++) {
 		ge_g16lo[i] = pal->regs[Pal16Adr[i]];
 		ge_g16hi[i] = pal->regs[Pal16Adr[i] + 2] << 8;
+		ge_g16cl[i] = Pal16[ge_g16lo[i]];
+		ge_g16ch[i] = Pal16[ge_g16hi[i]];
+	}
+}
+
+/* 32 dots (a 32-word column) of 65536 colours */
+static void ge_g16_conv32(const WORD *src, WORD *d)
+{
+	int k;
+
+	if (ge_g16sep && !((unsigned int)src & 3)) {
+		/* two dots per word, the 512 byte tables */
+		const DWORD *s32 = (const DWORD *)src;
+		DWORD *d32 = (DWORD *)d;
+		const WORD *const cl = ge_g16cl, *const ch = ge_g16ch;
+
+		for (k = 0; k < 16; k += 2) {
+			const DWORD p0 = s32[k], p1 = s32[k + 1];
+			const DWORD a0 = p0 & 0xffff, a1 = p0 >> 16, b0 = p1 & 0xffff, b1 = p1 >> 16;
+			const DWORD ca0 = a0 ? cl[a0 & 0xff] | ch[a0 >> 8] : 0;
+			const DWORD ca1 = a1 ? cl[a1 & 0xff] | ch[a1 >> 8] : 0;
+			const DWORD cb0 = b0 ? cl[b0 & 0xff] | ch[b0 >> 8] : 0;
+			const DWORD cb1 = b1 ? cl[b1 & 0xff] | ch[b1 >> 8] : 0;
+
+			d32[k] = ca0 | ca1 << 16;
+			d32[k + 1] = cb0 | cb1 << 16;
+		}
+		return;
+	}
+	for (k = 0; k < 32; k += 4) {
+		const DWORD w0 = src[k], w1 = src[k + 1], w2 = src[k + 2], w3 = src[k + 3];
+
+		d[k] = GE_G16DOT(w0);
+		d[k + 1] = GE_G16DOT(w1);
+		d[k + 2] = GE_G16DOT(w2);
+		d[k + 3] = GE_G16DOT(w3);
 	}
 }
 
@@ -1614,7 +1670,7 @@ static void ge_grp16(const GE_Band *b)
 	/* Grp_DrawLine16: dots x .. 511 of the line, then 0, 1, ... */
 	const int n1 = 512 - x < s->dotx ? 512 - x : s->dotx;
 	const unsigned need = ge_chunks(x, x + n1) | (n1 < s->dotx ? ge_chunks(0, s->dotx - n1) : 0);
-	int i, n, k, c;
+	int i, n, c;
 
 	ge_g16_table(&ge_pal[s->pal]);
 	GE_G16Live = 1;		/* GVRAM_Write converts the words of valid rows */
@@ -1637,17 +1693,7 @@ static void ge_grp16(const GE_Band *b)
 			continue;
 		for (c = 0; c < 16; c++)
 			if (miss & (1u << c)) {
-				const WORD *src = (const WORD *)GVRAM + row * 512 + c * 32;
-				WORD *d = ge_g16 + row * 512 + c * 32;
-
-				for (k = 0; k < 32; k += 4) {
-					const DWORD w0 = src[k], w1 = src[k + 1], w2 = src[k + 2], w3 = src[k + 3];
-
-					d[k] = GE_G16DOT(w0);
-					d[k + 1] = GE_G16DOT(w1);
-					d[k + 2] = GE_G16DOT(w2);
-					d[k + 3] = GE_G16DOT(w3);
-				}
+				ge_g16_conv32((const WORD *)GVRAM + row * 512 + c * 32, ge_g16 + row * 512 + c * 32);
 				GE_Stat[GE_ST_G16_DOTS] += 32;
 			}
 		ge_g16cols[row] |= miss;
