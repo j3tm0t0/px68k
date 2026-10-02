@@ -325,7 +325,7 @@ void WinDraw_GESync(void)
 	psp_ge_wait();
 	if (GE_Pending()) {
 		sceGuStart(GU_DIRECT, list);
-		GE_Render(psp_drawbuf);
+		GE_Render(psp_drawbuf, GE_P_ALL);
 		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
 		sceGuFinish();
 		t1 = sceKernelGetSystemTimeLow();
@@ -665,12 +665,29 @@ WinDraw_Draw(void)
 	PROF_BEGIN(draw);
 	PROF_COUNT(PROF_FRAMES, 1);
 	psp_ge_wait();	/* normally done already, by the first line of this frame */
-	sceGuStart(GU_DIRECT, list);
 	ge_lines = GE_Pending();
+	if (ge_lines && GE_TimeSync) {
+		/* "ge time": each pass in a list of its own, timed */
+		int k;
+
+		for (k = 0; k < GE_NPASS; k++) {
+			unsigned t0 = sceKernelGetSystemTimeLow();
+
+			sceGuStart(GU_DIRECT, list);
+			GE_Render(psp_drawbuf, (1 << k) | (k == GE_NPASS - 1 ? GE_P_END : 0));
+			sceKernelDcacheWritebackAll();
+			sceGuFinish();
+			sceGuSync(0, 0);
+			GE_Stat[GE_ST_PASS_US + k] += sceKernelGetSystemTimeLow() - t0;
+		}
+		GE_Done();
+		ge_lines = 0;
+	}
+	sceGuStart(GU_DIRECT, list);
 	if (ge_lines) {
 		unsigned t0 = sceKernelGetSystemTimeLow();
 
-		GE_Render(psp_drawbuf);	/* the lines left to the GE, into ScrBufL */
+		GE_Render(psp_drawbuf, GE_P_ALL);	/* the lines left to the GE, into ScrBufL */
 		GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
 	}
 	GE_Stat[GE_ST_FRAMES]++;

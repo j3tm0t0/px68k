@@ -54,8 +54,22 @@ int GE_Pending(void);
  * caller writes the D-cache back before sceGuFinish and calls GE_Done()
  * once the GE has finished the list.
  */
-void GE_Render(void *fbp);
+void GE_Render(void *fbp, int passes);
 void GE_Done(void);
+
+/* GE_Render passes, in this order ("ge time" times them one by one) */
+enum {
+	GE_P_COPY = 1,		/* GVRAM / text rows to VRAM */
+	GE_P_FILL = 2,		/* layer: fill (TextPal[0], depth) */
+	GE_P_BGB = 4,		/* layer: BG/sprites below the text */
+	GE_P_TEXT = 8,		/* layer: text */
+	GE_P_BGA = 16,		/* layer: BG/sprites above the text */
+	GE_P_GRP = 32,		/* screen: graphic pages */
+	GE_P_COMP = 64,		/* screen: the layer over them */
+	GE_P_END = 128,		/* the bands are done */
+	GE_P_ALL = 255,
+	GE_NPASS = 7
+};
 
 /* BG[adr] (0-0x7fff) is about to become data: guard, and the GE's pattern copies */
 void GE_BGData(DWORD adr, BYTE data);
@@ -82,7 +96,9 @@ enum {
 	GE_ST_PIXELS,		/* pixels of the textured sprites */
 	GE_ST_WAIT_US,		/* CPU time waiting for the GE (guards) */
 	GE_ST_RENDER_US,	/* CPU time building the bands' display lists */
-	GE_ST_GE_US,		/* "ge time": GE time of the frame's list */
+	GE_ST_GE_US,		/* "ge time": GE time of the frame's display list */
+	GE_ST_PASS_US,		/* "ge time": + log2(GE_P_*): GE time of each pass */
+	GE_ST_COPY_BYTES = GE_ST_PASS_US + GE_NPASS,	/* bytes copied to VRAM */
 	GE_ST_FRAMES,		/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
