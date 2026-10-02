@@ -11,6 +11,7 @@
 #include	"gvram.h"
 #include	"m68000.h"
 #include	"memory.h"
+#include	"../psp/gecomp.h"
 
 #if defined(__GNUC__)
 #define GRP_ALIGN	__attribute__((__aligned__(4)))
@@ -18,7 +19,7 @@
 #define GRP_ALIGN
 #endif
 
-	BYTE	GVRAM[0x80000] GRP_ALIGN;
+	BYTE	GVRAM[0x80000] __attribute__((__aligned__(64)));	/* a GE texture (psp/gecomp.c) */
 	WORD	Grp_LineBuf[1024] GRP_ALIGN;
 	WORD	Grp_LineBufSP[1024] GRP_ALIGN;		// 特殊プライオリティ／半透明用バッファ
 	WORD	Grp_LineBufSP2[1024] GRP_ALIGN;		// 半透明ベースプレーン用バッファ（非半透明ビット格納）
@@ -973,6 +974,8 @@ void GVRAM_Init(void)
 void FASTCALL GVRAM_FastClear(void)
 {
 	DWORD v, h;
+
+	GE_GUARD();
 	v = ((CRTC_Regs[0x29]&4)?512:256);
 	h = ((CRTC_Regs[0x29]&3)?512:256);
 	// やっぱちゃんと範囲指定しないと変になるものもある（ダイナマイトデュークとか）
@@ -1131,6 +1134,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD *ram = (WORD*)(&GVRAM[adr&0x7fffe]);
 	WORD temp;
 
+	GE_GUARD();
 	adr ^= 1;
 	adr -= 0xc00000;
 

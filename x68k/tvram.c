@@ -11,9 +11,10 @@
 #include	"palette.h"
 #include	"m68000.h"
 #include	"tvram.h"
+#include	"../psp/gecomp.h"
 
 	BYTE	TVRAM[0x80000];
-	BYTE	TextDrawWork[1024*1024];
+	BYTE	TextDrawWork[1024*1024] __attribute__ ((aligned (64)));	/* a GE texture (psp/gecomp.c) */
 	BYTE	TextDirtyLine[1024];
 
 	BYTE	TextDrawPattern[2048*4];
@@ -28,6 +29,9 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data);
 // -----------------------------------------------------------------------
 void TVRAM_SetAllDirty(void)
 {
+#ifdef PSP
+	GE_PalDirty = 1;	/* palette/register writes come here (psp/gecomp.c) */
+#endif
 	memset(TextDirtyLine, 1, 1024);
 }
 
@@ -109,6 +113,7 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
+	GE_GUARD();
 	adr &= 0x7ffff;
 	adr ^= 1;
 	if (CRTC_Regs[0x2a]&1)			// 同時アクセス
@@ -245,6 +250,8 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 void FASTCALL TVRAM_RCUpdate(void)
 {
 	DWORD adr = ((DWORD)CRTC_Regs[0x2d]<<9);
+
+	GE_GUARD();
 
 #ifdef USE_ASM
 	_asm
