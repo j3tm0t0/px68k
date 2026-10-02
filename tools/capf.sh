@@ -4,7 +4,8 @@
 # clear everything, so only the first reset of a run is reproducible.
 #
 #   tools/capf.sh <frame> [out.raw]      (EBOOT=... to use another build,
-#                                         CAPF_PRE="ge on" to send a command first)
+#                                         CAPF_PRE="ge on" to send a command first,
+#                                         DISK=/PSP/GAME/PX68K/disk/x.xdf for drive 0)
 set -e
 cd "$(dirname "$0")/.."
 FRAME=$1
@@ -12,6 +13,7 @@ OUT=${2:-cap.raw}
 CAP="$HOME/.config/ppsspp/PSP/GAME/PX68K/cap.raw"
 rm -f "$CAP"
 tools/ppsspp-run.sh >/dev/null
+[ -z "$DISK" ] || PSP_HOST=127.0.0.1 FOLLOW_SEC=1 /usr/bin/python3 tools/psp-debug.py cmd fdd 0 "$DISK" >/dev/null
 [ -z "$CAPF_PRE" ] || PSP_HOST=127.0.0.1 FOLLOW_SEC=1 /usr/bin/python3 tools/psp-debug.py cmd $CAPF_PRE >/dev/null
 PSP_HOST=127.0.0.1 FOLLOW_SEC=1 /usr/bin/python3 tools/psp-debug.py cmd capf "$FRAME" >/dev/null
 n=0
