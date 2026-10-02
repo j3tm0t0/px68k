@@ -223,6 +223,114 @@ static void Grp_DrawLine4_C(DWORD page, int opaq)
 	}
 }
 
+// Several 16 colour pages in one pass (see Grp_DrawLine4Multi).
+//
+// The k-th page drawn (k = 0 for the opaque one) wins over the ones before
+// it where its nibble is not 0.  Grp4_MRank[0][b] gives, for the low byte b
+// of a GVRAM word (pages 0 and 1), (k + 1) << 4 | nibble of the latest
+// such page with a non-0 nibble, or 0; Grp4_MRank[1] the same for the high
+// byte (pages 2 and 3).  The larger of the two, & 15, is the colour index.
+
+static BYTE	Grp4_MRank[2][256];
+static DWORD	Grp4_MKey = 0xffffffff;
+
+static void Grp4_MakeRank(DWORD pages, int n)
+{
+	int k, h, b, best, rank[4] = { 0, 0, 0, 0 };
+
+	for (k = 0; k < n; k++)
+		rank[(pages >> (k * 2)) & 3] = k + 1;	// a page drawn twice: latest
+	for (h = 0; h < 2; h++) {
+		for (b = 0; b < 256; b++) {
+			int lo = b & 15, hi = b >> 4;
+			int rlo = rank[h * 2], rhi = rank[h * 2 + 1];
+
+			best = 0;
+			if (rlo && lo)
+				best = (rlo << 4) | lo;
+			if (rhi && hi && ((rhi << 4) | hi) > best)
+				best = (rhi << 4) | hi;
+			Grp4_MRank[h][b] = best;
+		}
+	}
+}
+
+GRP_INLINE DWORD Grp4_Pick(DWORD w)
+{
+	DWORD l = Grp4_MRank[0][w & 0xff], h = Grp4_MRank[1][w >> 8];
+
+	return ((l > h) ? l : h) & 15;
+}
+
+static void Grp4_MultiRun(const GWORD *src, WORD *dst, DWORD n)
+{
+	const DWORD *tab = Grp4_OpTab;
+	DWORD a, b;
+
+	if (n == 0)
+		return;
+	if (GRP_ODD(dst)) {
+		*dst++ = GrphPal[Grp4_Pick(*src++)];
+		n--;
+	}
+	for (; n >= 2; n -= 2) {
+		a = Grp4_Pick(src[0]);
+		b = Grp4_Pick(src[1]);
+		src += 2;
+		*(GDWORD *)dst = tab[a | (b << 4)];
+		dst += 2;
+	}
+	if (n)
+		*dst = GrphPal[Grp4_Pick(*src)];
+}
+
+// -----------------------------------------------------------------------
+//   Grp_DrawLine4Multi(pages, n): the n (1..4) 16 colour pages packed two
+//   bits each in 'pages' (first in bits 0-1), the first opaque and each
+//   following one over it.  Exactly the same as
+//	Grp_DrawLine4(pages & 3, 1);
+//	Grp_DrawLine4((pages >> 2) & 3, 0); ...
+//   but when the pages are at the same scroll position (they are nibbles
+//   of the same GVRAM words) the line is read and written only once.
+// -----------------------------------------------------------------------
+void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
+{
+	DWORD p0 = pages & 3, x, y, n1, cnt = TextDotX;
+	int k;
+	const GWORD *src;
+
+	if (n <= 0)
+		return;
+	if (n > 4)
+		n = 4;
+	x = GrphScrollX[p0] & 0x1ff;
+	y = Grp_LineOfs(GrphScrollY[p0]);
+	for (k = 1; k < n; k++) {
+		DWORD p = (pages >> (k * 2)) & 3;
+		if ((GrphScrollX[p] & 0x1ff) != x || Grp_LineOfs(GrphScrollY[p]) != y)
+			break;
+	}
+	if (n == 1 || k < n) {			// not all at the same place
+		Grp_DrawLine4_C(p0, 1);
+		for (k = 1; k < n; k++)
+			Grp_DrawLine4_C((pages >> (k * 2)) & 3, 0);
+		return;
+	}
+	pages &= (1 << (n * 2)) - 1;
+	if (Grp4_MKey != (pages | (n << 8))) {
+		Grp4_MakeRank(pages, n);
+		Grp4_MKey = pages | (n << 8);
+	}
+
+	Grp4_PalCheck(1);
+	src = (const GWORD *)(GVRAM + y + x * 2);
+	n1 = x ^ 0x1ff;				// as Grp_DrawLine4_C
+	if (n1 >= cnt)
+		n1 = cnt;
+	Grp4_MultiRun(src, Grp_LineBuf, n1);
+	Grp4_MultiRun(src + n1 - 0x200, Grp_LineBuf + n1, cnt - n1);
+}
+
 // 1024 dot mode: the right half of the line is the next nibble
 static void Grp_DrawLine4h_C(void)
 {
@@ -626,6 +734,15 @@ static void Grp_DrawLine16SP_C(void)
 	src -= 0x200;
 	for (; i < n; i++)
 		Grp16_SP(*src++, i);
+}
+#else
+
+void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
+{
+	int k;
+
+	for (k = 0; k < n; k++)
+		Grp_DrawLine4((pages >> (k * 2)) & 3, k == 0);
 }
 #endif /* !USE_ASM && !(USE_GAS && __i386__) */
 
