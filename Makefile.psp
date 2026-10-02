@@ -43,7 +43,7 @@ X11CXXOBJS= x11/winx68k.o
 
 WIN32APIOBJS= win32api/dosio.o win32api/fake.o win32api/peace.o
 
-PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o
+PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o
 
 COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS) $(PSPOBJS)
 CXXOBJS=	$(FMGENOBJS) $(X11CXXOBJS)

@@ -46,6 +46,9 @@
 #include "status.h"
 #include "tvram.h"
 #include "../psp/prof.h"
+#ifdef PSP
+#include "../psp/gecomp.h"
+#endif
 #include "joystick.h"
 #include "keyboard.h"
 
@@ -242,10 +245,13 @@ void WinDraw_HideSplash(void)
           |仮想キーボード用    || 512*256*2byte
           |    に使うかも領域  |V
 0x041cc000+--------------------+
-          |                    |
           | Virtexes           |
-          |                    |
-          +--------------------+
+0x041d0000+--------------------+
+          | GE compositing: BG patterns (psp/gecomp.c)
+0x041da000+--------------------+
+
+GE compositing (psp/gecomp.c) also uses the ScrBufR area as its text/BG
+layer (512 x 256) when the screen is at most 512 dots wide, and the z buffer.
 */
 
 static unsigned int __attribute__((aligned(16))) list[262144];
@@ -293,14 +299,36 @@ struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struc
  * vertical blanking has been emulated, so the GE is normally done by then.
  */
 static int psp_ge_pending;
+static void *psp_drawbuf;	/* the draw buffer (sceGuSwapBuffers) */
 
 static void psp_ge_wait(void)
 {
 	if (psp_ge_pending) {
 		psp_ge_pending = 0;
 		sceGuSync(0, 0);
-		sceGuSwapBuffers();
+		psp_drawbuf = sceGuSwapBuffers();
 	}
+	GE_Guard = GE_Pending();	/* the GE no longer reads the X68000 memory */
+}
+
+/*
+ * GE compositing (psp/gecomp.c): draw the lines waiting for the GE now and
+ * wait until it is done, so that what it reads (GVRAM, the text screen, the
+ * BG patterns and maps, the sprites) can be written again.  Called through
+ * GE_GUARD() by whatever writes them.
+ */
+void WinDraw_GESync(void)
+{
+	if (GE_Pending()) {
+		psp_ge_wait();
+		sceGuStart(GU_DIRECT, list);
+		GE_Render(psp_drawbuf);
+		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
+		sceGuFinish();
+		sceGuSync(0, 0);
+		GE_StatFlushes++;
+	}
+	psp_ge_wait();
 }
 
 #endif // PSP
@@ -473,7 +501,7 @@ void
 WinDraw_Flush(void)
 {
 #ifdef PSP
-	psp_ge_wait();
+	WinDraw_GESync();
 #endif
 }
 
@@ -534,6 +562,9 @@ WinDraw_Draw(void)
 {
 	SDL_Surface *sdl_surface;
 	static int oldtextx = -1, oldtexty = -1;
+#ifdef PSP
+	int ge_lines;
+#endif
 
 	if (oldtextx != TextDotX) {
 		oldtextx = TextDotX;
@@ -628,6 +659,9 @@ WinDraw_Draw(void)
 	PROF_COUNT(PROF_FRAMES, 1);
 	psp_ge_wait();	/* normally done already, by the first line of this frame */
 	sceGuStart(GU_DIRECT, list);
+	ge_lines = GE_Pending();
+	if (ge_lines)
+		GE_Render(psp_drawbuf);	/* the lines left to the GE, into ScrBufL */
 
 	sceGuClearColor(0);
 	sceGuClear(GU_COLOR_BUFFER_BIT);	/* no depth test, so no depth clear */
@@ -699,9 +733,12 @@ WinDraw_Draw(void)
 		sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, vtxk);
 	}
 
+	if (ge_lines)
+		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
 	sceGuFinish();
 	/* sceGuSync() and sceGuSwapBuffers() are left to psp_ge_wait() */
 	psp_ge_pending = 1;
+	GE_Guard = ge_lines;	/* the GE reads the X68000 memory until psp_ge_wait() */
 	PROF_END(draw, PROF_DRAW);
 
 #else // OpenGL ES 未使用
@@ -1110,6 +1147,10 @@ void WinDraw_DrawLine(void)
 	TextDirtyLine[VLINE] = 0;
 	Draw_DrawFlag = 1;
 	PROF_COUNT(PROF_LINES, 1);
+#ifdef PSP
+	if (GE_Enabled && GE_Line())
+		return;		/* drawn by the GE with the frame */
+#endif
 	{
 		PROF_BEGIN(line);
 		DrawLine();
