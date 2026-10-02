@@ -1144,6 +1144,21 @@ static void DrawLine(void)
 				}
 			}
 		}
+		else if (!(VCReg2[0]&0x10))	// 512dot, no translucency/special priority
+		{
+			// the same pages, in the same order, as the calls below, in one pass
+			DWORD pages = 0;
+			int n = 0;
+			if (VCReg2[1]&8) { pages |= ((VCReg1[1]>>6)&3) << (n*2); n++; }
+			if (VCReg2[1]&4) { pages |= ((VCReg1[1]>>4)&3) << (n*2); n++; }
+			if (VCReg2[1]&2) { pages |= ((VCReg1[1]>>2)&3) << (n*2); n++; }
+			if (VCReg2[1]&1) { pages |= ((VCReg1[1]   )&3) << (n*2); n++; }
+			if (n)
+			{
+				Grp_DrawLine4Multi(pages, n);
+				gon=1;
+			}
+		}
 		else				// 512dot
 		{
 			if ( (VCReg2[0]&0x10)&&(VCReg2[1]&1) )
