@@ -462,7 +462,7 @@ void WinX68k_Exec(void)
 		if ( clk_count>=clk_next ) {
 			//OPM_RomeoOut(Config.BufferSize*5);
 			//MIDI_DelayOut((Config.MIDIAutoDelay)?(Config.BufferSize*5):Config.MIDIDelay);
-			MFP_TimerA();
+			if ( (MFP[MFP_TACR]&15)==8 ) MFP_TimerA();	/* event count mode only */
 			if ( (MFP[MFP_AER]&0x40)&&(vline==CRTC_IntLine) )
 				MFP_Int(1);
 			if ( (!DispFrame)&&(vline>=CRTC_VSTART)&&(vline<CRTC_VEND) ) {
@@ -481,7 +481,7 @@ void WinX68k_Exec(void)
 			PROF_BEGIN(pline);
 			{ PROF_BEGIN(a); ADPCM_PreUpdate(clk_line); PROF_END(a, PROF_ADPCMPRE); }
 			{ PROF_BEGIN(o); OPM_Timer(clk_line); PROF_END(o, PROF_OPMTIMER); }
-			MIDI_Timer(clk_line);
+			if ( Config.MIDI_SW ) MIDI_Timer(clk_line);	/* it returns at once when MIDI is off */
 #ifndef	NO_MERCURY
 			{ PROF_BEGIN(m); Mcry_PreUpdate(clk_line); PROF_END(m, PROF_MCRY); }
 #endif

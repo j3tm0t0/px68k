@@ -56,7 +56,7 @@ void Timer::SetTimerB(uint data)
 // ---------------------------------------------------------------------------
 //	タイマー時間処理
 //
-bool Timer::Count(int32 us)
+bool Timer::CountEvent(int32 us)
 {
 	bool event = false;
 
