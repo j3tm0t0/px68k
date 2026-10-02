@@ -330,13 +330,22 @@ static unsigned psp_ge_wait(void)
  */
 static void *psp_ge_build(int passes)
 {
-	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
-	void *l = GE_Build(psp_drawbuf, passes);
+	SceKernelThreadInfo ti0, ti1;
+	unsigned t0, t1;
+	void *l;
 
+	/* the thread's own run time too: other threads (sound) may run meanwhile */
+	ti0.size = sizeof(ti0);
+	ti1.size = sizeof(ti1);
+	sceKernelReferThreadStatus(0, &ti0);
+	t0 = sceKernelGetSystemTimeLow();
+	l = GE_Build(psp_drawbuf, passes);
 	t1 = sceKernelGetSystemTimeLow();
 	sceKernelDcacheWritebackAll();
 	GE_Stat[GE_ST_BUILD_US + 4] += sceKernelGetSystemTimeLow() - t1;
 	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
+	if (sceKernelReferThreadStatus(0, &ti1) >= 0)
+		GE_Stat[GE_ST_BUILD_US + 5] += ti1.runClocks.low - ti0.runClocks.low;
 	return l;
 }
 

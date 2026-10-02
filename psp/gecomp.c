@@ -1471,7 +1471,7 @@ void GE_LogStats(void)
 {
 	static const char *const why[] = {
 		"gvram", "gvram-mode", "tvram", "fastclear", "rcupdate", "bg", "bgq-full",
-		"spr-full", "inflight", "bands", "pals"
+		"spr-full", "(unused)", "bands", "pals"
 	};
 	static const char *const reason[] = {
 		"", "debug", "gmode", "trans", "r29", "width", "prio", "twrap", "bgres", "vline"
@@ -1488,11 +1488,12 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
 		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
 	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us; "
-		   "build us: setup %u copy %u layer %u screen %u dcache %u\n",
+		   "build us: setup %u copy %u layer %u screen %u dcache %u (cpu of this thread %u)\n",
 		   GE_Stat[GE_ST_FRAME_WAIT_US] / f, GE_Stat[GE_ST_LINE_WAITS] / f,
 		   GE_Stat[GE_ST_LINE_WAITS] * 100 / f % 100, GE_Stat[GE_ST_LINE_WAIT_US] / f,
 		   GE_Stat[GE_ST_DONE_US] / f, GE_Stat[GE_ST_BUILD_US] / f, GE_Stat[GE_ST_BUILD_US + 1] / f,
-		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f);
+		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f,
+		   GE_Stat[GE_ST_BUILD_US + 5] / f);
 	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
 		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,
