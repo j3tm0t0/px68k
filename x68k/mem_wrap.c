@@ -551,6 +551,37 @@ cpu_writemem24_long_pd(DWORD addr, DWORD val)
 	cpu_writemem24_long_pd_slow(addr, val);
 }
 
+/*
+ * For the idle loop skip of C68K (Bcc_8_IDLE): read the value that
+ * cpu_readmem24_word/cpu_readmem24 would return when they would take
+ * their RAM fast path, with the same side effects; 0 otherwise.  Reading
+ * main RAM again gives the same value as long as the CPU writes nothing.
+ */
+int FASTCALL
+cpu_idle_read_word(DWORD addr, UINT32 *v)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a < RAM_END) {
+		BusErrFlag = 0;
+		*v = *(WORD_A *)(MEM + a);
+		return 1;
+	}
+	return 0;
+}
+
+int FASTCALL
+cpu_idle_read_byte(DWORD addr, UINT32 *v)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (a < RAM_END && !(BusErrFlag & 1)) {
+		*v = MEM[a ^ 1];
+		return 1;
+	}
+	return 0;
+}
+
 static BYTE FASTCALL
 rm_main(DWORD addr)
 {
