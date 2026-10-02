@@ -15,6 +15,9 @@ enum {
 	PROF_DRAW,	/* WinDraw_Draw (GE upload, sync, swap) */
 	PROF_SOUND,	/* ADPCM/OPM synthesis, either thread */
 	PROF_SLICE,	/* per 68000 slice: MFP/RTC timers, DMA */
+	PROF_ADPCMPRE,	/* ADPCM_PreUpdate (incl. its DMA) */
+	PROF_OPMTIMER,
+	PROF_MCRY,
 	PROF_LINE,	/* per raster line: interrupts, sound/OPM/MIDI timers, keyboard, SCC (minus synthesis) */
 	PROF_N
 };

@@ -126,6 +126,8 @@ DSound_Cleanup(void)
 	return TRUE;
 }
 
+static int DSound_Pending;	/* samples due, not synthesized yet */
+
 static void sound_send(int length)
 {
 	int rate;
@@ -175,7 +177,28 @@ void FASTCALL DSound_Send0(long clock)
 	if (length == 0) {
 		return;
 	}
+#ifdef PSP
+	/*
+	 * About one sample per raster line: synthesizing them one by one cost a
+	 * lock/unlock and the OPM/ADPCM call overhead each time. Batch them (32
+	 * samples, ~3 ms); WinX68k_Exec flushes the rest at the end of each frame.
+	 */
+	DSound_Pending += length;
+	if (DSound_Pending < 32)
+		return;
+	length = DSound_Pending;
+	DSound_Pending = 0;
+#endif
 	sound_send(length);
+}
+
+void DSound_Flush(void)
+{
+	if (audio_fd >= 0 && DSound_Pending) {
+		int length = DSound_Pending;
+		DSound_Pending = 0;
+		sound_send(length);
+	}
 }
 
 static void FASTCALL DSound_Send(int length)

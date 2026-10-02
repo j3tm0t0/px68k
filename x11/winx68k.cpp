@@ -473,11 +473,11 @@ void WinX68k_Exec(void)
 			}
 
 			PROF_BEGIN(pline);
-			ADPCM_PreUpdate(clk_line);
-			OPM_Timer(clk_line);
+			{ PROF_BEGIN(a); ADPCM_PreUpdate(clk_line); PROF_END(a, PROF_ADPCMPRE); }
+			{ PROF_BEGIN(o); OPM_Timer(clk_line); PROF_END(o, PROF_OPMTIMER); }
 			MIDI_Timer(clk_line);
 #ifndef	NO_MERCURY
-			Mcry_PreUpdate(clk_line);
+			{ PROF_BEGIN(m); Mcry_PreUpdate(clk_line); PROF_END(m, PROF_MCRY); }
 #endif
 
 			KeyIntCnt++;
@@ -519,6 +519,7 @@ void WinX68k_Exec(void)
 #else
 	Joystick_Update(FALSE, SDLK_UNKNOWN);
 #endif
+	DSound_Flush();
 	FDD_SetFDInt();
 	if ( !DispFrame )
 		WinDraw_Draw();
@@ -748,12 +749,13 @@ static void psp_debug_frame(unsigned us)
 			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
 			/* us per emulated frame */
 			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
-				   "draw %u snd %u slice %u line %u lines %u shown %u cpu %d/%d\n", n, total / n,
+				   "draw %u snd %u slice %u line %u (adpcmpre %u opmtimer %u mcry %u) lines %u shown %u cpu %d/%d\n", n, total / n,
 				   n * 1000000u / total, n * 10000000u / total % 10,
 				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
 				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
 				   prof_us[PROF_SLICE] / n,
 				   (prof_us[PROF_LINE] > prof_us[PROF_SOUND] ? prof_us[PROF_LINE] - prof_us[PROF_SOUND] : 0) / n,
+				   prof_us[PROF_ADPCMPRE] / n, prof_us[PROF_OPMTIMER] / n, prof_us[PROF_MCRY] / n,
 				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency(),
 				   scePowerGetBusClockFrequency());
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
