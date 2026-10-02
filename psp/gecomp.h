@@ -57,6 +57,8 @@ extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
 #define GE_GVRAM_ROW(a)		(GE_GRowGen[((a) >> 10) & 511]++)
 /* TVRAM_Write: the TextDrawWork byte at a * 8 changed */
 #define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
+/* palette.c: Pal16 is about to change (bumped after the bands drawn with it) */
+extern DWORD GE_Pal16Gen;
 /* windraw.c: ScrBufL row y was written by the CPU */
 void GE_ScrRowWritten(DWORD y);
 
@@ -134,7 +136,8 @@ enum {
 	GE_ST_DONE_US,		/* CPU time of GE_Done (queued BG writes) */
 	GE_ST_BUILD_US,		/* + 0-4: time of the build: CLUTs/setup, copy, layer, screen, D-cache; + 5: this thread's CPU time of it */
 	GE_ST_LAYER_US = GE_ST_BUILD_US + 6,	/* + 0-3: of the layer: fill, "gd" rectangles, sprites/BG planes, text */
-	GE_ST_FRAMES = GE_ST_LAYER_US + 4,	/* frames shown */
+	GE_ST_G16_DOTS = GE_ST_LAYER_US + 4,	/* 65536 colour dots converted by the CPU */
+	GE_ST_FRAMES,		/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
 };

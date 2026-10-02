@@ -121,7 +121,7 @@ typedef struct {
 	BYTE	bg9;		/* BG_Regs[9] */
 	BYTE	pal;		/* palette snapshot */
 	BYTE	spr;		/* sprite register snapshot, GE_LIVE: Sprite_Regs */
-	BYTE	gm;		/* graphics: 0 16 colours (gpage: 4-bit pages), 1 256 colours (bytes) */
+	BYTE	gm;		/* graphics: 0 16 colours (gpage: 4-bit pages), 1 256 colours (bytes), 2 65536 */
 	WORD	dotx;
 	WORD	gx[4], gy[4];	/* graphic scroll, & 511 */
 	WORD	tx, ty;		/* text scroll, & 1023 */
@@ -145,6 +145,7 @@ static int ge_nband;
 typedef struct {
 	WORD	text[256];
 	WORD	grp[256];
+	BYTE	regs[512];	/* the graphic palette registers (65536 colours) */
 } GE_Pal;
 
 static GE_Pal ge_pal[GE_NPAL];
@@ -161,8 +162,8 @@ static int ge_eval(GE_State *s)
 	s->spr = GE_LIVE;
 	if (!Debug_Grp || !Debug_Text || !Debug_Sp)
 		return GE_R_DEBUG;
-	if ((VCReg0[1] & 7) != 0 && (VCReg0[1] & 7) != 1 && (VCReg0[1] & 7) != 2)
-		return GE_R_GMODE;	/* 16 or 256 colours 512 dots */
+	if (VCReg0[1] & 4)
+		return GE_R_GMODE;	/* 16, 256 or 65536 colours 512 dots */
 	if (VCReg2[0] & 0x10)	/* no translucency / special priority */
 		return GE_R_TRANS;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
@@ -181,6 +182,11 @@ static int ge_eval(GE_State *s)
 			s->gpage[s->ng++] = (v11 >> 2) & 3;
 		if (v21 & 1)
 			s->gpage[s->ng++] = v11 & 3;
+	} else if ((VCReg0[1] & 3) == 3) {
+		/* 65536 colours (Grp_DrawLine16): the words, page 0's scroll */
+		s->gm = 2;
+		if (v21 & 15)
+			s->gpage[s->ng++] = 0;
 	} else {
 		/*
 		 * 256 colours, as in DrawLine (Grp_DrawLine8): page p is byte p of
@@ -256,7 +262,10 @@ static int ge_eval(GE_State *s)
 			s->gx[p] = GrphScrollX[p] & 0x1ff;
 			s->gy[p] = GrphScrollY[p] & 0x1ff;
 		}
-		if (s->gm) {
+		if (s->gm == 2) {
+			s->gx[1] = s->gx[2] = s->gx[3] = 0;
+			s->gy[1] = s->gy[2] = s->gy[3] = 0;
+		} else if (s->gm) {
 			/* byte page p: the scroll of its nibble pages 2p, 2p + 1 */
 			int k;
 
@@ -332,6 +341,8 @@ int GE_Pending(void)
  */
 
 static int ge_inflight;		/* bands handed to the GE, not done yet */
+static int ge_g16pend, ge_g16pal;	/* waiting 65536 colour bands, their palette */
+static int ge_g16fly;		/* ... and some of those handed to the GE */
 static int ge_voff, ge_coff;	/* list memory used (see ge_mem) */
 static int ge_vneed;		/* ge_varena bytes the waiting bands may take */
 static int ge_bgfly;		/* ... and some of them read the BG patterns */
@@ -380,6 +391,9 @@ static void ge_handed(void)
 	ge_bgpend = 0;
 	ge_usevalid = 0;
 	ge_nspr = 0;
+	if (ge_g16pend)
+		ge_g16fly = 1;
+	ge_g16pend = 0;
 }
 
 /* the GE is done with what it was given (windraw.c, after sceGuSync) */
@@ -389,6 +403,7 @@ void GE_Done(void)
 
 	ge_inflight = 0;
 	ge_bgfly = 0;
+	ge_g16fly = 0;
 	ge_voff = ge_coff = 0;	/* the GE is idle */
 	if (ge_mk[1].any)
 		memset(&ge_mk[1], 0, sizeof(ge_mk[1]));
@@ -429,18 +444,22 @@ static void ge_mark_line(const GE_Band *b, int new)
 			const int p = s->gpage[k];
 			const int row = (s->gy[p] + VLINE) & 511;
 			const int quirk = !s->gm && 511 - s->gx[p] < s->dotx;
-			/* the masks are per 16 colour page: a 256 colour page is two */
-			const int m0 = s->gm ? p * 2 : p, m1 = s->gm ? p * 2 + 1 : p;
+			/*
+			 * The masks are per 16 colour page: a 256 colour page is
+			 * two, the 65536 colour one all four.
+			 */
+			const int m0 = s->gm == 2 ? 0 : s->gm ? p * 2 : p;
+			const int m1 = s->gm == 2 ? 3 : s->gm ? p * 2 + 1 : p;
+			int q;
 
-			GE_SET(m->grow[m0], row);
-			GE_SET(m->grow[m1], row);
+			for (q = m0; q <= m1; q++)
+				GE_SET(m->grow[q], row);
 			if (quirk)
 				GE_SET(m->grow[p], (row - 1) & 511);
 			if (new) {
-				for (i = 0; i < s->dotx; i++) {
-					GE_SET(m->gcol[m0], (s->gx[p] + i) & 511);
-					GE_SET(m->gcol[m1], (s->gx[p] + i) & 511);
-				}
+				for (q = m0; q <= m1; q++)
+					for (i = 0; i < s->dotx; i++)
+						GE_SET(m->gcol[q], (s->gx[p] + i) & 511);
 				if (!s->gm)
 					GE_SET(m->gcol[p], 511);
 			}
@@ -468,13 +487,18 @@ void GE_GvramGuard(DWORD adr)
 
 	if (!ge_mk[0].any && !ge_mk[1].any)
 		return;
-	if ((r28 & 0x0c) || (r28 & 3) == 3) {
-		ge_sync(GE_ST_GVRAM_MODE);	/* not the 16/256 colour 512 dot layout */
+	if ((r28 & 8) || (r28 & 7) == 3) {
+		/* 65536 colours (GVRAM_Write): GVRAM[a], the word of all 16 colour pages */
+		if (a >= 0x80000)
+			return;
+		p0 = 0;
+		p1 = 3;
+	} else if (r28 & 4) {
+		ge_sync(GE_ST_GVRAM_MODE);	/* 1024 dots */
 		return;
-	}
-	if (a & 1)
+	} else if (a & 1)
 		return;		/* not written in this mode */
-	if (r28 & 3) {
+	else if (r28 & 3) {
 		/* 256 colours (GVRAM_Write): byte p of the word, 16 colour pages 2p, 2p + 1 */
 		if (a >= 0x100000)
 			return;
@@ -488,9 +512,13 @@ void GE_GvramGuard(DWORD adr)
 	for (k = 0; k < 2; k++) {
 		const GE_Masks *const m = &ge_mk[k];
 		const int row = (a >> 10) & 511, col = (a >> 1) & 511;
+		int q, hit = 0;
 
-		if (m->any && ((GE_BIT(m->grow[p0], row) && GE_BIT(m->gcol[p0], col)) ||
-			       (GE_BIT(m->grow[p1], row) && GE_BIT(m->gcol[p1], col)))) {
+		if (m->any)
+			for (q = p0; q <= p1; q++)
+				if (GE_BIT(m->grow[q], row) && GE_BIT(m->gcol[q], col))
+					hit = 1;
+		if (hit) {
 			if (k == 0)
 				ge_sync(GE_ST_GVRAM);
 			else
@@ -629,20 +657,29 @@ int GE_Line(void)
 	vl = ge_vline(&s);
 	if (ge_nband == GE_NBAND || ge_vneed + vb + vl + GE_VPAL > GE_VARENA)
 		ge_sync(GE_ST_BANDS);	/* draws the bands, empties the snapshots */
+	/* the waiting 65536 colour bands share the converted GVRAM (ge_g16): one palette */
+	if (s.gm == 2 && s.ng && ge_g16pend && memcmp(ge_pal[ge_g16pal].regs, Pal_Regs, sizeof(ge_pal[0].regs)))
+		ge_sync(GE_ST_PALS);
 
 	if (ge_npal == 0 || GE_PalDirty) {
 		GE_PalDirty = 0;
 		if (ge_npal == 0 || memcmp(ge_pal[ge_palcur].text, TextPal, sizeof(ge_pal[0].text)) ||
-		    memcmp(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp))) {
+		    memcmp(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp)) ||
+		    memcmp(ge_pal[ge_palcur].regs, Pal_Regs, sizeof(ge_pal[0].regs))) {
 			if (ge_npal == GE_NPAL)
 				ge_sync(GE_ST_PALS);
 			ge_palcur = ge_npal++;
 			memcpy(ge_pal[ge_palcur].text, TextPal, sizeof(ge_pal[0].text));
 			memcpy(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp));
+			memcpy(ge_pal[ge_palcur].regs, Pal_Regs, sizeof(ge_pal[0].regs));
 			ge_vneed += GE_VPAL;
 		}
 	}
 	s.pal = ge_palcur;
+	if (s.gm == 2 && s.ng) {
+		ge_g16pend = 1;
+		ge_g16pal = s.pal;
+	}
 
 	b = ge_nband ? &ge_band[ge_nband - 1] : NULL;
 	if (b && b->y0 + b->h == (int)VLINE && memcmp(&b->st, &s, sizeof(s)) == 0) {
@@ -1177,7 +1214,7 @@ static void ge_mark_bg(void)
 
 static int ge_gcopy_ok(const GE_State *s, int p)
 {
-	return TextDotY <= 256 && s->ng && s->gy[p] == s->gy[s->gpage[0]];
+	return s->gm != 2 && TextDotY <= 256 && s->ng && s->gy[p] == s->gy[s->gpage[0]];
 }
 
 static int ge_tcopy_x(const GE_State *s)	/* first dot copied, or -1 */
@@ -1373,6 +1410,94 @@ static void ge_text(const GE_Band *b, int opaque)
 }
 
 /* the graphic pages of a band (Grp_DrawLine4), into the screen texture */
+/*
+ * 65536 colours.  Grp_DrawLine16 maps each GVRAM word through two palette
+ * register bytes and Pal16 (Grp16_Col), which no CLUT can do: the CPU
+ * converts the GVRAM rows the bands show into ge_g16 (main RAM, the final
+ * RGB565 dots, row for row), and the GE copies them into the screen.  As
+ * the GE's GVRAM copies, the rows remember the GVRAM row generation, the
+ * palette tables (ge_g16tab) and the 32-word columns converted: only
+ * what changed is converted again.  The waiting 65536 colour bands share
+ * one palette (GE_Line) and are not handed to the GE while it may still
+ * copy rows of the last ones (GE_CanKick).
+ */
+DWORD GE_Pal16Gen;
+static WORD ge_g16[512 * 512] __attribute__((aligned(64)));
+static DWORD ge_g16gen[512], ge_g16all[512], ge_g16tg[512];
+static WORD ge_g16cols[512];
+static WORD ge_g16lo[256], ge_g16hi[256];	/* Pal_Regs[Pal16Adr[lo]], Pal_Regs[Pal16Adr[hi] + 2] << 8 */
+static BYTE ge_g16regs[512];
+static DWORD ge_g16tab = 1, ge_g16p16 = (DWORD)-1;
+
+static void ge_g16_table(const GE_Pal *pal)
+{
+	extern WORD Pal16Adr[256];
+	int i;
+
+	if (ge_g16p16 == GE_Pal16Gen && !memcmp(ge_g16regs, pal->regs, sizeof(ge_g16regs)))
+		return;
+	memcpy(ge_g16regs, pal->regs, sizeof(ge_g16regs));
+	ge_g16p16 = GE_Pal16Gen;
+	ge_g16tab++;
+	for (i = 0; i < 256; i++) {
+		ge_g16lo[i] = pal->regs[Pal16Adr[i]];
+		ge_g16hi[i] = pal->regs[Pal16Adr[i] + 2] << 8;
+	}
+}
+
+static void ge_grp16(const GE_Band *b)
+{
+	const GE_State *s = &b->st;
+	const int x = s->gx[0];
+	/* Grp_DrawLine16: dots x .. 511 of the line, then 0, 1, ... */
+	const int n1 = 512 - x < s->dotx ? 512 - x : s->dotx;
+	const unsigned need = ge_chunks(x, x + n1) | (n1 < s->dotx ? ge_chunks(0, s->dotx - n1) : 0);
+	int i, n, k, c;
+
+	ge_g16_table(&ge_pal[s->pal]);
+	for (i = 0; i < b->h; i++) {
+		const int row = (s->gy[0] + b->y0 + i) & 511;
+		unsigned miss;
+
+		if (ge_g16gen[row] == GE_GRowGen[row] && ge_g16all[row] == GE_GGenAll && ge_g16tg[row] == ge_g16tab)
+			miss = need & ~ge_g16cols[row];
+		else {
+			miss = need;
+			ge_g16cols[row] = 0;
+		}
+		if (!miss)
+			continue;
+		for (c = 0; c < 16; c++)
+			if (miss & (1u << c)) {
+				const WORD *src = (const WORD *)GVRAM + row * 512 + c * 32;
+				WORD *d = ge_g16 + row * 512 + c * 32;
+
+				for (k = 0; k < 32; k++) {
+					const DWORD w = src[k];
+
+					d[k] = w ? Pal16[ge_g16lo[w & 0xff] | ge_g16hi[w >> 8]] : 0;
+				}
+				GE_Stat[GE_ST_G16_DOTS] += 32;
+			}
+		ge_g16cols[row] |= miss;
+		ge_g16gen[row] = GE_GRowGen[row];
+		ge_g16all[row] = GE_GGenAll;
+		ge_g16tg[row] = ge_g16tab;
+	}
+	/* into the screen, the rows up to the wrap at a time */
+	for (i = 0; i < b->h; i += n) {
+		const int row = (s->gy[0] + b->y0 + i) & 511;
+
+		n = (512 - row < b->h - i) ? 512 - row : b->h - i;
+		sceGuCopyImage(GU_PSM_5650, x, row, n1, n, 512, ge_g16, 0, b->y0 + i, 512, GE_VRAM(GE_SCRBUF_L));
+		if (n1 < s->dotx)
+			sceGuCopyImage(GU_PSM_5650, 0, row, s->dotx - n1, n, 512, ge_g16, n1, b->y0 + i, 512,
+				       GE_VRAM(GE_SCRBUF_L));
+		GE_Stat[GE_ST_PIXELS] += n * s->dotx;
+	}
+	sceGuTexSync();		/* the copies are done before the layer goes over them */
+}
+
 static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 {
 	const GE_State *s = &b->st;
@@ -1530,7 +1655,7 @@ static void GE_Render(void *fbp, int passes)
 
 			ge_dotx = s->dotx;
 			if ((passes & GE_P_GRP) && (s->mode == GE_G || s->mode == GE_GM))
-				ge_grp(b, gclut[s->pal]);
+				s->gm == 2 ? ge_grp16(b) : ge_grp(b, gclut[s->pal]);
 			if ((passes & GE_P_COMP) && s->mode == GE_ZERO)
 				ge_fill(0, b->y0, s->dotx, b->h, 0, 0);
 			if ((passes & GE_P_COMP) && ge_layer_band(s)) {
@@ -1586,7 +1711,8 @@ int GE_Room(void)
 
 int GE_CanKick(void)
 {
-	return !ge_nq && GE_Room();
+	/* (a 65536 colour band may convert GVRAM rows the GE's lists still copy) */
+	return !ge_nq && GE_Room() && !(ge_g16pend && ge_g16fly);
 }
 
 void *GE_ListMem(int size)
@@ -1643,8 +1769,9 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_LAYER_US + 2] / f, GE_Stat[GE_ST_LAYER_US + 3] / f,
 		   GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f,
 		   GE_Stat[GE_ST_BUILD_US + 5] / f);
-	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
-		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
+	log_printf("ge per frame: copied %u bytes, 65536 colour dots converted %u; pass us (ge time): copy %u "
+		   "fill %u bg-below %u text %u bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
+		   GE_Stat[GE_ST_G16_DOTS] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,
 		   GE_Stat[GE_ST_PASS_US + 3] / f, GE_Stat[GE_ST_PASS_US + 4] / f, GE_Stat[GE_ST_PASS_US + 5] / f,
 		   GE_Stat[GE_ST_PASS_US + 6] / f);
