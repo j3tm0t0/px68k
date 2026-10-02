@@ -979,9 +979,6 @@ void FASTCALL GVRAM_FastClear(void)
 	DWORD v, h;
 
 	GE_GUARD_FULL(GE_ST_FASTCLR);
-#ifdef PSP
-	GE_GGenAll++;
-#endif
 	v = ((CRTC_Regs[0x29]&4)?512:256);
 	h = ((CRTC_Regs[0x29]&3)?512:256);
 	// やっぱちゃんと範囲指定しないと変になるものもある（ダイナマイトデュークとか）
@@ -1064,6 +1061,10 @@ void FASTCALL GVRAM_FastClear(void)
 			*p++ &= CRTC_FastClrMask;
 			offx = (offx + 1) & 0x1ff;
 		}
+#ifdef PSP
+		/* the words written (p does not wrap at the line end) */
+		GE_GvramSpan(offy + (GrphScrollX[0] & 0x1ff) * 2, h * 2);
+#endif
 
 		offy = (offy + 0x400) & 0x7fc00;
 	}

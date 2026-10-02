@@ -1560,6 +1560,37 @@ void GE_G16Write(DWORD a)
 	}
 }
 
+/* GVRAM bytes a .. a + n - 1 (words) changed (GVRAM_FastClear): GE_G16Write for each word */
+void GE_GvramSpan(DWORD a, DWORD n)
+{
+	DWORD e = a + n;
+
+	if (e > 0x80000)
+		e = 0x80000;
+	while (a < e) {
+		const int row = (a >> 10) & 511;
+		const DWORD re = ((a | 1023) + 1 < e) ? (a | 1023) + 1 : e;
+		const DWORD g = GE_GRowGen[row]++;
+
+		if (GE_G16Live && ge_g16gen[row] == g && ge_g16tg[row] == ge_g16tab &&
+		    ge_g16all[row] == GE_GGenAll) {
+			const WORD *src = (const WORD *)GVRAM + row * 512;
+			WORD *d = ge_g16 + row * 512;
+			const unsigned cols = ge_g16cols[row];
+			DWORD x;
+
+			ge_g16gen[row] = g + 1;
+			for (x = (a >> 1) & 511; x <= ((re - 1) >> 1 & 511); x++)
+				if (cols & (1u << (x >> 5))) {
+					const DWORD w = src[x];
+
+					d[x] = GE_G16DOT(w);
+				}
+		}
+		a = re;
+	}
+}
+
 static void ge_g16_table(const GE_Pal *pal)
 {
 	extern WORD Pal16Adr[256];
@@ -1591,9 +1622,14 @@ static void ge_grp16(const GE_Band *b)
 		const int row = (s->gy[0] + b->y0 + i) & 511;
 		unsigned miss;
 
-		if (ge_g16gen[row] == GE_GRowGen[row] && ge_g16all[row] == GE_GGenAll && ge_g16tg[row] == ge_g16tab)
+		if (ge_g16gen[row] == GE_GRowGen[row] && ge_g16all[row] == GE_GGenAll && ge_g16tg[row] == ge_g16tab) {
 			miss = need & ~ge_g16cols[row];
-		else {
+			if (miss)
+				GE_Stat[GE_ST_G16_WHY + 4]++;	/* columns not converted yet */
+		} else {
+			/* why the row is converted again */
+			GE_Stat[GE_ST_G16_WHY + (!ge_g16cols[row] ? 0 : ge_g16tg[row] != ge_g16tab ? 1 :
+						  ge_g16all[row] != GE_GGenAll ? 2 : 3)]++;
 			miss = need;
 			ge_g16cols[row] = 0;
 		}
@@ -2015,9 +2051,11 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_LAYER_US + 2] / f, GE_Stat[GE_ST_LAYER_US + 3] / f,
 		   GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f,
 		   GE_Stat[GE_ST_BUILD_US + 5] / f);
-	log_printf("ge per frame: copied %u bytes, 65536 colour dots converted %u; pass us (ge time): copy %u "
+	log_printf("ge per frame: copied %u bytes, 65536 colour dots converted %u (rows: new %u palette %u "
+		   "clear %u written %u, columns %u); pass us (ge time): copy %u "
 		   "fill %u bg-below %u text %u bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
-		   GE_Stat[GE_ST_G16_DOTS] / f,
+		   GE_Stat[GE_ST_G16_DOTS] / f, GE_Stat[GE_ST_G16_WHY] / f, GE_Stat[GE_ST_G16_WHY + 1] / f,
+		   GE_Stat[GE_ST_G16_WHY + 2] / f, GE_Stat[GE_ST_G16_WHY + 3] / f, GE_Stat[GE_ST_G16_WHY + 4] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,
 		   GE_Stat[GE_ST_PASS_US + 3] / f, GE_Stat[GE_ST_PASS_US + 4] / f, GE_Stat[GE_ST_PASS_US + 5] / f,
 		   GE_Stat[GE_ST_PASS_US + 6] / f);

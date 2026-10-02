@@ -65,6 +65,8 @@ extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
  */
 extern int GE_G16Live;
 void GE_G16Write(DWORD a);
+/* GVRAM bytes a .. a + n - 1 changed (word aligned), e.g. by a fast clear: as GE_GVRAM_ROW for each word */
+void GE_GvramSpan(DWORD a, DWORD n);
 #define GE_GVRAM_ROW(a)		do { if (GE_G16Live) GE_G16Write(a); \
 				     else GE_GRowGen[((a) >> 10) & 511]++; } while (0)
 /* TVRAM_Write: the TextDrawWork byte at a * 8 changed */
@@ -149,7 +151,8 @@ enum {
 	GE_ST_BUILD_US,		/* + 0-4: time of the build: CLUTs/setup, copy, layer, screen, D-cache; + 5: this thread's CPU time of it */
 	GE_ST_LAYER_US = GE_ST_BUILD_US + 6,	/* + 0-3: of the layer: fill, "gd" rectangles, sprites/BG planes, text */
 	GE_ST_G16_DOTS = GE_ST_LAYER_US + 4,	/* 65536 colour dots converted by the CPU */
-	GE_ST_FRAMES,		/* frames shown */
+	GE_ST_G16_WHY,		/* + 0-4: rows converted: never, palette, GenAll, row written, columns */
+	GE_ST_FRAMES = GE_ST_G16_WHY + 5,	/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
 };
