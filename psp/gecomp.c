@@ -2208,6 +2208,13 @@ static void GE_Render(void *fbp, int passes)
 	sceGuDisable(GU_DITHER);
 	sceGuDisable(GU_BLEND);
 	sceGuDisable(GU_COLOR_TEST);
+	/*
+	 * sceGuScissor only sends the scissor (and drawing region) when the
+	 * list's context has the scissor test on: GE_Build's GU_CALL context
+	 * did not, so the frame's 480 x 272 stayed and dots 480-511 (and lines
+	 * from 272 on) were clipped away.
+	 */
+	sceGuEnable(GU_SCISSOR_TEST);
 	sceGuScissor(0, 0, 512, 512);
 	sceGuTexFilter(GU_NEAREST, GU_NEAREST);
 	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
