@@ -169,11 +169,35 @@ BYTE FASTCALL MFP_Read(DWORD adr)
 				ret = 0x13;
 			else
 				ret = 0x03;
-			hpos = (int)(ICount%HSYNC_CLK);
-			if ( (hpos>=((int)CRTC_Regs[5]*HSYNC_CLK/CRTC_Regs[1]))&&(hpos<((int)CRTC_Regs[7]*HSYNC_CLK/CRTC_Regs[1])) )
-				ret &= 0x7f;
-			else
-				ret |= 0x80;
+			{
+				/*
+				 * The same divisions as before, remembered for the
+				 * values they were made with: polling loops read GPIP
+				 * thousands of times per frame with ICount (changed
+				 * only between two CPU slices) and the CRTC registers
+				 * the same.
+				 */
+				static int memo_ok, m_ic, m_hs, m_hpos, m_lo, m_hi;
+				static BYTE m_r1, m_r5, m_r7;
+				if ( !memo_ok||(m_ic!=ICount)||(m_hs!=HSYNC_CLK) ) {
+					m_hpos = (int)(ICount%HSYNC_CLK);
+					m_ic = ICount;
+				}
+				if ( !memo_ok||(m_hs!=HSYNC_CLK)||(m_r1!=CRTC_Regs[1])||(m_r5!=CRTC_Regs[5])||(m_r7!=CRTC_Regs[7]) ) {
+					m_lo = (int)CRTC_Regs[5]*HSYNC_CLK/CRTC_Regs[1];
+					m_hi = (int)CRTC_Regs[7]*HSYNC_CLK/CRTC_Regs[1];
+					m_r1 = CRTC_Regs[1];
+					m_r5 = CRTC_Regs[5];
+					m_r7 = CRTC_Regs[7];
+				}
+				m_hs = HSYNC_CLK;
+				memo_ok = 1;
+				hpos = m_hpos;
+				if ( (hpos>=m_lo)&&(hpos<m_hi) )
+					ret &= 0x7f;
+				else
+					ret |= 0x80;
+			}
 			if (vline!=CRTC_IntLine)
 				ret |= 0x40;
 			break;
