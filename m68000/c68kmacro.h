@@ -147,7 +147,11 @@ extern UINT8 *MEM;
 extern UINT32 BusErrFlag, MemByteAccess;
 #define C68K_RAM_END	0x00a00000
 #ifndef C68K_CALL_RAM
-#define C68K_LIKELY(x)	__builtin_expect(!!(x), 1)
+/* C68K_INL 0: no fast path in the handlers that follow (c68k_op.c sets it per region) */
+#ifndef C68K_INL
+#define C68K_INL	1
+#endif
+#define C68K_LIKELY(x)	__builtin_expect(C68K_INL && (x), 1)
 #else	/* for comparison: always call mem_wrap.c */
 #define C68K_LIKELY(x)	0
 #endif
@@ -1608,7 +1612,8 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode);
 	{																		\
 		icount -= 10;														\
 		PC += MAKE_INT_8(Opcode);											\
-		if ((Opcode & 0xff) == 0xfa && icount > 0)							\
+		if (((Opcode & 0xff) == 0xfa || (Opcode & 0xff) == 0xfc ||			\
+		     (Opcode & 0xff) == 0xf6) && icount > 0)						\
 		{																	\
 			C68K_CALL_OUT													\
 			PC = C68k_Idle_Loop(CPU, PC, Opcode);							\

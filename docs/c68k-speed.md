@@ -115,22 +115,36 @@ flags are restored afterwards.
 | C68K: main RAM fast paths inlined into the handlers (core text 196 -> 368 KB) | fuzz.sh identical; hardware above |
 | GVRAM word writes: `GVRAM_WriteWord` (65536 colour layouts in one store, GE hooks once per word per gecomp.h; 16/256 colour 512 dot: the high byte only marks line 1023, as GVRAM_Write does); mem_wrap.c calls it directly for word and long writes | gvword.sh (vs GVRAM_Write, host and -DPSP hooks), fuzz.sh, SION IV weapon select host hashes |
 
+| C68K: idle loop skip for MFP GPIP polls (`btst #n,$e88001` / `btst Dn,(An)` + `Bcc.s` back) | fuzz.sh with the harness generating these polls (~127k skips per idle run); 超連射68K, SION IV host hashes |
+
 The GVRAM path per word is now ~40 instructions and 3 calls (long writes:
-~60 for both words instead of ~230).  Hardware numbers for SION IV: to be
-measured.
+~60 for both words instead of ~230).
+
+Hardware results (prof off):
+
+* SION IV weapon select: psp-tuning + GVRAM word path only 56.5 / 56.3 ms,
+  + inlined core 53.9 / 54.8 ms; merged with the GE 65536 colour work:
+  50.4 ms.
+* 超連射68K `benchf 3000 300 1`, one part reverted at a time from the merge
+  (16.89 ms): core inline reverted 15.93 (the inlined core costs it ~1 ms,
+  I-cache), GPIP memo reverted 17.88, GVRAM word path reverted 17.44;
+  + GPIP idle skip 15.68.
+
+The inlined core helps SION IV (~2 ms) and costs 超連射68K (~1 ms): code
+placement matters more than instruction counts on the Allegrex.  Variants
+being measured: handlers reordered hot-first (from host profiles of the
+three games), with the RAM fast paths inlined everywhere / only in the hot
+handlers / nowhere (scratch tooling: reorder of c68k_op.c, `C68K_INL` per
+region).
 
 ## 5. Remaining incremental options (a)
 
-1. GPIP poll idle skip: `btst Dn,(An)` / `btst #n,abs.l` + `Bcc.s` back to it
-   on $e88001 (SION IV title, 超連射68K: 41% of its 68000 cycles): GPIP
-   cannot change inside a slice, so end the slice as `C68k_Idle_Loop` does
-   for RAM.  Big in polling phases, nothing in the 3D phase.
-2. GVRAM writes straight from the core (a GVRAM test in the write macros
+1. GVRAM writes straight from the core (a GVRAM test in the write macros
    before calling mem_wrap.c): saves ~2 call levels per word; only if the
    hardware still shows the GVRAM path.
-3. Flags as locals like the cycle counter (~3-4 instructions per 68000
+2. Flags as locals like the cycle counter (~3-4 instructions per 68000
    instruction).  Risky for the code size / layout effects seen above.
-4. `BusErrHandling` test per dispatch (~4 instructions): could move into the
+3. `BusErrHandling` test per dispatch (~4 instructions): could move into the
    slow memory paths, with care for when the exception is taken.
 
 ## 6. Option (b): hand-written MIPS interpreter
@@ -205,7 +219,7 @@ work, and time that PROF_CPU attributes to the 68000 without it being the
    prof on and off, to see what is left.
 2. If the GVRAM / GE path still dominates: item 2 of section 5 and making
    GE_G16Write cheaper per word (GE side).
-3. GPIP poll idle skip (section 5 item 1) for the polling games.
+3. (done: GPIP poll idle skip.)
 4. Revisit (b) only if a game is found whose PROF_CPU, after the above, is
    really instruction-bound (`cpubench`-like rates times its cycle count
    explain its time); (b) is the better effort/gain point, (c) only if (b)

@@ -130,12 +130,49 @@ void C68k_Reset(c68k_struc *CPU)
  * reads have no other side effect).  Otherwise the flags set here are the
  * ones the TST/CMP, which runs next, sets again (neither touches X), and
  * nothing else changes.
+ *
+ * Also the polls of MFP GPIP ($e88001: display / raster bits), e.g. in
+ * Chorensha 68K and SION IV:
+ *
+ *	loop:	btst	#n,$e88001	; 20 cycles	(Bcc.s -10)
+ *		bne.s	loop
+ *	loop:	btst	Dn,(An)		; 8 cycles	(Bcc.s -4)
+ *		bne.s	loop
+ *
+ * GPIP depends on vline, the frame's ICount and CRTC registers, which
+ * nothing changes inside a C68k_Exec call but the CPU, and reading it has
+ * no side effect (cpu_idle_read_byte), so the same holds.  BTST only sets
+ * Z.
  */
 UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
 {
 	UINT32 op = *(UINT16 *)PC, adr, src, dst, res;
-	INT32 c, cond;
+	INT32 c, cond, len, cyc;
 
+	switch (Opcode & 0xff)
+	{
+	case 0xfc:	/* BTST Dn,(An) */
+		if ((op & 0xf1f8) != 0x0110)
+			return PC;
+		if (!cpu_idle_read_byte(CPU->A[op & 7], &res))
+			return PC;
+		FLAG_Z = res & (1 << (CPU->D[(op >> 9) & 7] & 7));
+		len = 2;
+		cyc = 8;
+		goto cond;
+	case 0xf6:	/* BTST #n,abs.l */
+		if (op != 0x0839)
+			return PC;
+		adr = (*(UINT16 *)(PC + 4) << 16) | *(UINT16 *)(PC + 6);
+		if (!cpu_idle_read_byte(adr, &res))
+			return PC;
+		FLAG_Z = res & (1 << (*(UINT8 *)(PC + 2) & 7));
+		len = 8;
+		cyc = 20;
+		goto cond;
+	}
+	len = 4;
+	cyc = 12;
 	adr = CPU->A[op & 7] + MAKE_INT_16(*(UINT16 *)(PC + 2));
 	switch (op & 0xf1f8)
 	{
@@ -168,6 +205,7 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
 		return PC;
 	}
 
+cond:
 	switch ((Opcode >> 8) & 15)
 	{
 	case 2:  cond = COND_HI(); break;
@@ -189,12 +227,12 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
 		return PC;
 
 	c = CPU->ICount;
-	c -= (c - 1) / 22 * 22;		/* whole loops: c in 1..22 */
-	c -= 12;			/* TST/CMP */
+	c -= (c - 1) / (cyc + 10) * (cyc + 10);	/* whole loops: c in 1..cyc + 10 */
+	c -= cyc;			/* TST/CMP/BTST */
 	if (c > 0)
-		c -= 10;		/* Bcc, back to the TST/CMP */
+		c -= 10;		/* Bcc, back to the TST/CMP/BTST */
 	else
-		PC += 4;		/* stopped at the Bcc */
+		PC += len;		/* stopped at the Bcc */
 	CPU->ICount = c;
 	return PC;
 }
