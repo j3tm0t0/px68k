@@ -48,6 +48,7 @@
 #include "../psp/prof.h"
 #ifdef PSP
 #include "../psp/gecomp.h"
+#include "../psp/log.h"
 #endif
 #include "joystick.h"
 #include "keyboard.h"
@@ -1143,6 +1144,24 @@ static void DrawLine(void);
 
 void WinDraw_DrawLine(void)
 {
+	/*
+	 * VLINE is (DWORD)-1 when the line was outside CRTC_VSTART..VEND at the
+	 * start of the scan line and a CRTC write moved the display start before
+	 * it was drawn.  TextDirtyLine[-1] is the last byte of TextDrawPattern
+	 * (plane 3, pattern 0xff, dot 7): clearing it lost that bit of every
+	 * text byte decoded afterwards (e.g. Gradius' power-up gauge).  Nothing
+	 * of such a line is shown (psp_flush_line drops VLINE >= 512).
+	 */
+	if (VLINE >= 1024) {
+#ifdef PSP
+		static int logged;
+		if (logged < 4) {
+			logged++;
+			log_printf("WinDraw_DrawLine: VLINE %d out of range, not drawn\n", (int)VLINE);
+		}
+#endif
+		return;
+	}
 	if (!TextDirtyLine[VLINE]) return;
 	TextDirtyLine[VLINE] = 0;
 	Draw_DrawFlag = 1;
