@@ -131,7 +131,8 @@ void net_pause(void)
 	/* The cap can outlast the disconnect for a while: retry until the clock is up. */
 	for (i = 0; i < 100; i++) {
 		scePowerSetClockFrequency(full_cpu, full_cpu, full_bus);
-		if (scePowerGetCpuClockFrequency() >= full_cpu)
+		if (scePowerGetCpuClockFrequency() >= full_cpu &&
+		    scePowerGetBusClockFrequency() >= full_bus)
 			break;
 		sceKernelDelayThread(50 * 1000);
 	}
