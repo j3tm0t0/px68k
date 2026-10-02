@@ -637,6 +637,8 @@ static int psp_paused;
 static unsigned psp_frame_no, psp_bf_start, psp_bf_end;
 static SceUInt64 psp_bf_t0;
 static int psp_bf_skip, psp_bf_prof, psp_bf_saved_skip, psp_bf_saved_prof;
+static int psp_bf_rt;	/* benchf in real time: paced, with the sound callback, as in play */
+static unsigned psp_bf_exec_us;
 /* capf: frame whose composited screen goes to cap.raw (0: none). */
 static unsigned psp_cap_frame;
 static int psp_cap_saved_skip;
@@ -756,7 +758,10 @@ static void psp_debug_frame(unsigned us)
 			psp_bf_saved_skip = Config.FrameRate;
 			psp_bf_saved_prof = prof_on;
 			Config.FrameRate = psp_bf_skip;
-			Config.NoWaitMode = 1;
+			Config.NoWaitMode = !psp_bf_rt;
+			if (psp_bf_rt)
+				DSound_Play();
+			psp_bf_exec_us = 0;
 			prof_on = psp_bf_prof;	/* the timers cost time too */
 			memset(prof_us, 0, sizeof(prof_us));
 			memset(prof_count, 0, sizeof(prof_count));
@@ -767,6 +772,7 @@ static void psp_debug_frame(unsigned us)
 			unsigned n = psp_frame_no - psp_bf_start;
 			unsigned total, decode, mix;
 
+			psp_bf_exec_us += us;
 			if (psp_frame_no < psp_bf_end)
 				return;	/* no per-second log while measuring */
 			total = (unsigned)(sceKernelGetSystemTimeWide() - psp_bf_t0);
@@ -778,7 +784,7 @@ static void psp_debug_frame(unsigned us)
 			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
 			/* us per emulated frame */
 			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
-				   "draw %u snd %u slice %u line %u (adpcmpre %u opmtimer %u mcry %u) lines %u shown %u cpu %d/%d\n", n, total / n,
+				   "draw %u snd %u slice %u line %u (adpcmpre %u opmtimer %u mcry %u) lines %u shown %u cpu %d/%d%s exec %u\n", n, total / n,
 				   n * 1000000u / total, n * 10000000u / total % 10,
 				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
 				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
@@ -786,7 +792,7 @@ static void psp_debug_frame(unsigned us)
 				   (prof_us[PROF_LINE] > prof_us[PROF_SOUND] ? prof_us[PROF_LINE] - prof_us[PROF_SOUND] : 0) / n,
 				   prof_us[PROF_ADPCMPRE] / n, prof_us[PROF_OPMTIMER] / n, prof_us[PROF_MCRY] / n,
 				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency(),
-				   scePowerGetBusClockFrequency());
+				   scePowerGetBusClockFrequency(), psp_bf_rt ? " rt" : "", psp_bf_exec_us / (n - 1 ? n - 1 : 1));
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
 			RTC_TimeHook = NULL;
 			DSound_Play();
@@ -872,13 +878,14 @@ static void psp_debug_poll(void)
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
 			psp_exec_us = psp_exec_max_us = 0;
-		} else if ((dx = 1, sscanf(cmd, "benchf %u %u %d %d", &bf_start, &bf_frames, &n, &dx)) >= 3 && bf_start > 0 &&
+		} else if ((dx = 1, dy = 0, sscanf(cmd, "benchf %u %u %d %d %d", &bf_start, &bf_frames, &n, &dx, &dy)) >= 3 && bf_start > 0 &&
 			   bf_frames > 0 && n >= 1 && n <= 6 && !psp_bf_end && !psp_bench_end) {
 			/* Deterministic: same frames after a reset, run flat out. */
 			psp_bf_start = bf_start;
 			psp_bf_end = bf_start + bf_frames;
 			psp_bf_skip = n;
 			psp_bf_prof = dx != 0;
+			psp_bf_rt = dy != 0;
 			psp_frame_no = 0;
 			DSound_Stop();	/* deterministic, see capf */
 			RTC_TimeHook = psp_fixed_time;
@@ -920,7 +927,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, benchf <frame> <frames> <skip> [prof 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
