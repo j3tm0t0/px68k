@@ -285,7 +285,17 @@ static void serve(int fd)
 
 		FD_ZERO(&rd);
 		FD_SET(fd, &rd);
-		if (select(fd + 1, &rd, NULL, NULL, &tv) <= 0)
+		if (server_fd >= 0)
+			FD_SET(server_fd, &rd);
+		if (select((fd > server_fd ? fd : server_fd) + 1, &rd, NULL, NULL, &tv) <= 0)
+			continue;
+		/*
+		 * A new client takes over: the old one may be gone without its
+		 * close reaching us (e.g. across a bench's WLAN pause).
+		 */
+		if (server_fd >= 0 && FD_ISSET(server_fd, &rd))
+			return;
+		if (!FD_ISSET(fd, &rd))
 			continue;
 		r = recv(fd, cmd + cmd_len, sizeof(cmd) - 1 - cmd_len, 0);
 		if (r <= 0)
