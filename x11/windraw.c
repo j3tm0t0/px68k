@@ -630,8 +630,7 @@ WinDraw_Draw(void)
 	sceGuStart(GU_DIRECT, list);
 
 	sceGuClearColor(0);
-	sceGuClearDepth(0);
-	sceGuClear(GU_COLOR_BUFFER_BIT|GU_DEPTH_BUFFER_BIT);
+	sceGuClear(GU_COLOR_BUFFER_BIT);	/* no depth test, so no depth clear */
 
 	// º¸È¾Ê¬
 	vtxl->u = 0;
@@ -843,13 +842,39 @@ static int wd_n;	/* its width in pixels */
 #ifdef PSP
 static WORD psp_line[PSP_LINE_MAX] __attribute__((aligned(64)));
 
+/*
+ * Copy n pixels of a line to VRAM (uncached).  dst and src are 16-byte
+ * aligned (rows of 1024/512 bytes, psp_line).
+ *
+ * PSP_VFPU_COPY (off by default) moves 16 bytes per instruction with the
+ * VFPU instead; it needs the thread that runs the emulation to have the
+ * VFPU attribute, e.g. PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER |
+ * PSP_THREAD_ATTR_VFPU) in winx68k.cpp, or it raises an exception.
+ */
 static void psp_copy_line(WORD *dst, const WORD *src, int n)
 {
 	WD_PAIR *d = (WD_PAIR *)dst;
 	const WD_PAIR *s = (const WD_PAIR *)src;
-	int k = n >> 1;
+	int k;
 
-	for (; k >= 4; k -= 4, d += 4, s += 4) {
+#ifdef PSP_VFPU_COPY
+	for (k = n >> 5; k > 0; k--, d += 16, s += 16) {	/* 64 bytes */
+		__asm__ volatile(
+			"lv.q C000, 0(%1)\n\t"
+			"lv.q C010, 16(%1)\n\t"
+			"lv.q C020, 32(%1)\n\t"
+			"lv.q C030, 48(%1)\n\t"
+			"sv.q C000, 0(%0)\n\t"
+			"sv.q C010, 16(%0)\n\t"
+			"sv.q C020, 32(%0)\n\t"
+			"sv.q C030, 48(%0)\n\t"
+			: : "r"(d), "r"(s) : "memory");
+	}
+	dst += n & ~31;
+	src += n & ~31;
+	n &= 31;
+#endif
+	for (k = n >> 1; k >= 4; k -= 4, d += 4, s += 4) {
 		UINT32 a = s[0], b = s[1], c = s[2], e = s[3];
 		d[0] = a;
 		d[1] = b;
