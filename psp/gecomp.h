@@ -33,6 +33,12 @@ extern int GE_PalDirty;		/* set by TVRAM_SetAllDirty: palettes/registers may hav
 
 /* windraw.c: draw the waiting bands now and wait until the GE is done */
 void WinDraw_GESync(void);
+/* windraw.c: wait until the GE is done (with what it was given) */
+void WinDraw_GEWait(void);
+/* windraw.c: hand the waiting bands to the GE without waiting (if GE_CanKick) */
+void WinDraw_GEKick(void);
+/* windraw.c: GE_Done() if the GE is done, without waiting */
+void WinDraw_GEPoll(void);
 
 void GE_GvramGuard(DWORD adr);	/* GVRAM_Write, its address */
 void GE_TvramGuard(DWORD adr);	/* TVRAM_Write, its address */
@@ -59,6 +65,10 @@ int GE_Pending(void);
  */
 void *GE_Build(void *fbp, int passes);
 int GE_Room(void);
+/* GE_Room, and no BG writes wait for the GE's lists: a list may be queued now */
+int GE_CanKick(void);
+/* list memory (64-byte aligned), for a direct list that calls a GE_Build list */
+void *GE_ListMem(int size);
 void GE_Done(void);
 
 /* GE_Render passes, in this order ("ge time" times them one by one) */
