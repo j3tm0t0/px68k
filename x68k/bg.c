@@ -137,7 +137,7 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		adr ^= 1;
 		if (Sprite_Regs[adr] != data)
 		{
-			GE_GUARD();
+			GE_GUARD_SPRITE();
 #ifdef USE_ASM
 			_asm
 			{
@@ -367,11 +367,10 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 	{
 		adr -= 0xeb8000;
 		if (BG[adr]==data) return;			// データに変化が無ければ帰る
-		GE_GUARD();
-		BG[adr] = data;
 #ifdef PSP
-		GE_BGWrite(adr, data);
+		GE_BGData(adr, data);	/* before BG[] changes */
 #endif
+		BG[adr] = data;
 #ifdef BG_USE_CHRBUF
 		if (adr<0x2000)
 		{
