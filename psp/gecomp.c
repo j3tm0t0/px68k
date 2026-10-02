@@ -539,6 +539,15 @@ void GE_BGData(DWORD adr, BYTE data)
 static int ge_vband(const GE_State *s);
 static int ge_vline(const GE_State *s);
 
+/* the lines left to the CPU, per reason (GE_R_*), since the last "ge" */
+typedef struct {
+	unsigned frames, frame;		/* frames with such lines; the last one + 1 */
+	unsigned vmin, vmax;		/* VLINE range */
+	unsigned dotx, doty;		/* the last one's screen size */
+	BYTE	r28, vc0;		/* ... CRTC R20 and VC R0 */
+} GE_CpuLine;
+static GE_CpuLine ge_cpuline[GE_R_VLINE + 1];
+
 int GE_Line(void)
 {
 	GE_State s;
@@ -547,8 +556,23 @@ int GE_Line(void)
 
 	r = VLINE >= GE_ROWS ? GE_R_VLINE : ge_eval(&s);
 	if (r) {
+		GE_CpuLine *c = &ge_cpuline[r];
+
 		GE_StatCpuLines++;
 		GE_Stat[GE_ST_CPU_REASON + r]++;
+		/* what these lines are, for "ge" */
+		if (!c->frames || VLINE < c->vmin)
+			c->vmin = VLINE;
+		if (VLINE > c->vmax)
+			c->vmax = VLINE;
+		if (c->frame != GE_Stat[GE_ST_FRAMES] + 1) {
+			c->frame = GE_Stat[GE_ST_FRAMES] + 1;
+			c->frames++;
+		}
+		c->r28 = CRTC_Regs[0x28];
+		c->vc0 = VCReg0[1];
+		c->dotx = TextDotX;
+		c->doty = TextDotY;
 		return 0;
 	}
 	if (ge_inflight && !(VLINE & 15))
@@ -970,6 +994,17 @@ static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, 
 }
 
 /* BG_DrawLine without the fill: sprites and BG planes */
+/* "ge": CPU time of the parts of the layer build */
+static unsigned ge_lt;
+
+static void ge_ltick(int k)
+{
+	const unsigned t = sceKernelGetSystemTimeLow();
+
+	GE_Stat[GE_ST_LAYER_US + k] += t - ge_lt;
+	ge_lt = t;
+}
+
 static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 {
 	const GE_State *s = &b->st;
@@ -985,6 +1020,7 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 		if (bg1)
 			ge_under(b, 8, s->bg1top, s->bg1sx, s->bg1sy, s->hadj, pal);
 	}
+	ge_ltick(1);
 	sceGuTexMode(GU_PSM_T4, 0, 0, 0);
 	sceGuEnable(GU_ALPHA_TEST);
 	ge_spritelevel(b, 1);
@@ -994,6 +1030,7 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 	if (bg0)
 		ge_bgplane(b, sz0, s->bg0top, s->bg0sx, s->bg0sy, adj0);
 	ge_spritelevel(b, 3);
+	ge_ltick(2);
 }
 
 /* what the waiting bands use of BG[] (GE_BGData) */
@@ -1354,17 +1391,21 @@ static void GE_Render(void *fbp, int passes)
 			if (!ge_layer_band(s))
 				continue;
 			ge_dotx = s->dotx;
+			ge_lt = sceKernelGetSystemTimeLow();
 			if (passes & GE_P_FILL)
 				ge_fill(0, b->y0, s->dotx, b->h,
 					(s->ton || s->bgon) ? ge_c32(ge_pal[s->pal].text[0], 255) : 0, 1);
+			ge_ltick(0);
 			if ((passes & GE_P_BGB) && s->mcase && s->bgon) {
 				sceGuClutLoad(256 / 8, tclut[s->pal]);
 				ge_bg(b, 1, &ge_pal[s->pal]);
 			}
+			ge_lt = sceKernelGetSystemTimeLow();
 			if ((passes & GE_P_TEXT) && s->ton) {
 				sceGuClutLoad(256 / 8, tclut[s->pal]);
 				ge_text(b, !s->mcase);
 			}
+			ge_ltick(3);
 			if ((passes & GE_P_BGA) && !s->mcase && s->bgon) {
 				sceGuClutLoad(256 / 8, tclut[s->pal]);
 				ge_bg(b, 0, &ge_pal[s->pal]);
@@ -1488,11 +1529,14 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
 		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
 	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us; "
-		   "build us: setup %u copy %u layer %u screen %u dcache %u (cpu of this thread %u)\n",
+		   "build us: setup %u copy %u layer %u (fill %u gd %u spr/bg %u text %u) screen %u dcache %u "
+		   "(cpu of this thread %u)\n",
 		   GE_Stat[GE_ST_FRAME_WAIT_US] / f, GE_Stat[GE_ST_LINE_WAITS] / f,
 		   GE_Stat[GE_ST_LINE_WAITS] * 100 / f % 100, GE_Stat[GE_ST_LINE_WAIT_US] / f,
 		   GE_Stat[GE_ST_DONE_US] / f, GE_Stat[GE_ST_BUILD_US] / f, GE_Stat[GE_ST_BUILD_US + 1] / f,
-		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f,
+		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_LAYER_US] / f, GE_Stat[GE_ST_LAYER_US + 1] / f,
+		   GE_Stat[GE_ST_LAYER_US + 2] / f, GE_Stat[GE_ST_LAYER_US + 3] / f,
+		   GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f,
 		   GE_Stat[GE_ST_BUILD_US + 5] / f);
 	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
 		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
@@ -1508,6 +1552,14 @@ void GE_LogStats(void)
 	for (i = 1; i <= GE_R_VLINE && n < (int)sizeof(buf); i++)
 		n += snprintf(buf + n, sizeof(buf) - n, " %s %u", reason[i], GE_Stat[GE_ST_CPU_REASON + i]);
 	log_printf("%s\n", buf);
+	for (i = 1; i <= GE_R_VLINE; i++) {
+		const GE_CpuLine *c = &ge_cpuline[i];
+
+		if (c->frames)
+			log_printf("ge cpu lines %s: %u frames, lines %u-%u, last %ux%u R20 %02x VC0 %02x\n",
+				   reason[i], c->frames, c->vmin, c->vmax, c->dotx, c->doty, c->r28, c->vc0);
+	}
+	memset(ge_cpuline, 0, sizeof(ge_cpuline));
 	memset(GE_Stat, 0, sizeof(GE_Stat));
 	GE_StatLines = GE_StatCpuLines = GE_StatBands = GE_StatFlushes = 0;
 }
