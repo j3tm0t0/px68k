@@ -1141,7 +1141,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD temp;
 
 	GE_GUARD_GVRAM(adr);
-	GE_GVRAM_TOUCH(adr);
+	GE_GVRAM_TOUCH();
 	adr ^= 1;
 	adr -= 0xc00000;
 
@@ -1173,7 +1173,15 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 			{
 				page = (BYTE)((adr>>17)&0x0c);
 				temp = ((WORD)data&15)<<page;
+#ifdef PSP
+				temp |= (*ram)&(~(0xf<<page));
+				if (*ram != temp) {
+					*ram = temp;
+					GE_GVRAM_ROW(adr);	/* the GE's copy of the row is old */
+				}
+#else
 				*ram = ((*ram)&(~(0xf<<page)))|temp;
+#endif
 				switch(adr/0x80000)
 				{
 					case 0:	scr = GrphScrollY[0]; break;

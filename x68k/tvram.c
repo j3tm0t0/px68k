@@ -117,7 +117,6 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
 	GE_GUARD_TVRAM(adr);
-	GE_TVRAM_TOUCH(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
 	if (CRTC_Regs[0x2a]&1)			// 同時アクセス
@@ -241,8 +240,15 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		t0 |= ptr[(pat * 2)];
 		t1 |= ptr[(pat * 2 + 1)];
 
-		*((DWORD *)&TextDrawWork[workadr]) = t0;
-		*(((DWORD *)(&TextDrawWork[workadr])) + 1) = t1;
+		{
+			DWORD *const w = (DWORD *)&TextDrawWork[workadr];
+
+			if (w[0] != t0 || w[1] != t1) {
+				w[0] = t0;
+				w[1] = t1;
+				GE_TVRAM_TOUCH(workadr >> 3);	/* row workadr >> 10 */
+			}
+		}
 	}
 #endif	/* USE_ASM */
 }
