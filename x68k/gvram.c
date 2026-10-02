@@ -1149,8 +1149,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	{
 		if ( adr<0x80000 )
 		{
+#ifdef PSP
+			if (GVRAM[adr] != data) {
+				GVRAM[adr] = data;
+				GE_GVRAM_ROW(adr);
+			}
+#else
 			GVRAM[adr] = data;
-			GE_GVRAM_ROW(adr);
+#endif
 			line = (((adr&0x7ffff)/1024)-GrphScrollY[0])&511;
 		}
 	}
@@ -1225,8 +1231,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 		case 3:					// 65536 colors
 			if ( adr<0x80000 )
 			{
+#ifdef PSP
+				if (GVRAM[adr] != data) {
+					GVRAM[adr] = data;
+					GE_GVRAM_ROW(adr);	/* the GE's copies, its 65536 colour dots */
+				}
+#else
 				GVRAM[adr] = data;
-				GE_GVRAM_ROW(adr);
+#endif
 				line = (((adr&0x7ffff)>>10)-GrphScrollY[0])&511;
 			}
 //			else

@@ -53,8 +53,20 @@ void GE_FullGuard(int why);	/* anything else: wait (why: GE_ST_*) */
  * GVRAM_FastClear, GVRAM_Init, TVRAM_Write, TVRAM_RCUpdate and TVRAM_Init.
  */
 extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
-/* GVRAM_Write: the word at byte offset a changed */
-#define GE_GVRAM_ROW(a)		(GE_GRowGen[((a) >> 10) & 511]++)
+/*
+ * The contract for anything that writes GVRAM: after the GVRAM word at byte
+ * offset a (GVRAM + (a & ~1), 0-0x7ffff) has changed, in any layout, call
+ * GE_GVRAM_ROW(a) once (once per word is enough; not needed when the value
+ * did not change).  Before the write, GE_GUARD_GVRAM(the X68000 address)
+ * (waits for the GE if it still reads the word).  It bumps the row's
+ * generation (the GE's GVRAM copies) and, once 65536 colours were shown,
+ * converts the word into the GE's 65536 colour dots (GE_G16Write, about
+ * 40 cycles).
+ */
+extern int GE_G16Live;
+void GE_G16Write(DWORD a);
+#define GE_GVRAM_ROW(a)		do { if (GE_G16Live) GE_G16Write(a); \
+				     else GE_GRowGen[((a) >> 10) & 511]++; } while (0)
 /* TVRAM_Write: the TextDrawWork byte at a * 8 changed */
 #define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
 /* palette.c: Pal16 is about to change (bumped after the bands drawn with it) */

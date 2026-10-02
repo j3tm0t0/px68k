@@ -137,6 +137,8 @@ typedef struct {
 typedef struct {
 	GE_State st;
 	WORD	y0, h;
+	short	rec0, rec1;	/* ge_rec[] of its BG/sprite draws (ge_prio), */
+	unsigned recbuild;	/* ... recorded in this build (ge_buildno), else 0 */
 } GE_Band;
 
 #define GE_NBAND	32	/* worst case (8x8 BG, 512 dots, 1-line bands) ~500 KB of the 1 MB display list */
@@ -928,6 +930,42 @@ static BYTE ge_sb[GE_MAXQ];
 static GE_CV ge_cq[GE_MAXQ * 2];
 
 /* draw the nq quads of ge_sq/ge_sb, n[blk] of each block */
+/*
+ * The layer pass's BG/sprite draws of a band that ge_prio masks with them
+ * (pafter & 2) are recorded and drawn again from the same vertices.
+ */
+typedef struct {
+	const void *v;
+	const void *tex;	/* textured: the atlas, else NULL ("gd" rectangles) */
+	short	n, th;		/* vertices, the atlas' height */
+	BYTE	blk;		/* palette block */
+} GE_Rec;
+
+#define GE_NREC		1024
+static GE_Rec ge_rec[GE_NREC];
+static int ge_nrec, ge_recon, ge_recok;
+static const void *ge_rtex;	/* the atlas set for the draws */
+static int ge_rth;
+static unsigned ge_buildno = 1;	/* GE_Build calls: the vertices are the build's */
+
+static void ge_record(const void *tex, const void *v, int n, int blk)
+{
+	GE_Rec *r;
+
+	if (!ge_recon)
+		return;
+	if (ge_nrec == GE_NREC) {
+		ge_recok = 0;
+		return;
+	}
+	r = &ge_rec[ge_nrec++];
+	r->v = v;
+	r->tex = tex;
+	r->n = n;
+	r->th = ge_rth;
+	r->blk = blk;
+}
+
 static void ge_sorted_draw(int nq, const int *n)
 {
 	GE_TV *base[16], *cur[16];
@@ -947,6 +985,7 @@ static void ge_sorted_draw(int nq, const int *n)
 		if (n[k]) {
 			sceGuClutMode(GU_PSM_8888, 0, 0x0f, k);
 			ge_draw(base[k], cur[k]);
+			ge_record(ge_rtex, base[k], cur[k] - base[k], k);
 		}
 }
 
@@ -1128,6 +1167,8 @@ static void ge_spritelevel(const GE_Band *b, const BYTE *lst, int cnt)
 		}
 	}
 	sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
+	ge_rtex = GE_VRAM(GE_ATLAS16);
+	ge_rth = 128;
 	sceGuEnable(GU_DEPTH_TEST);
 	sceGuDepthFunc(ge_zmask ? GU_ALWAYS : GU_LEQUAL);
 	ge_sorted_draw(nq, n);
@@ -1143,6 +1184,8 @@ static void ge_bgplane(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy
 		sceGuTexImage(0, 512, 32, 512, GE_VRAM(GE_ATLAS8));
 	else
 		sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
+	ge_rtex = GE_VRAM(sz == 8 ? GE_ATLAS8 : GE_ATLAS16);
+	ge_rth = sz == 8 ? 32 : 128;
 	ge_nodepth();
 	ge_sorted_draw(nq, n);
 }
@@ -1160,6 +1203,7 @@ static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, 
 	sceGuDisable(GU_ALPHA_TEST);
 	ge_nodepth();
 	sceGuDrawArray(GU_SPRITES, GE_CVFMT, n * 2, 0, v);
+	ge_record(NULL, v, n * 2, 0);
 	GE_Stat[GE_ST_DRAWS]++;
 	GE_Stat[GE_ST_VERTS] += n * 2;
 	sceGuEnable(GU_TEXTURE_2D);
@@ -1172,8 +1216,11 @@ static unsigned ge_lt;
 
 static void ge_ltick(int k)
 {
-	const unsigned t = sceKernelGetSystemTimeLow();
+	unsigned t;
 
+	if (ge_zmask)
+		return;		/* ge_prio (the screen) draws the BG again */
+	t = sceKernelGetSystemTimeLow();
 	GE_Stat[GE_ST_LAYER_US + k] += t - ge_lt;
 	ge_lt = t;
 }
@@ -1207,6 +1254,26 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 		ge_bgplane(b, sz0, s->bg0top, s->bg0sx, s->bg0sy, adj0);
 	ge_spritelevel(b, lst[2], cnt[2]);
 	ge_ltick(2);
+}
+
+/* ge_bg in the layer pass; the draws are recorded when ge_prio draws them again */
+static void ge_bg_rec(GE_Band *b, int gd)
+{
+	const int rec = b->st.prio && (b->st.pafter & 2);
+
+	b->recbuild = 0;
+	if (rec) {
+		ge_recon = 1;
+		ge_recok = 1;
+		b->rec0 = ge_nrec;
+	}
+	ge_bg(b, gd, &ge_pal[b->st.pal]);
+	if (rec) {
+		ge_recon = 0;
+		b->rec1 = ge_nrec;
+		if (ge_recok)
+			b->recbuild = ge_buildno;
+	}
 }
 
 /* what the waiting bands use of BG[] (GE_BGData) */
@@ -1466,6 +1533,33 @@ static WORD ge_g16lo[256], ge_g16hi[256];	/* Pal_Regs[Pal16Adr[lo]], Pal_Regs[Pa
 static BYTE ge_g16regs[512];
 static DWORD ge_g16tab = 1, ge_g16p16 = (DWORD)-1;
 
+/* 65536 colours, one dot (Grp16_Col with the tables) */
+#define GE_G16DOT(w)	((w) ? Pal16[ge_g16lo[(w) & 0xff] | ge_g16hi[(w) >> 8]] : 0)
+
+/*
+ * GVRAM_Write (GE_GVRAM_ROW): the word at byte offset a changed.  A row
+ * that holds converted dots stays valid: the word is converted again
+ * (if its columns were converted), its generation follows.
+ */
+int GE_G16Live;
+
+void GE_G16Write(DWORD a)
+{
+	const int row = (a >> 10) & 511;
+	const DWORD g = GE_GRowGen[row]++;
+
+	if (ge_g16gen[row] == g && ge_g16tg[row] == ge_g16tab && ge_g16all[row] == GE_GGenAll) {
+		const int x = (a >> 1) & 511;
+
+		ge_g16gen[row] = g + 1;
+		if (ge_g16cols[row] & (1u << (x >> 5))) {
+			const DWORD w = ((const WORD *)GVRAM)[row * 512 + x];
+
+			ge_g16[row * 512 + x] = GE_G16DOT(w);
+		}
+	}
+}
+
 static void ge_g16_table(const GE_Pal *pal)
 {
 	extern WORD Pal16Adr[256];
@@ -1492,6 +1586,7 @@ static void ge_grp16(const GE_Band *b)
 	int i, n, k, c;
 
 	ge_g16_table(&ge_pal[s->pal]);
+	GE_G16Live = 1;		/* GVRAM_Write converts the words of valid rows */
 	for (i = 0; i < b->h; i++) {
 		const int row = (s->gy[0] + b->y0 + i) & 511;
 		unsigned miss;
@@ -1509,10 +1604,13 @@ static void ge_grp16(const GE_Band *b)
 				const WORD *src = (const WORD *)GVRAM + row * 512 + c * 32;
 				WORD *d = ge_g16 + row * 512 + c * 32;
 
-				for (k = 0; k < 32; k++) {
-					const DWORD w = src[k];
+				for (k = 0; k < 32; k += 4) {
+					const DWORD w0 = src[k], w1 = src[k + 1], w2 = src[k + 2], w3 = src[k + 3];
 
-					d[k] = w ? Pal16[ge_g16lo[w & 0xff] | ge_g16hi[w >> 8]] : 0;
+					d[k] = GE_G16DOT(w0);
+					d[k + 1] = GE_G16DOT(w1);
+					d[k + 2] = GE_G16DOT(w2);
+					d[k + 3] = GE_G16DOT(w3);
 				}
 				GE_Stat[GE_ST_G16_DOTS] += 32;
 			}
@@ -1662,7 +1760,36 @@ static void ge_prio(const GE_Band *b, const unsigned int *tclut)
 		}
 		if ((s->pafter & 2) && s->bgon) {
 			sceGuClutLoad(256 / 8, tclut);
-			ge_bg(b, s->mcase, &ge_pal[s->pal]);
+			if (b->recbuild == ge_buildno) {
+				/* the layer pass' draws again */
+				const void *tex = NULL;
+				int i;
+
+				sceGuTexMode(GU_PSM_T4, 0, 0, 0);
+				sceGuEnable(GU_DEPTH_TEST);
+				sceGuDepthFunc(GU_ALWAYS);
+				for (i = b->rec0; i < b->rec1; i++) {
+					const GE_Rec *r = &ge_rec[i];
+
+					if (!r->tex) {
+						sceGuDisable(GU_TEXTURE_2D);
+						sceGuDisable(GU_ALPHA_TEST);
+						sceGuDrawArray(GU_SPRITES, GE_CVFMT, r->n, 0, r->v);
+						sceGuEnable(GU_TEXTURE_2D);
+					} else {
+						if (r->tex != tex) {
+							tex = r->tex;
+							sceGuTexImage(0, 512, r->th, 512, tex);
+						}
+						sceGuEnable(GU_ALPHA_TEST);
+						sceGuClutMode(GU_PSM_8888, 0, 0x0f, r->blk);
+						sceGuDrawArray(GU_SPRITES, GE_TVFMT, r->n, 0, r->v);
+					}
+					GE_Stat[GE_ST_DRAWS]++;
+					GE_Stat[GE_ST_VERTS] += r->n;
+				}
+			} else
+				ge_bg(b, s->mcase, &ge_pal[s->pal]);
 		}
 		ge_zmask = 0;
 		sceGuPixelMask(0);
@@ -1743,7 +1870,7 @@ static void GE_Render(void *fbp, int passes)
 			ge_ltick(0);
 			if ((passes & GE_P_BGB) && s->mcase && s->bgon) {
 				sceGuClutLoad(256 / 8, tclut[s->pal]);
-				ge_bg(b, 1, &ge_pal[s->pal]);
+				ge_bg_rec(&ge_band[i], 1);
 			}
 			ge_lt = sceKernelGetSystemTimeLow();
 			if ((passes & GE_P_TEXT) && s->ton) {
@@ -1753,7 +1880,7 @@ static void GE_Render(void *fbp, int passes)
 			ge_ltick(3);
 			if ((passes & GE_P_BGA) && !s->mcase && s->bgon) {
 				sceGuClutLoad(256 / 8, tclut[s->pal]);
-				ge_bg(b, 0, &ge_pal[s->pal]);
+				ge_bg_rec(&ge_band[i], 0);
 			}
 		}
 		sceGuTexSync();
@@ -1844,6 +1971,8 @@ void *GE_Build(void *fbp, int passes)
 {
 	unsigned int *l = ge_clist + ge_coff / 4;
 
+	ge_buildno++;		/* the draws recorded before are not of this list */
+	ge_nrec = 0;
 	sceGuStart(GU_CALL, l);
 	GE_Render(fbp, passes);
 	ge_coff += (sceGuFinish() + 63) & ~63;
