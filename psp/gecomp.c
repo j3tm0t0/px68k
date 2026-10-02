@@ -72,6 +72,16 @@ unsigned GE_StatLines, GE_StatBands, GE_StatFlushes, GE_StatCpuLines;
 #define GE_UNCACHED(off) ((BYTE *)(0x44000000 | (off)))
 #define GE_ROWS		256		/* lines the layer and the depth buffer have */
 
+/*
+ * Screens up to 512 lines: the bands of a list are all in lines 0-255 or
+ * all in 256-511 (ge_ybase); the layer, the depth buffer and the copies
+ * have their line y - ge_ybase, the screen is drawn from ScrBufL's line
+ * ge_ybase on (GE_SCREEN), at y - ge_ybase too.
+ */
+static int ge_ybase;
+#define GE_LY(y)	((int)(y) - ge_ybase)
+#define GE_SCREEN	(GE_SCRBUF_L + ge_ybase * 1024)
+
 /* ---- BG pattern shadows ----
  * T4 textures take the left dot from the low nibble, BG[] has it in the high
  * nibble: nibble-swapped copies, written uncached by the CPU. */
@@ -652,7 +662,7 @@ int GE_Line(void)
 	GE_Band *b;
 	int r, vb, vl;
 
-	r = VLINE >= GE_ROWS ? GE_R_VLINE : ge_eval(&s);
+	r = VLINE >= 2 * GE_ROWS ? GE_R_VLINE : ge_eval(&s);
 	if (r) {
 		GE_CpuLine *c = &ge_cpuline[r];
 
@@ -675,6 +685,10 @@ int GE_Line(void)
 	}
 	if (ge_inflight && !(VLINE & 15))
 		WinDraw_GEPoll();	/* done with the last frame? */
+	if (ge_nband && (int)(VLINE & GE_ROWS) != ge_ybase) {
+		GE_Stat[GE_ST_HALF]++;
+		WinDraw_GEKick();	/* the bands of lines 0-255 first */
+	}
 	vb = ge_vband(&s);
 	vl = ge_vline(&s);
 	if (ge_nband == GE_NBAND || ge_vneed + vb + vl + GE_VPAL > GE_VARENA)
@@ -703,6 +717,8 @@ int GE_Line(void)
 		ge_g16pal = s.pal;
 	}
 
+	if (!ge_nband)
+		ge_ybase = VLINE & GE_ROWS;
 	b = ge_nband ? &ge_band[ge_nband - 1] : NULL;
 	if (b && b->y0 + b->h == (int)VLINE && memcmp(&b->st, &s, sizeof(s)) == 0) {
 		b->h++;
@@ -1021,7 +1037,7 @@ int ge_tiles_sz(const GE_Band *b, const int sz, const int mode, DWORD top, DWORD
 		const DWORD yy = sy + i;
 		const int r = yy & (sz - 1);
 		const int nn = (sz - r < b->h - i) ? sz - r : b->h - i;
-		const int y0 = b->y0 + i;
+		const int y0 = GE_LY(b->y0) + i;
 		const BYTE *map = BG + top + ((sz == 8) ? ((yy & 0x1f8) << 4) : ((yy & 0x3f0) << 3));
 		DWORD col = (sx >> sh) & 63;
 		int x = x00, k, run = 0;
@@ -1156,7 +1172,7 @@ static void ge_spritelevel(const GE_Band *b, const BYTE *lst, int cnt)
 		const int top = (int)((DWORD)(sp[1] & 0x3ff) - l0 - 1) - 15;
 		const int i0 = top < 0 ? 0 : top, i1 = top + 16 > b->h ? b->h : top + 16;
 		const int pv = ((ctrl >> 5) & 7) * 16, vf = (ctrl & 0x8000) != 0;
-		GE_TV *e = ge_quad(t, (int)((sp[0] + s->hadj) & 0x3ff) - 16, b->y0 + i0, 16, i1 - i0,
+		GE_TV *e = ge_quad(t, (int)((sp[0] + s->hadj) & 0x3ff) - 16, GE_LY(b->y0) + i0, 16, i1 - i0,
 				   (ctrl & 31) * 16, vf ? pv + 16 - (i0 - top) - (i1 - i0) : pv + (i0 - top),
 				   (ctrl & 0x4000) != 0, vf, sn * 256);
 
@@ -1320,7 +1336,7 @@ static void ge_mark_bg(void)
 
 static int ge_gcopy_ok(const GE_State *s, int p)
 {
-	return (s->gm != 2 || ge_g16ge) && TextDotY <= 256 && s->ng && s->gy[p] == s->gy[s->gpage[0]];
+	return (s->gm != 2 || ge_g16ge) && TextDotY <= 256 && !ge_ybase && s->ng && s->gy[p] == s->gy[s->gpage[0]];
 }
 
 static int ge_tcopy_x(const GE_State *s)	/* first dot copied, or -1 */
@@ -1419,7 +1435,7 @@ static void ge_copy(const GE_Band *b)
 		const int gy = s->gy[s->gpage[0]];
 
 		for (i = 0; i < b->h; i += n) {
-			const int y = b->y0 + i, row = (gy + y) & 511;
+			const int y = GE_LY(b->y0) + i, row = (gy + b->y0 + i) & 511;
 			const unsigned miss = ge_gmiss(y, row, need), m = miss & 0xffff;
 			int c0, c1;
 
@@ -1453,7 +1469,7 @@ static void ge_copy(const GE_Band *b)
 		const int w = (s->tx - ws + s->dotx + 1) >> 1;
 
 		for (i = 0; i < b->h; i += n) {
-			const int y = b->y0 + i, row = (s->ty + y) & 1023;
+			const int y = GE_LY(b->y0) + i, row = (s->ty + b->y0 + i) & 1023;
 			const int miss = ge_tmiss(y, row, ws, w);
 
 			for (n = 1; i + n < b->h && row + n < 1024 && ge_tmiss(y + n, row + n, ws, w) == miss; n++)
@@ -1494,7 +1510,7 @@ static void ge_text(const GE_Band *b, int opaque)
 	if (ws >= 0) {
 		v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 		sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_TCOPY));
-		ge_draw(v, ge_quad(v, 0, b->y0, s->dotx, b->h, s->tx - ws, b->y0, 0, 0, 0));
+		ge_draw(v, ge_quad(v, 0, GE_LY(b->y0), s->dotx, b->h, s->tx - ws, GE_LY(b->y0), 0, 0, 0));
 		return;
 	}
 	while (i < b->h) {
@@ -1508,7 +1524,7 @@ static void ge_text(const GE_Band *b, int opaque)
 
 			v = e = (GE_TV *)ge_mem(GE_NSTRIP(256) * 2 * sizeof(GE_TV));
 			sceGuTexImage(0, 512, 512, 1024, TextDrawWork + row * 1024 + (x & ~15));
-			e = ge_quad(e, c0, b->y0 + i, w, n, x & 15, 0, 0, 0, 0);
+			e = ge_quad(e, c0, GE_LY(b->y0) + i, w, n, x & 15, 0, 0, 0, 0);
 			ge_draw(v, e);
 		}
 		i += n;
@@ -1711,12 +1727,12 @@ static void ge_grp16ge(const GE_Band *b)
 	v = e = (GE_TV *)ge_mem(2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 	for (i = 0; i < b->h; i += n) {
 		/* the copy has the row of line y at y */
-		const int row = copy ? b->y0 : (s->gy[0] + b->y0 + i) & 511;
+		const int row = copy ? GE_LY(b->y0) : (s->gy[0] + b->y0 + i) & 511;
 
 		n = copy ? b->h : ((512 - row < b->h - i) ? 512 - row : b->h - i);
-		e = ge_quad(e, 0, b->y0 + i, n1, n, x, row, 0, 0, 0);
+		e = ge_quad(e, 0, GE_LY(b->y0) + i, n1, n, x, row, 0, 0, 0);
 		if (n1 < s->dotx)
-			e = ge_quad(e, n1, b->y0 + i, s->dotx - n1, n, 0, row, 0, 0, 0);
+			e = ge_quad(e, n1, GE_LY(b->y0) + i, s->dotx - n1, n, 0, row, 0, 0, 0);
 	}
 	sceGuDisable(GU_DEPTH_TEST);
 	sceGuDisable(GU_ALPHA_TEST);
@@ -1794,10 +1810,10 @@ static void ge_grp16(const GE_Band *b)
 		const int row = (s->gy[0] + b->y0 + i) & 511;
 
 		n = (512 - row < b->h - i) ? 512 - row : b->h - i;
-		sceGuCopyImage(GU_PSM_5650, x, row, n1, n, 512, ge_g16, 0, b->y0 + i, 512, GE_VRAM(GE_SCRBUF_L));
+		sceGuCopyImage(GU_PSM_5650, x, row, n1, n, 512, ge_g16, 0, GE_LY(b->y0) + i, 512, GE_VRAM(GE_SCREEN));
 		if (n1 < s->dotx)
-			sceGuCopyImage(GU_PSM_5650, 0, row, s->dotx - n1, n, 512, ge_g16, n1, b->y0 + i, 512,
-				       GE_VRAM(GE_SCRBUF_L));
+			sceGuCopyImage(GU_PSM_5650, 0, row, s->dotx - n1, n, 512, ge_g16, n1, GE_LY(b->y0) + i, 512,
+				       GE_VRAM(GE_SCREEN));
 		GE_Stat[GE_ST_PIXELS] += n * s->dotx;
 	}
 	sceGuTexSync();		/* the copies are done before the layer goes over them */
@@ -1839,12 +1855,12 @@ static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 		v = e = (GE_TV *)ge_mem(2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 		for (i = 0; i < b->h; i += n) {
 			/* the copy has the row of line y at y */
-			const int row = copy ? b->y0 : (s->gy[p] + b->y0 + i) & 511;
+			const int row = copy ? GE_LY(b->y0) : (s->gy[p] + b->y0 + i) & 511;
 
 			n = copy ? b->h : ((512 - row < b->h - i) ? 512 - row : b->h - i);
-			e = ge_quad(e, 0, b->y0 + i, n1, n, x, row, 0, 0, 0);
+			e = ge_quad(e, 0, GE_LY(b->y0) + i, n1, n, x, row, 0, 0, 0);
 			if (n1 + skip < s->dotx)
-				e = ge_quad(e, n1 + skip, b->y0 + i, s->dotx - n1 - skip, n, 0, row, 0, 0, 0);
+				e = ge_quad(e, n1 + skip, GE_LY(b->y0) + i, s->dotx - n1 - skip, n, 0, row, 0, 0, 0);
 		}
 		if (copy)
 			sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_GCOPY));
@@ -1859,7 +1875,7 @@ static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 				const int row = (s->gy[p] + b->y0 + i) & 511;
 
 				n = (512 - row < b->h - i) ? 512 - row : b->h - i;
-				e = ge_quad(e, n1, b->y0 + i, 1, n, 511, row, 0, 0, 0);
+				e = ge_quad(e, n1, GE_LY(b->y0) + i, 1, n, 511, row, 0, 0, 0);
 			}
 			sceGuTexImage(0, 512, 512, 512, (const void *)((unsigned int)GVRAM - 1024));
 			ge_draw(v, e);
@@ -1874,7 +1890,7 @@ static void ge_layer_quad(const GE_Band *b, int z)
 
 	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
 	sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_LAYER));
-	ge_draw(v, ge_quad(v, 0, b->y0, b->st.dotx, b->h, 0, b->y0, 0, 0, z));
+	ge_draw(v, ge_quad(v, 0, GE_LY(b->y0), b->st.dotx, b->h, 0, GE_LY(b->y0), 0, 0, z));
 }
 
 /*
@@ -1899,15 +1915,15 @@ static void ge_prio(const GE_Band *b, const unsigned int *tclut)
 		GE_TV *v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 
 		sceGuPixelMask(0xffffffff);
-		ge_fill(0, b->y0, s->dotx, b->h, 0, 1);		/* z 0xffff */
+		ge_fill(0, GE_LY(b->y0), s->dotx, b->h, 0, 1);		/* z 0xffff */
 		sceGuTexFlush();
 		sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-		sceGuTexImage(0, 512, 512, 512, GE_VRAM(GE_SCRBUF_L));
+		sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_SCREEN));
 		sceGuDisable(GU_ALPHA_TEST);
 		sceGuEnable(GU_COLOR_TEST);			/* not 0 */
 		sceGuEnable(GU_DEPTH_TEST);
 		sceGuDepthFunc(GU_ALWAYS);
-		ge_draw(v, ge_quad(v, 0, b->y0, s->dotx, b->h, 0, b->y0, 0, 0, 0));
+		ge_draw(v, ge_quad(v, 0, GE_LY(b->y0), s->dotx, b->h, 0, GE_LY(b->y0), 0, 0, 0));
 		sceGuDisable(GU_COLOR_TEST);
 		sceGuPixelMask(0);
 		sceGuTexFlush();
@@ -1922,7 +1938,7 @@ static void ge_prio(const GE_Band *b, const unsigned int *tclut)
 		sceGuDisable(GU_COLOR_TEST);
 	} else if (s->pafter) {
 		sceGuPixelMask(0xffffffff);
-		ge_fill(0, b->y0, s->dotx, b->h, 0, 1);		/* z 0xffff */
+		ge_fill(0, GE_LY(b->y0), s->dotx, b->h, 0, 1);		/* z 0xffff */
 		ge_zmask = 1;
 		if ((s->pafter & 1) && s->ton) {
 			sceGuClutLoad(256 / 8, tclut);
@@ -2036,7 +2052,7 @@ static void GE_Render(void *fbp, int passes)
 			ge_dotx = s->dotx;
 			ge_lt = sceKernelGetSystemTimeLow();
 			if (passes & GE_P_FILL)
-				ge_fill(0, b->y0, s->dotx, b->h,
+				ge_fill(0, GE_LY(b->y0), s->dotx, b->h,
 					(s->ton || s->bgon) ? ge_c32(ge_pal[s->pal].text[0], 255) : 0, 1);
 			ge_ltick(0);
 			if ((passes & GE_P_BGB) && s->mcase && s->bgon) {
@@ -2061,16 +2077,19 @@ static void GE_Render(void *fbp, int passes)
 
 	/* the screen */
 	if (passes & (GE_P_GRP | GE_P_COMP)) {
-		sceGuDrawBufferList(GU_PSM_5650, (void *)GE_SCRBUF_L, 512);
+		sceGuDrawBufferList(GU_PSM_5650, (void *)GE_SCREEN, 512);
 		for (i = 0; i < ge_nband; i++) {
 			const GE_Band *b = &ge_band[i];
 			const GE_State *s = &b->st;
 
 			ge_dotx = s->dotx;
+			if (ge_ybase)	/* ScrBufL's lines 256-511: no GVRAM copy there any more */
+				for (k = 0; k < b->h; k++)
+					ge_gc[GE_LY(b->y0) + k].cols = 0;
 			if ((passes & GE_P_GRP) && (s->mode == GE_G || s->mode == GE_GM))
 				s->gm == 2 ? ge_grp16(b) : ge_grp(b, gclut[s->pal]);
 			if ((passes & GE_P_COMP) && s->mode == GE_ZERO)
-				ge_fill(0, b->y0, s->dotx, b->h, 0, 0);
+				ge_fill(0, GE_LY(b->y0), s->dotx, b->h, 0, 0);
 			if ((passes & GE_P_COMP) && s->prio)
 				ge_prio(b, tclut[s->pal]);
 			else if ((passes & GE_P_COMP) && ge_layer_band(s)) {
@@ -2084,7 +2103,7 @@ static void GE_Render(void *fbp, int passes)
 					sceGuEnable(GU_COLOR_TEST);	/* colour 0 is transparent */
 				else
 					sceGuDisable(GU_COLOR_TEST);
-				ge_draw(v, ge_quad(v, 0, b->y0, s->dotx, b->h, 0, b->y0, 0, 0, 0));
+				ge_draw(v, ge_quad(v, 0, GE_LY(b->y0), s->dotx, b->h, 0, GE_LY(b->y0), 0, 0, 0));
 				sceGuDisable(GU_COLOR_TEST);
 			}
 		}
@@ -2160,7 +2179,7 @@ void GE_LogStats(void)
 {
 	static const char *const why[] = {
 		"gvram", "gvram-mode", "tvram", "fastclear", "rcupdate", "bg", "bgq-full",
-		"spr-full", "(unused)", "bands", "pals"
+		"spr-full", "(unused)", "bands", "pals", "half"
 	};
 	static const char *const reason[] = {
 		"", "debug", "gmode", "trans", "r29", "width", "prio", "twrap", "bgres", "vline"
@@ -2203,7 +2222,7 @@ void GE_LogStats(void)
 			   ge_g16sep ? "yes" : "no", ge_g16dis ? "yes" : "no", SysPort[1]);
 	}
 	n = snprintf(buf, sizeof(buf), "ge waits (total):");
-	for (i = 0; i <= GE_ST_PALS && n < (int)sizeof(buf); i++)
+	for (i = 0; i <= GE_ST_HALF && n < (int)sizeof(buf); i++)
 		n += snprintf(buf + n, sizeof(buf) - n, " %s %u", why[i], GE_Stat[i]);
 	if (n < (int)sizeof(buf))
 		n += snprintf(buf + n, sizeof(buf) - n, "; sprite copies %u, bg scans %u; cpu lines:",

@@ -133,6 +133,7 @@ enum {
 	GE_ST_INFLIGHT,		/*   (unused: the first line no longer waits for the last frame) */
 	GE_ST_BANDS,		/*   too many bands */
 	GE_ST_PALS,		/*   too many palettes */
+	GE_ST_HALF,		/* lists: the bands of lines 0-255 drawn when line 256 comes */
 	GE_ST_SPR_COPY,		/* sprite register copies */
 	GE_ST_BG_SCAN,		/* BG use scans */
 	GE_ST_RENDERS,		/* display lists with bands */
