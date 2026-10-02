@@ -589,6 +589,37 @@ static int psp_emu_frames, psp_drawn_frames;
 static unsigned psp_exec_us, psp_exec_max_us;
 static unsigned psp_fps_start;
 static int psp_paused;
+/*
+ * benchf: frames since the reset it does, the window it measures (as fast as
+ * possible, without the WLAN) and what it restores afterwards.
+ */
+static unsigned psp_frame_no, psp_bf_start, psp_bf_end;
+static SceUInt64 psp_bf_t0;
+static int psp_bf_skip, psp_bf_saved_skip, psp_bf_saved_prof;
+/* capf: frame whose composited screen goes to cap.raw (0: none). */
+static unsigned psp_cap_frame;
+static int psp_cap_saved_skip;
+static char psp_cap_path[272];
+
+/* Write the composited X68000 screen (ScrBuf, RGB565) for pixel comparisons. */
+static void psp_capture(void)
+{
+	extern WORD *ScrBufL, *ScrBufR;
+	SceUID fd = sceIoOpen(psp_cap_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+	int y;
+
+	if (fd < 0) {
+		log_printf("capf: cannot write %s\n", psp_cap_path);
+		return;
+	}
+	for (y = 0; y < TextDotY; y++) {
+		sceIoWrite(fd, ScrBufL + y * 512,	/* PSP: 512 + 256 wide halves */ (TextDotX > 512 ? 512 : TextDotX) * 2);
+		if (TextDotX > 512)
+			sceIoWrite(fd, ScrBufR + y * 256, (TextDotX - 512) * 2);
+	}
+	sceIoClose(fd);
+	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
+}
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
 
@@ -613,6 +644,7 @@ static void psp_debug_init(const char *eboot)
 	log_open(logpath);
 	log_printf("PX68K %s, eboot %s\n", PX68KVERSTR, eboot);
 
+	snprintf(psp_cap_path, sizeof(psp_cap_path), "%s/cap.raw", dir);
 	snprintf(cfg, sizeof(cfg), "%s/net.cfg", dir);
 	snprintf(devcfg, sizeof(devcfg), "%.4s/PSP/GAME/pspbrew.dev/net.cfg", eboot);
 	profiles[0] = cfg;
@@ -638,6 +670,57 @@ static void psp_debug_frame(unsigned us)
 
 	if (!psp_debug_on)
 		return;
+	psp_frame_no++;
+	if (psp_cap_frame && psp_frame_no == psp_cap_frame) {
+		psp_capture();
+		psp_cap_frame = 0;
+		Config.FrameRate = psp_cap_saved_skip;
+		DSound_Play();
+	}
+	if (psp_bf_end) {
+		if (psp_frame_no == psp_bf_start) {
+			log_printf("benchf: frames %u-%u, skip %d\n", psp_bf_start, psp_bf_end, psp_bf_skip);
+			net_pause();
+			psp_bf_saved_skip = Config.FrameRate;
+			psp_bf_saved_prof = prof_on;
+			Config.FrameRate = psp_bf_skip;
+			Config.NoWaitMode = 1;
+			prof_on = 1;
+			memset(prof_us, 0, sizeof(prof_us));
+			memset(prof_count, 0, sizeof(prof_count));
+			psp_bf_t0 = sceKernelGetSystemTimeWide();
+			return;
+		}
+		if (psp_frame_no > psp_bf_start) {
+			unsigned n = psp_frame_no - psp_bf_start;
+			unsigned total, decode, mix;
+
+			if (psp_frame_no < psp_bf_end)
+				return;	/* no per-second log while measuring */
+			total = (unsigned)(sceKernelGetSystemTimeWide() - psp_bf_t0);
+			Config.NoWaitMode = 0;
+			Config.FrameRate = psp_bf_saved_skip;
+			prof_on = psp_bf_saved_prof;
+			psp_bf_end = 0;
+			decode = prof_us[PROF_GRP] + prof_us[PROF_TEXT] + prof_us[PROF_BG];
+			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
+			/* us per emulated frame */
+			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
+				   "draw %u snd %u lines %u shown %u\n", n, total / n,
+				   n * 1000000u / total, n * 10000000u / total % 10,
+				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
+				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
+				   prof_count[PROF_LINES], prof_count[PROF_FRAMES]);
+			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+			DSound_Play();
+			memset(prof_us, 0, sizeof(prof_us));
+			memset(prof_count, 0, sizeof(prof_count));
+			psp_emu_frames = psp_drawn_frames = 0;
+			psp_exec_us = psp_exec_max_us = 0;
+			psp_fps_start = timeGetTime();
+			return;
+		}
+	}
 	psp_emu_frames++;
 	if (!DispFrame)
 		psp_drawn_frames++;
@@ -681,6 +764,7 @@ static void psp_debug_poll(void)
 {
 	char cmd[128], arg[128], btn;
 	int n, dx, dy;
+	unsigned bf_start, bf_frames;
 
 	if (!psp_debug_on)
 		return;
@@ -711,6 +795,26 @@ static void psp_debug_poll(void)
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
 			psp_exec_us = psp_exec_max_us = 0;
+		} else if (sscanf(cmd, "benchf %u %u %d", &bf_start, &bf_frames, &n) == 3 && bf_start > 0 &&
+			   bf_frames > 0 && n >= 1 && n <= 6 && !psp_bf_end && !psp_bench_end) {
+			/* Deterministic: same frames after a reset, run flat out. */
+			psp_bf_start = bf_start;
+			psp_bf_end = bf_start + bf_frames;
+			psp_bf_skip = n;
+			psp_frame_no = 0;
+			DSound_Stop();	/* deterministic, see capf */
+			WinX68k_Reset();
+			log_printf("benchf: reset, measuring from frame %u\n", bf_start);
+		} else if (sscanf(cmd, "capf %u", &bf_start) == 1 && bf_start > 0 && !psp_bf_end && !psp_cap_frame) {
+			/* Every frame drawn, so frame N's screen is the same in each run. */
+			psp_cap_frame = bf_start;
+			psp_cap_saved_skip = Config.FrameRate;
+			Config.FrameRate = 1;
+			psp_frame_no = 0;
+			/* The sound callback pulls ADPCM data in real time; synthesize on this thread only. */
+			DSound_Stop();
+			WinX68k_Reset();
+			log_printf("capf: reset, capturing frame %u\n", bf_start);
 		} else if (strcmp(cmd, "reset") == 0) {
 			WinX68k_Reset();
 			log_printf("reset\n");
@@ -726,7 +830,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, bench <sec>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, bench <sec>, benchf <frame> <frames> <skip>, capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}

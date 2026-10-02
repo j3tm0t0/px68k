@@ -12,6 +12,10 @@
                                       px68k runs from, or "ms0:/...")
   psp-debug.py push [EBOOT.PBP]       replace the running EBOOT (default ./EBOOT.PBP),
                                       restart it and follow the log
+  psp-debug.py benchf <frame> <frames> <skip>...
+                                      reset, then time <frames> frames from
+                                      <frame> on flat out without the WLAN, once
+                                      per frame skip given; prints the results
   psp-debug.py pause | resume         stop / restart the emulation
   psp-debug.py back                   return to pspbrew.dev (ends `psp.py run`)
   psp-debug.py bench [skip...]        with the profiler on, run "bench" at each
@@ -223,6 +227,37 @@ def main():
         s = connect()
         s.sendall(b"skip 5\n")
         s.close()
+    elif cmd == "benchf" and len(args) >= 3:
+        start, frames = args[0], args[1]
+        for skip in args[2:]:
+            s = connect()
+            drain(s)
+            s.sendall(f"benchf {start} {frames} {skip}\n".encode())
+            s.close()
+            deadline = time.time() + float(os.environ.get("BENCH_TIMEOUT", "900"))
+            result = None
+            while result is None and time.time() < deadline:
+                time.sleep(10)
+                try:
+                    s = connect(retries=3)
+                except SystemExit:
+                    continue
+                text = b""
+                s.settimeout(2)
+                try:
+                    while True:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            break
+                        text += chunk
+                except socket.timeout:
+                    pass
+                s.close()
+                run = text.decode("utf-8", "replace").split(f"debug: > benchf {start} {frames} {skip}")[-1]
+                for line in run.splitlines():
+                    if line.startswith("benchf: ") and " us/frame" in line:
+                        result = line
+            print(f"skip {skip}: {result or 'timed out'}")
     elif cmd in ("pause", "resume"):
         s = connect()
         drain(s)
