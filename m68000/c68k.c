@@ -106,6 +106,100 @@ void C68k_Reset(c68k_struc *CPU)
 	CPU¼Â¹Ô
 --------------------------------------------------------*/
 
+#ifndef C68K_NO_DIRECT_MEM
+/*--------------------------------------------------------
+	Idle loops
+--------------------------------------------------------*/
+/*
+ * Called from a Bcc.S taken back by 6 bytes (Opcode: the Bcc, PC: the
+ * branch target, ICount: after the Bcc, > 0) to a "TST.x/CMP.x
+ * (d16,An)", e.g.
+ *
+ *	loop:	tst.w	d16(An)		; 12 cycles
+ *		bne.s	loop		; 10 cycles taken
+ *
+ * that waits for an interrupt handler to change a variable in RAM (Gradius
+ * spends 70% of its instructions in such loops).  Interrupts are only
+ * taken when C68k_Exec starts, and nothing but the CPU writes RAM inside a
+ * call, so when the TST/CMP gives flags for which the branch is taken
+ * again, the rest of the slice is only these two instructions: end it at
+ * once, in exactly the state (PC, ICount, flags, BusErrFlag) of the step
+ * by step run, and return the PC.  Handled: TST.B/W (d16,An) and
+ * CMP.B/W (d16,An),Dn, both 12 cycles, with the operand in main RAM
+ * (cpu_idle_read_xxx: the same conditions as the RAM fast paths, whose
+ * reads have no other side effect).  Otherwise the flags set here are the
+ * ones the TST/CMP, which runs next, sets again (neither touches X), and
+ * nothing else changes.
+ */
+UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
+{
+	UINT32 op = *(UINT16 *)PC, adr, src, dst, res;
+	INT32 c, cond;
+
+	adr = CPU->A[op & 7] + MAKE_INT_16(*(UINT16 *)(PC + 2));
+	switch (op & 0xf1f8)
+	{
+	case 0x4068:	/* TST.W (d16,An): 0x4a68 */
+	case 0x4028:	/* TST.B (d16,An): 0x4a28 */
+		if ((op & 0xfe00) != 0x4a00)
+			return PC;
+		if (!((op & 0x40) ? cpu_idle_read_word(adr, &res) : cpu_idle_read_byte(adr, &res)))
+			return PC;
+		FLAG_C = CFLAG_CLEAR;
+		FLAG_V = VFLAG_CLEAR;
+		FLAG_Z = res;
+		FLAG_N = (op & 0x40) ? NFLAG_16(res) : NFLAG_8(res);
+		break;
+	case 0xb068:	/* CMP.W (d16,An),Dn */
+		if (!cpu_idle_read_word(adr, &src))
+			return PC;
+		dst = READ_REG_16(CPU->D[(op >> 9) & 7]);
+		res = dst - src;
+		FLAGS_CMP_16()
+		break;
+	case 0xb028:	/* CMP.B (d16,An),Dn */
+		if (!cpu_idle_read_byte(adr, &src))
+			return PC;
+		dst = READ_REG_8(CPU->D[(op >> 9) & 7]);
+		res = dst - src;
+		FLAGS_CMP_8()
+		break;
+	default:
+		return PC;
+	}
+
+	switch ((Opcode >> 8) & 15)
+	{
+	case 2:  cond = COND_HI(); break;
+	case 3:  cond = COND_LS(); break;
+	case 4:  cond = COND_CC(); break;
+	case 5:  cond = COND_CS(); break;
+	case 6:  cond = COND_NE(); break;
+	case 7:  cond = COND_EQ(); break;
+	case 8:  cond = COND_VC(); break;
+	case 9:  cond = COND_VS(); break;
+	case 10: cond = COND_PL(); break;
+	case 11: cond = COND_MI(); break;
+	case 12: cond = COND_GE(); break;
+	case 13: cond = COND_LT(); break;
+	case 14: cond = COND_GT(); break;
+	default: cond = COND_LE(); break;
+	}
+	if (!cond)
+		return PC;
+
+	c = CPU->ICount;
+	c -= (c - 1) / 22 * 22;		/* whole loops: c in 1..22 */
+	c -= 12;			/* TST/CMP */
+	if (c > 0)
+		c -= 10;		/* Bcc, back to the TST/CMP */
+	else
+		PC += 4;		/* stopped at the Bcc */
+	CPU->ICount = c;
+	return PC;
+}
+#endif
+
 extern DWORD BusErrHandling;
 extern DWORD BusErrAdr;
 

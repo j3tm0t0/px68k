@@ -1479,6 +1479,51 @@ void   cpu_writemem24_long_pd(UINT32 adr, UINT32 data);
 	RET(8)																	\
 }
 
+/*
+ * Bcc.S taken back to a "TST.x/CMP.x (d16,An)" right before it, e.g.
+ *
+ *	loop:	tst.w	d16(An)		; 12 cycles
+ *		bne.s	loop		; 10 cycles taken
+ *
+ * waits for an interrupt handler to change a variable in RAM (Gradius
+ * spends 70% of its instructions in such loops).  Interrupts are only
+ * taken when C68k_Exec starts, and nothing but the CPU writes RAM inside a
+ * call, so when the TST/CMP gives flags for which the branch is taken
+ * again, the rest of the slice is only these two instructions: end it at
+ * once, in exactly the state (PC, ICount, flags, BusErrFlag) of the step
+ * by step run.  Handled: TST.B/W (d16,An) and CMP.B/W (d16,An),Dn, both
+ * 12 cycles, with the operand in main RAM (cpu_idle_read_xxx: the same
+ * conditions as the RAM fast paths, whose reads have no other side
+ * effect).  Otherwise the flags set here are the ones the TST/CMP, which
+ * runs next, sets again (neither touches X), and nothing else changed.
+ */
+#ifndef C68K_NO_DIRECT_MEM
+int cpu_idle_read_word(UINT32 adr, UINT32 *v);
+int cpu_idle_read_byte(UINT32 adr, UINT32 *v);
+
+UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode);
+
+#undef Bcc_8
+#define Bcc_8(cond)															\
+{																			\
+	if (COND_##cond())														\
+	{																		\
+		/* ICount stored on every path just before the jump, as RET() */	\
+		INT32 c = CPU->ICount - 10;											\
+		PC += MAKE_INT_8(Opcode);											\
+		if ((Opcode & 0xff) == 0xfa && c > 0)								\
+		{																	\
+			CPU->ICount = c;												\
+			PC = C68k_Idle_Loop(CPU, PC, Opcode);							\
+			c = CPU->ICount;												\
+		}																	\
+		CPU->ICount = c;													\
+		goto C68k_Exec_Next;												\
+	}																		\
+	RET(8)																	\
+}
+#endif
+
 #define Bcc_16(cond)														\
 {																			\
 	if (COND_##cond())														\
