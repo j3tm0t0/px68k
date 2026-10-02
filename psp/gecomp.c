@@ -50,12 +50,14 @@
 #include "gvram.h"
 #include "tvram.h"
 #include "gecomp.h"
+#include "log.h"
 
 extern BYTE Debug_Text, Debug_Grp, Debug_Sp;
 extern BYTE Sprite_Regs[0x800];
 extern BYTE BG[0x8000];
 
 int GE_Enabled = 0;
+int GE_TimeSync = 0;
 volatile int GE_Guard = 0;
 int GE_PalDirty = 1;
 unsigned GE_StatLines, GE_StatBands, GE_StatFlushes, GE_StatCpuLines;
@@ -103,6 +105,8 @@ void GE_BGReset(void)
 
 /* ---- per line state ---- */
 
+#define GE_LIVE	0xff	/* GE_State.spr: Sprite_Regs itself */
+
 enum { GE_ZERO, GE_G, GE_M, GE_GM };
 
 typedef struct {
@@ -115,6 +119,7 @@ typedef struct {
 	BYTE	chr8;		/* 8x8 BG */
 	BYTE	bg9;		/* BG_Regs[9] */
 	BYTE	pal;		/* palette snapshot */
+	BYTE	spr;		/* sprite register snapshot, GE_LIVE: Sprite_Regs */
 	WORD	dotx;
 	WORD	gx[4], gy[4];	/* graphic scroll, & 511 */
 	WORD	tx, ty;		/* text scroll, & 1023 */
@@ -143,7 +148,7 @@ typedef struct {
 static GE_Pal ge_pal[GE_NPAL];
 static int ge_npal, ge_palcur;
 
-/* 0: the CPU must draw this line */
+/* 0, or why the CPU must draw this line (GE_R_*) */
 static int ge_eval(GE_State *s)
 {
 	const int v1 = VCReg1[0], v11 = VCReg1[1], v21 = VCReg2[1];
@@ -151,14 +156,17 @@ static int ge_eval(GE_State *s)
 	int nops = 0, gfirst = 0, mseen = 0, mfull = 0, bad = 0;
 
 	memset(s, 0, sizeof(*s));
+	s->spr = GE_LIVE;
 	if (!Debug_Grp || !Debug_Text || !Debug_Sp)
-		return 0;
-	if ((VCReg0[1] & 7) || (VCReg2[0] & 0x10))	/* 16 colours 512 dots; no translucency */
-		return 0;
+		return GE_R_DEBUG;
+	if (VCReg0[1] & 7)	/* 16 colours 512 dots */
+		return GE_R_GMODE;
+	if (VCReg2[0] & 0x10)	/* no translucency / special priority */
+		return GE_R_TRANS;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		return 0;
+		return GE_R_R29;
 	if (TextDotX == 0 || TextDotX > 512)
-		return 0;
+		return GE_R_WIDTH;
 	s->dotx = TextDotX;
 
 	/* graphic pages, as in DrawLine (Grp_DrawLine4) */
@@ -213,7 +221,7 @@ static int ge_eval(GE_State *s)
 #undef OPG
 #undef OPM
 	if (bad || (mseen && !mfull))
-		return 0;	/* graphics between text and BG */
+		return GE_R_PRIO;	/* graphics between text and BG */
 
 	if (!nops)
 		s->mode = GE_ZERO;
@@ -241,7 +249,7 @@ static int ge_eval(GE_State *s)
 			s->tx = TextScrollX & 0x3ff;
 			s->ty = TextScrollY & 0x3ff;
 			if (s->tx + s->dotx > 1024)
-				return 0;	/* the line wraps: odd last dot in Text_DrawLine */
+				return GE_R_TWRAP;	/* the line wraps: odd last dot in Text_DrawLine */
 		}
 		if (bg_on) {
 			const int s1 = ((BG_Regs[0x11] & 4) ? 2 : 1) - ((BG_Regs[0x11] & 16) ? 1 : 0);
@@ -249,7 +257,7 @@ static int ge_eval(GE_State *s)
 			DWORD vbg = VLINE;
 
 			if (s1 != s2)
-				return 0;	/* VLINEBG not VLINE + constant */
+				return GE_R_BGRES;	/* VLINEBG not VLINE + constant */
 			if (!(BG_Regs[0x11] & 16))
 				vbg -= ((BG_Regs[0x0f] >> s1) - (CRTC_Regs[0x0d] >> s2));
 			s->lbase = vbg - (DWORD)BG_VLINE - VLINE;
@@ -265,7 +273,7 @@ static int ge_eval(GE_State *s)
 		}
 	} else
 		s->mcase = 0;
-	return 1;
+	return 0;
 }
 
 int GE_Pending(void)
@@ -273,24 +281,217 @@ int GE_Pending(void)
 	return ge_nband != 0;
 }
 
+/* ---- what the waiting/drawn bands read: the guards ----
+ *
+ * Writes go ahead unless they hit memory that a band waiting to be drawn
+ * (or being drawn by the GE) reads:
+ *   GVRAM: per page, the rows and the columns shown (and the odd dot);
+ *   text: the TextDrawWork rows and 8-dot columns shown;
+ *   BG[]: the map entries and patterns (16x16 and 8x8) used, worked out
+ *     when a BG write comes; the pattern copies the GE reads are only
+ *     updated when the GE is done (queued meanwhile);
+ *   sprite registers: copied for the waiting bands at the first write.
+ * Anything else (fast clear, raster copy, other GVRAM layouts) waits.
+ */
+
+static int ge_inflight;		/* bands handed to the GE, not done yet */
+static int ge_bgfly;		/* ... and some of them read the BG patterns */
+static DWORD ge_grow[4][16], ge_gcol[4][16];	/* GVRAM rows/columns read, per page */
+static DWORD ge_trow[32], ge_tcol[4];		/* TextDrawWork rows, 8-dot columns read */
+static int ge_masks;		/* the masks above are not all 0 */
+static int ge_bgpend;		/* waiting bands with BG/sprites */
+
+#define GE_BIT(m, i)	((m)[(i) >> 5] & (1u << ((i) & 31)))
+#define GE_SET(m, i)	((m)[(i) >> 5] |= 1u << ((i) & 31))
+
+/* BG use of the waiting bands, made on demand */
+static int ge_usevalid;
+static DWORD ge_use16[8], ge_use8[8];	/* patterns */
+static DWORD ge_usemap[0x4000 / 32];	/* BG[] words (map entries) */
+
+#define GE_NSPR		16
+static BYTE ge_spr[GE_NSPR][0x400] __attribute__((aligned(4)));
+static int ge_nspr;
+
+#define GE_NQ		4096
+static WORD ge_qadr[GE_NQ];
+static BYTE ge_qdat[GE_NQ];
+static int ge_nq;
+
+unsigned GE_Stat[GE_ST_N];
+
+static void ge_clear_masks(void)
+{
+	memset(ge_grow, 0, sizeof(ge_grow));
+	memset(ge_gcol, 0, sizeof(ge_gcol));
+	memset(ge_trow, 0, sizeof(ge_trow));
+	memset(ge_tcol, 0, sizeof(ge_tcol));
+	ge_masks = 0;
+	ge_bgpend = 0;
+	ge_usevalid = 0;
+	ge_nspr = 0;
+}
+
+/* the GE is done with what it was given (windraw.c, after sceGuSync) */
+void GE_Done(void)
+{
+	int i;
+
+	ge_inflight = 0;
+	ge_bgfly = 0;
+	for (i = 0; i < ge_nq; i++)
+		GE_BGWrite(ge_qadr[i], ge_qdat[i]);
+	ge_nq = 0;
+	if (!ge_nband)
+		ge_clear_masks();
+	GE_Guard = ge_nband != 0;
+}
+
+static void ge_sync(int why)
+{
+	GE_Stat[why]++;
+	WinDraw_GESync();
+}
+
+/* the masks for line VLINE of band b (new: the band starts here) */
+static void ge_mark_line(const GE_Band *b, int new)
+{
+	const GE_State *s = &b->st;
+	int k, i;
+
+	if (s->mode == GE_G || s->mode == GE_GM) {
+		for (k = 0; k < s->ng; k++) {
+			const int p = s->gpage[k];
+			const int row = (s->gy[p] + VLINE) & 511;
+			const int quirk = 511 - s->gx[p] < s->dotx;
+
+			GE_SET(ge_grow[p], row);
+			if (quirk)
+				GE_SET(ge_grow[p], (row - 1) & 511);
+			if (new) {
+				for (i = 0; i < s->dotx; i++)
+					GE_SET(ge_gcol[p], (s->gx[p] + i) & 511);
+				GE_SET(ge_gcol[p], 511);
+			}
+		}
+		ge_masks = 1;
+	}
+	if ((s->mode == GE_M || s->mode == GE_GM) && s->ton) {
+		GE_SET(ge_trow, (s->ty + VLINE) & 1023);
+		if (new)
+			for (i = s->tx >> 3; i <= (s->tx + s->dotx - 1) >> 3; i++)
+				GE_SET(ge_tcol, i);
+		ge_masks = 1;
+	}
+	if ((s->mode == GE_M || s->mode == GE_GM) && s->bgon) {
+		ge_bgpend = 1;
+		ge_usevalid = 0;
+	}
+}
+
+void GE_GvramGuard(DWORD adr)
+{
+	const DWORD a = (adr ^ 1) - 0xc00000;
+	const int r28 = CRTC_Regs[0x28];
+
+	if (!ge_masks)
+		return;
+	if ((r28 & 8) || (r28 & 7)) {
+		ge_sync(GE_ST_GVRAM_MODE);	/* not the 16 colour 512 dot layout */
+		return;
+	}
+	if (a & 1)
+		return;		/* not written in this mode */
+	{
+		const int p = (a >> 19) & 3, row = (a >> 10) & 511, col = (a >> 1) & 511;
+
+		if (GE_BIT(ge_grow[p], row) && GE_BIT(ge_gcol[p], col))
+			ge_sync(GE_ST_GVRAM);
+	}
+}
+
+void GE_TvramGuard(DWORD adr)
+{
+	if (ge_masks && GE_BIT(ge_trow, (adr >> 7) & 0x3ff) && GE_BIT(ge_tcol, adr & 0x7f))
+		ge_sync(GE_ST_TVRAM);
+}
+
+void GE_FullGuard(int why)
+{
+	ge_sync(why);
+}
+
+/* sprite registers: the waiting bands that read them get a copy */
+void GE_SpriteGuard(void)
+{
+	int i, need = 0;
+
+	for (i = 0; i < ge_nband; i++)
+		if (ge_band[i].st.bgon && ge_band[i].st.spr == GE_LIVE)
+			need = 1;
+	if (!need)
+		return;
+	if (ge_nspr == GE_NSPR) {
+		ge_sync(GE_ST_SPR_FULL);
+		return;
+	}
+	memcpy(ge_spr[ge_nspr], Sprite_Regs, 0x400);
+	for (i = 0; i < ge_nband; i++)
+		if (ge_band[i].st.bgon && ge_band[i].st.spr == GE_LIVE)
+			ge_band[i].st.spr = ge_nspr;
+	ge_nspr++;
+	GE_Stat[GE_ST_SPR_COPY]++;
+}
+
+static int ge_marking;	/* ge_tiles/ge_sprites only note what they use */
+static void ge_mark_bg(void);
+
+/* BG[] is about to be written: maps/patterns of the waiting bands, pattern copies */
+void GE_BGData(DWORD adr, BYTE data)
+{
+	if (ge_nband && ge_bgpend) {
+		if (!ge_usevalid)
+			ge_mark_bg();
+		if (GE_BIT(ge_usemap, adr >> 1) || GE_BIT(ge_use16, adr >> 7) ||
+		    (adr < 0x2000 && GE_BIT(ge_use8, adr >> 5)))
+			ge_sync(GE_ST_BG);
+	}
+	if (ge_inflight && ge_bgfly) {
+		if (ge_nq == GE_NQ)
+			ge_sync(GE_ST_BGQ_FULL);
+		else {
+			ge_qadr[ge_nq] = adr;
+			ge_qdat[ge_nq] = data;
+			ge_nq++;
+			return;
+		}
+	}
+	GE_BGWrite(adr, data);
+}
+
 int GE_Line(void)
 {
 	GE_State s;
 	GE_Band *b;
+	int r;
 
-	if (VLINE >= GE_ROWS || !ge_eval(&s)) {
+	r = VLINE >= GE_ROWS ? GE_R_VLINE : ge_eval(&s);
+	if (r) {
 		GE_StatCpuLines++;
+		GE_Stat[GE_ST_CPU_REASON + r]++;
 		return 0;
 	}
+	if (ge_inflight)
+		ge_sync(GE_ST_INFLIGHT);	/* the last frame's bands: normally done long ago */
 	if (ge_nband == GE_NBAND)
-		WinDraw_GESync();	/* draws the bands, empties the palette snapshots */
+		ge_sync(GE_ST_BANDS);	/* draws the bands, empties the snapshots */
 
 	if (ge_npal == 0 || GE_PalDirty) {
 		GE_PalDirty = 0;
 		if (ge_npal == 0 || memcmp(ge_pal[ge_palcur].text, TextPal, sizeof(ge_pal[0].text)) ||
 		    memcmp(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp))) {
 			if (ge_npal == GE_NPAL)
-				WinDraw_GESync();
+				ge_sync(GE_ST_PALS);
 			ge_palcur = ge_npal++;
 			memcpy(ge_pal[ge_palcur].text, TextPal, sizeof(ge_pal[0].text));
 			memcpy(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp));
@@ -298,14 +499,16 @@ int GE_Line(void)
 	}
 	s.pal = ge_palcur;
 
-	b = &ge_band[ge_nband - 1];
-	if (ge_nband && b->y0 + b->h == (int)VLINE && memcmp(&b->st, &s, sizeof(s)) == 0) {
+	b = ge_nband ? &ge_band[ge_nband - 1] : NULL;
+	if (b && b->y0 + b->h == (int)VLINE && memcmp(&b->st, &s, sizeof(s)) == 0) {
 		b->h++;
+		ge_mark_line(b, 0);
 	} else {
 		b = &ge_band[ge_nband++];
 		b->st = s;
 		b->y0 = VLINE;
 		b->h = 1;
+		ge_mark_line(b, 1);
 	}
 	GE_StatLines++;
 	GE_Guard = 1;
@@ -369,6 +572,9 @@ static void ge_fill(int x, int y, int w, int h, unsigned int c, int depth)
 	} else
 		sceGuDisable(GU_DEPTH_TEST);
 	sceGuDrawArray(GU_SPRITES, GE_CVFMT, 2, 0, v);
+	GE_Stat[GE_ST_DRAWS]++;
+	GE_Stat[GE_ST_VERTS] += 2;
+	GE_Stat[GE_ST_PIXELS] += w * h;
 	sceGuEnable(GU_TEXTURE_2D);
 }
 
@@ -402,13 +608,18 @@ static GE_TV *ge_quad(GE_TV *t, int x, int y, int w, int h, int u, int v, int hf
 	t[0].y = y;
 	t[1].y = y + h;
 	t[0].z = t[1].z = z;
+	GE_Stat[GE_ST_PIXELS] += w * h;
 	return t + 2;
 }
 
 static void ge_draw(GE_TV *start, GE_TV *end)
 {
 	if (end > start)
+	{
 		sceGuDrawArray(GU_SPRITES, GE_TVFMT, end - start, 0, start);
+		GE_Stat[GE_ST_DRAWS]++;
+		GE_Stat[GE_ST_VERTS] += end - start;
+	}
 }
 
 /*
@@ -483,7 +694,13 @@ static void ge_tiles(GE_Batch *bt, const GE_Band *b, int sz, DWORD top, DWORD sc
 			const DWORD bl = map[col * 2], pat = map[col * 2 + 1];
 			const int blk = bl & 15;
 
-			if (cv) {
+			if (ge_marking) {
+				GE_SET(ge_usemap, (DWORD)(map + col * 2 - BG) >> 1);
+				if (sz == 8)
+					GE_SET(ge_use8, pat);
+				else
+					GE_SET(ge_use16, pat);
+			} else if (cv) {
 				if (blk) {
 					if (*cv) {
 						GE_CV *c = *cv;
@@ -517,8 +734,8 @@ static void ge_tiles(GE_Batch *bt, const GE_Band *b, int sz, DWORD top, DWORD sc
 /* the sprites of priority 'level' on the band (Sprite_CollectLine) */
 static void ge_sprites(GE_Batch *bt, const GE_Band *b, int level)
 {
-	const WORD *sr = (const WORD *)Sprite_Regs;
 	const GE_State *s = &b->st;
+	const WORD *sr = (const WORD *)(s->spr == GE_LIVE ? Sprite_Regs : ge_spr[s->spr]);
 	const DWORD l0 = s->lbase + b->y0;	/* VLINEBG - BG_VLINE on the first line */
 	int n;
 
@@ -540,6 +757,10 @@ static void ge_sprites(GE_Batch *bt, const GE_Band *b, int level)
 		if (i0 >= i1)
 			continue;
 		ctrl = sp[2];
+		if (ge_marking) {
+			GE_SET(ge_use16, ctrl & 0xff);
+			continue;
+		}
 		pu = (ctrl & 31) * 16;
 		pv = ((ctrl >> 5) & 7) * 16;
 		vf = (ctrl & 0x8000) != 0;
@@ -593,6 +814,8 @@ static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, 
 	sceGuDisable(GU_ALPHA_TEST);
 	sceGuDisable(GU_DEPTH_TEST);
 	sceGuDrawArray(GU_SPRITES, GE_CVFMT, cv - base, 0, base);
+	GE_Stat[GE_ST_DRAWS]++;
+	GE_Stat[GE_ST_VERTS] += cv - base;
 	sceGuEnable(GU_TEXTURE_2D);
 	sceGuEnable(GU_ALPHA_TEST);
 }
@@ -622,6 +845,35 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 	if (bg0)
 		ge_bgplane(b, sz0, s->bg0top, s->bg0sx, s->bg0sy, adj0);
 	ge_spritelevel(b, 3);
+}
+
+/* what the waiting bands use of BG[] (GE_BGData) */
+static void ge_mark_bg(void)
+{
+	int i, level;
+
+	memset(ge_use16, 0, sizeof(ge_use16));
+	memset(ge_use8, 0, sizeof(ge_use8));
+	memset(ge_usemap, 0, sizeof(ge_usemap));
+	ge_marking = 1;
+	for (i = 0; i < ge_nband; i++) {
+		const GE_Band *b = &ge_band[i];
+		const GE_State *s = &b->st;
+
+		if (!((s->mode == GE_M || s->mode == GE_GM) && s->bgon))
+			continue;
+		ge_dotx = s->dotx;
+		if (s->chr8 && (s->bg9 & 8))
+			ge_tiles(NULL, b, 8, s->bg1top, s->bg1sx, s->bg1sy, s->hadj, NULL, NULL, NULL);
+		if (s->bg9 & 1)
+			ge_tiles(NULL, b, s->chr8 ? 8 : 16, s->bg0top, s->bg0sx, s->bg0sy,
+				 (s->chr8 || s->mcase) ? s->hadj : 0, NULL, NULL, NULL);
+		for (level = 1; level <= 3; level++)
+			ge_sprites(NULL, b, level);
+	}
+	ge_marking = 0;
+	ge_usevalid = 1;
+	GE_Stat[GE_ST_BG_SCAN]++;
 }
 
 /* Text_DrawLine: TextDrawWork, 1 byte per dot, as a T8 texture */
@@ -822,6 +1074,44 @@ void GE_Render(void *fbp)
 	sceGuTexSync();
 	sceGuTexFlush();
 
+	for (i = 0; i < ge_nband; i++)
+		if ((ge_band[i].st.mode == GE_M || ge_band[i].st.mode == GE_GM) && ge_band[i].st.bgon)
+			ge_bgfly = 1;
 	ge_nband = 0;
 	ge_npal = 0;
+	ge_inflight = 1;	/* until GE_Done() */
+	GE_Guard = 1;
+	GE_Stat[GE_ST_RENDERS]++;
+}
+
+void GE_LogStats(void)
+{
+	static const char *const why[] = {
+		"gvram", "gvram-mode", "tvram", "fastclear", "rcupdate", "bg", "bgq-full",
+		"spr-full", "inflight", "bands", "pals"
+	};
+	static const char *const reason[] = {
+		"", "debug", "gmode", "trans", "r29", "width", "prio", "twrap", "bgres", "vline"
+	};
+	const unsigned f = GE_Stat[GE_ST_FRAMES] ? GE_Stat[GE_ST_FRAMES] : 1;
+	char buf[512];
+	int i, n;
+
+	log_printf("ge %s: %u frames; per frame: lines ge %u cpu %u, bands %u, lists %u, draws %u, "
+		   "verts %u, pixels %u, build %u us, guard wait %u us, GE %u us (ge time %s)\n",
+		   GE_Enabled ? "on" : "off", GE_Stat[GE_ST_FRAMES], GE_StatLines / f, GE_StatCpuLines / f,
+		   GE_StatBands / f, GE_Stat[GE_ST_RENDERS] / f, GE_Stat[GE_ST_DRAWS] / f,
+		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
+		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
+	n = snprintf(buf, sizeof(buf), "ge waits (total):");
+	for (i = 0; i <= GE_ST_PALS && n < (int)sizeof(buf); i++)
+		n += snprintf(buf + n, sizeof(buf) - n, " %s %u", why[i], GE_Stat[i]);
+	if (n < (int)sizeof(buf))
+		n += snprintf(buf + n, sizeof(buf) - n, "; sprite copies %u, bg scans %u; cpu lines:",
+			      GE_Stat[GE_ST_SPR_COPY], GE_Stat[GE_ST_BG_SCAN]);
+	for (i = 1; i <= GE_R_VLINE && n < (int)sizeof(buf); i++)
+		n += snprintf(buf + n, sizeof(buf) - n, " %s %u", reason[i], GE_Stat[GE_ST_CPU_REASON + i]);
+	log_printf("%s\n", buf);
+	memset(GE_Stat, 0, sizeof(GE_Stat));
+	GE_StatLines = GE_StatCpuLines = GE_StatBands = GE_StatFlushes = 0;
 }

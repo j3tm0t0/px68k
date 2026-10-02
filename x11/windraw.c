@@ -309,27 +309,33 @@ static void psp_ge_wait(void)
 		sceGuSync(0, 0);
 		psp_drawbuf = sceGuSwapBuffers();
 	}
-	GE_Guard = GE_Pending();	/* the GE no longer reads the X68000 memory */
+	GE_Done();	/* the GE no longer reads the X68000 memory */
 }
 
 /*
  * GE compositing (psp/gecomp.c): draw the lines waiting for the GE now and
  * wait until it is done, so that what it reads (GVRAM, the text screen, the
- * BG patterns and maps, the sprites) can be written again.  Called through
- * GE_GUARD() by whatever writes them.
+ * BG patterns and maps, the sprites) can be written again.  Called by the
+ * guards (GE_GUARD_*) of whatever writes them when the write hits.
  */
 void WinDraw_GESync(void)
 {
+	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
+
+	psp_ge_wait();
 	if (GE_Pending()) {
-		psp_ge_wait();
 		sceGuStart(GU_DIRECT, list);
 		GE_Render(psp_drawbuf);
 		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
 		sceGuFinish();
+		t1 = sceKernelGetSystemTimeLow();
+		GE_Stat[GE_ST_RENDER_US] += t1 - t0;
+		t0 = t1;
 		sceGuSync(0, 0);
+		GE_Done();
 		GE_StatFlushes++;
 	}
-	psp_ge_wait();
+	GE_Stat[GE_ST_WAIT_US] += sceKernelGetSystemTimeLow() - t0;
 }
 
 #endif // PSP
@@ -661,8 +667,13 @@ WinDraw_Draw(void)
 	psp_ge_wait();	/* normally done already, by the first line of this frame */
 	sceGuStart(GU_DIRECT, list);
 	ge_lines = GE_Pending();
-	if (ge_lines)
+	if (ge_lines) {
+		unsigned t0 = sceKernelGetSystemTimeLow();
+
 		GE_Render(psp_drawbuf);	/* the lines left to the GE, into ScrBufL */
+		GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
+	}
+	GE_Stat[GE_ST_FRAMES]++;
 
 	sceGuClearColor(0);
 	sceGuClear(GU_COLOR_BUFFER_BIT);	/* no depth test, so no depth clear */
@@ -737,9 +748,15 @@ WinDraw_Draw(void)
 	if (ge_lines)
 		sceKernelDcacheWritebackAll();	/* display list, GVRAM, TextDrawWork */
 	sceGuFinish();
+	if (GE_TimeSync) {	/* "ge time": how long the GE takes for the frame */
+		unsigned t0 = sceKernelGetSystemTimeLow();
+
+		sceGuSync(0, 0);
+		GE_Stat[GE_ST_GE_US] += sceKernelGetSystemTimeLow() - t0;
+	}
 	/* sceGuSync() and sceGuSwapBuffers() are left to psp_ge_wait() */
 	psp_ge_pending = 1;
-	GE_Guard = ge_lines;	/* the GE reads the X68000 memory until psp_ge_wait() */
+	/* GE_Render() set GE_Guard: the GE reads the X68000 memory until psp_ge_wait() */
 	PROF_END(draw, PROF_DRAW);
 
 #else // OpenGL ES Ã§ª»Õ—

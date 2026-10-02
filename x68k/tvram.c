@@ -113,7 +113,7 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
-	GE_GUARD();
+	GE_GUARD_TVRAM(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
 	if (CRTC_Regs[0x2a]&1)			// 同時アクセス
@@ -251,7 +251,7 @@ void FASTCALL TVRAM_RCUpdate(void)
 {
 	DWORD adr = ((DWORD)CRTC_Regs[0x2d]<<9);
 
-	GE_GUARD();
+	GE_GUARD_FULL(GE_ST_RCUPD);
 
 #ifdef USE_ASM
 	_asm

@@ -869,10 +869,11 @@ static void psp_debug_poll(void)
 			GE_Enabled = cmd[4] == 'n';
 			TVRAM_SetAllDirty();
 			log_printf("ge %s\n", GE_Enabled ? "on" : "off");
+		} else if (strcmp(cmd, "ge time on") == 0 || strcmp(cmd, "ge time off") == 0) {
+			GE_TimeSync = cmd[9] == 'n';
+			log_printf("ge time %s\n", GE_TimeSync ? "on" : "off");
 		} else if (strcmp(cmd, "ge") == 0) {
-			log_printf("ge %s: lines ge %u cpu %u, bands %u, flushes %u (since the last ge command)\n",
-				   GE_Enabled ? "on" : "off", GE_StatLines, GE_StatCpuLines, GE_StatBands, GE_StatFlushes);
-			GE_StatLines = GE_StatCpuLines = GE_StatBands = GE_StatFlushes = 0;
+			GE_LogStats();	/* since the last "ge" */
 		} else if (strcmp(cmd, "reset") == 0) {
 			WinX68k_Reset();
 			log_printf("reset\n");
@@ -888,7 +889,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, ge [on|off], bench <sec>, benchf <frame> <frames> <skip> [prof 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, benchf <frame> <frames> <skip> [prof 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}

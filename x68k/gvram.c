@@ -975,7 +975,7 @@ void FASTCALL GVRAM_FastClear(void)
 {
 	DWORD v, h;
 
-	GE_GUARD();
+	GE_GUARD_FULL(GE_ST_FASTCLR);
 	v = ((CRTC_Regs[0x29]&4)?512:256);
 	h = ((CRTC_Regs[0x29]&3)?512:256);
 	// やっぱちゃんと範囲指定しないと変になるものもある（ダイナマイトデュークとか）
@@ -1134,7 +1134,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD *ram = (WORD*)(&GVRAM[adr&0x7fffe]);
 	WORD temp;
 
-	GE_GUARD();
+	GE_GUARD_GVRAM(adr);
 	adr ^= 1;
 	adr -= 0xc00000;
 
