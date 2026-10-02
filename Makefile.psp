@@ -20,7 +20,7 @@ LOCAL_LIBRARIES= $(XLIB) $(GTK_LIB) $(SDL_LIB)
 #define	PassCDebugFlags
 
 
-CPUOBJS= x68k/d68k.o m68000/c68k.o m68000/m68000.o
+CPUOBJS= x68k/d68k.o m68000/c68k.o m68000/m68000.o m68000/c68kbench.o
 
 X68KOBJS= \
 	x68k/adpcm.o x68k/bg.o x68k/crtc.o x68k/dmac.o x68k/fdc.o \

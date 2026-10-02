@@ -842,6 +842,11 @@ static void psp_debug_frame(unsigned us)
 	psp_fps_start = now;
 }
 
+static unsigned psp_now_us(void)
+{
+	return sceKernelGetSystemTimeLow();
+}
+
 /* Commands from the debug client that must run on the emulator thread. */
 static void psp_debug_poll(void)
 {
@@ -870,6 +875,18 @@ static void psp_debug_poll(void)
 		} else if (sscanf(cmd, "mbtn %c %d", &btn, &n) == 2 && (btn == 'l' || btn == 'r')) {
 			Mouse_StartCapture(1);
 			Mouse_Event(btn == 'l' ? 1 : 2, (float)n, 0);
+		} else if ((dx = 200, sscanf(cmd, "cpubench %d %d %d", &n, &dy, &dx)) >= 2 && n >= 0 && n <= 2 &&
+			   dy > 0 && dy <= 100 && dx > 0) {
+			/* the 68000 core alone: a loop (0 registers, 1 RAM, 2 GPIP poll) for dy M cycles */
+			unsigned us;
+			int mhz, ok;
+			net_pause();	/* the firmware caps the clock while the WLAN is up */
+			mhz = scePowerGetCpuClockFrequency();
+			us = C68k_Bench(n, dy, dx, psp_now_us);
+			ok = net_resume() == 0;
+			log_printf("cpubench: prog %d, slice %d: %u us per 1M 68000 cycles (%u.%02ux real time at 10 MHz), cpu %d MHz%s\n",
+				   n, dx, us, 100000 / (us ? us : 1), 100000 * 100 / (us ? us : 1) % 100,
+				   mhz, ok ? "" : ", WLAN rejoin failed");
 		} else if (sscanf(cmd, "bench %d", &n) == 1 && n > 0 && !psp_bench_end) {
 			/* Leave the WLAN for n seconds: the firmware caps the clock while it is up. */
 			net_pause();
@@ -927,7 +944,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
