@@ -260,14 +260,48 @@ struct Vertexes {
 	short x2, y2, z2;      // Screen (ex, ey, ez)
 };
 
-struct Vertexes *vtxl = (struct Vertexes *)0x41cc000;
-struct Vertexes *vtxr = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes));
-struct Vertexes *vtxm = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes) * 2);
-struct Vertexes *vtxk = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes) * 3);
+/*
+ * The CPU reaches VRAM through the D-cache at 0x04000000 and around it at
+ * 0x44000000.  Everything the CPU writes for the GE to read (vertices, the
+ * screen and keyboard textures) goes through the uncached alias, so the GE
+ * never reads stale data and no cache writeback is needed.  The GE commands
+ * keep only the low 24 bits of an address, so the alias can be passed as is.
+ */
+#define PSP_UNCACHED(a) ((a) | 0x40000000)
+
+struct Vertexes *vtxl = (struct Vertexes *)PSP_UNCACHED(0x41cc000);
+struct Vertexes *vtxr = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes));
+struct Vertexes *vtxm = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 2);
+struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 3);
 
 #define PSP_BUF_WIDTH (512)
 #define PSP_SCR_WIDTH (480)
 #define PSP_SCR_HEIGHT (272)
+
+/* Composited X68000 screen: 512 x 512 left half, 256 x 512 right half. */
+#define PSP_SCRBUF_L 0x040cc000
+#define PSP_SCRBUF_R 0x0414c000
+#define PSP_SCRBUF_ROWS 512
+#define PSP_LINE_MAX (512 + 256)
+
+/*
+ * WinDraw_Draw() does not wait for the GE: it finishes the display list and
+ * leaves psp_ge_pending set.  psp_ge_wait() waits for the GE and shows the
+ * frame; it runs before anything the GE may still be reading is written (a
+ * screen line, the keyboard texture, the vertices) and before the display
+ * list is reused.  The first visible line of the next frame comes after the
+ * vertical blanking has been emulated, so the GE is normally done by then.
+ */
+static int psp_ge_pending;
+
+static void psp_ge_wait(void)
+{
+	if (psp_ge_pending) {
+		psp_ge_pending = 0;
+		sceGuSync(0, 0);
+		sceGuSwapBuffers();
+	}
+}
 
 #endif // PSP
 
@@ -396,9 +430,10 @@ int WinDraw_Init(void)
 	sceDisplayWaitVblankStart();
 	sceGuDisplay(GU_TRUE);
 
-	ScrBufL = (WORD *)0x040cc000;
-	ScrBufR = (WORD *)0x0414c000;
-	kbd_buffer = (WORD *)0x418c000;
+	/* uncached: see PSP_UNCACHED; psp_capture() reads these too */
+	ScrBufL = (WORD *)PSP_UNCACHED(PSP_SCRBUF_L);
+	ScrBufR = (WORD *)PSP_UNCACHED(PSP_SCRBUF_R);
+	kbd_buffer = (WORD *)PSP_UNCACHED(0x418c000);
 
 	draw_kbd_to_tex();
 #else
@@ -424,6 +459,22 @@ int WinDraw_Init(void)
 void
 WinDraw_Cleanup(void)
 {
+#ifdef PSP
+	psp_ge_wait();
+#endif
+}
+
+/*
+ * Show the last frame WinDraw_Draw() queued.  Without this it is shown when
+ * the next frame starts compositing; call it when frames are skipped or the
+ * emulation stops so that the frame does not wait for the next drawn one.
+ */
+void
+WinDraw_Flush(void)
+{
+#ifdef PSP
+	psp_ge_wait();
+#endif
 }
 
 void
@@ -575,6 +626,7 @@ WinDraw_Draw(void)
 #elif defined(PSP)
 	PROF_BEGIN(draw);
 	PROF_COUNT(PROF_FRAMES, 1);
+	psp_ge_wait();	/* normally done already, by the first line of this frame */
 	sceGuStart(GU_DIRECT, list);
 
 	sceGuClearColor(0);
@@ -598,7 +650,7 @@ WinDraw_Draw(void)
 	vtxl->z2 = 0;
 
 	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-	sceGuTexImage(0, 512, 512, 512, ScrBufL);
+	sceGuTexImage(0, 512, 512, 512, (void *)PSP_SCRBUF_L);
 	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
 	sceGuTexFilter(GU_LINEAR, GU_LINEAR);
 
@@ -620,7 +672,7 @@ WinDraw_Draw(void)
 		vtxr->z2 = 0;
 
 		sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-		sceGuTexImage(0, 256, 512, 256, ScrBufR);
+		sceGuTexImage(0, 256, 512, 256, (void *)PSP_SCRBUF_R);
 		sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
 		sceGuTexFilter(GU_LINEAR, GU_LINEAR);
 
@@ -649,9 +701,8 @@ WinDraw_Draw(void)
 	}
 
 	sceGuFinish();
-	sceGuSync(0, 0);
-
-	sceGuSwapBuffers();
+	/* sceGuSync() and sceGuSwapBuffers() are left to psp_ge_wait() */
+	psp_ge_pending = 1;
 	PROF_END(draw, PROF_DRAW);
 
 #else // OpenGL ES 未使用
@@ -769,259 +820,261 @@ WinDraw_Draw(void)
 #define FULLSCREEN_WIDTH 512
 #endif
 
-#ifdef PSP
-#define WD_MEMCPY(src)						\
-{								\
-	if (TextDotX > 512) {					\
-		memcpy(&ScrBufL[adr], (src), 512 * 2);		\
-		adr = VLINE * 256;				\
-		memcpy(&ScrBufR[adr], (WORD *)(src) + 512, TextDotX * 2 - 512 * 2); \
-	} else {						\
-		memcpy(&ScrBufL[adr], (src), TextDotX * 2);	\
-	}							\
-}
-#else
-#define WD_MEMCPY(src) memcpy(&ScrBuf[adr], (src), TextDotX * 2)
-#endif
+/*
+ * Compositing.  The helpers below draw one line of wd_n pixels into wd_dst,
+ * x = 0 .. wd_n - 1 (BG_LineBuf and Text_TrFlag are read from x + 16).
+ *
+ * PSP: wd_dst is psp_line, a line buffer in cached RAM that stays in the
+ * D-cache over all the passes of a line; DrawLine() then copies the finished
+ * line once into the VRAM textures (psp_flush_line()), where the left/right
+ * (512 + 256) split is handled.  Elsewhere wd_dst is the ScrBuf row itself.
+ *
+ * Where the buffers are word aligned, the source pixels are looked at two at
+ * a time: two transparent (0) pixels are skipped with one test, two opaque
+ * ones are copied with one store.
+ */
+typedef UINT32 __attribute__((__may_alias__)) WD_PAIR;
+
+#define WD_ALIGNED(a, b) (((((unsigned long)(a)) | ((unsigned long)(b))) & 3) == 0)
+
+static WORD *wd_dst;	/* the line being composited */
+static int wd_n;	/* its width in pixels */
 
 #ifdef PSP
-#define WD_LOOP(start, end, sub)				\
-{								\
-	if (TextDotX > 512) {					\
-		for (i = (start); i < 512 + (start); i++, adr++) {	\
-			sub(L);						\
-		}							\
-		adr = VLINE * 256;					\
-		for (i = 512 + (start); i < (end); i++, adr++) {	\
-			sub(R);						\
-		}							\
-	} else {							\
-		for (i = (start); i < (end); i++, adr++) {		\
-			sub(L);						\
-		}							\
-	}								\
+static WORD psp_line[PSP_LINE_MAX] __attribute__((aligned(64)));
+
+static void psp_copy_line(WORD *dst, const WORD *src, int n)
+{
+	WD_PAIR *d = (WD_PAIR *)dst;
+	const WD_PAIR *s = (const WD_PAIR *)src;
+	int k = n >> 1;
+
+	for (; k >= 4; k -= 4, d += 4, s += 4) {
+		UINT32 a = s[0], b = s[1], c = s[2], e = s[3];
+		d[0] = a;
+		d[1] = b;
+		d[2] = c;
+		d[3] = e;
+	}
+	for (; k > 0; k--)
+		*d++ = *s++;
+	if (n & 1)
+		dst[n - 1] = src[n - 1];
 }
-#else
-#define WD_LOOP(start, end, sub)			\
-{ 							\
-	for (i = (start); i < (end); i++, adr++) {	\
-		sub();					\
-	}						\
+
+/* Store the composited line VLINE (uncached writes to the VRAM textures). */
+static void psp_flush_line(void)
+{
+	int n = wd_n;
+
+	psp_ge_wait();
+	if (VLINE >= PSP_SCRBUF_ROWS)
+		return;		/* below the textures */
+	psp_copy_line(ScrBufL + VLINE * 512, psp_line, (n > 512) ? 512 : n);
+	if (n > 512)
+		psp_copy_line(ScrBufR + VLINE * 256, psp_line + 512, n - 512);
 }
 #endif
 
-#define WD_SUB(SUFFIX, src)			\
+/* d[x] = s[x] where s[x] != 0 */
+static void wd_sub(WORD *d, const WORD *s, int n)
+{
+	int x = 0;
+
+	if (WD_ALIGNED(d, s)) {
+		for (; x + 2 <= n; x += 2) {
+			UINT32 p = *(const WD_PAIR *)(s + x);
+
+			if (p == 0)
+				continue;
+			if ((p & 0xffff) && (p >> 16)) {
+				*(WD_PAIR *)(d + x) = p;
+				continue;
+			}
+			if (s[x])
+				d[x] = s[x];
+			if (s[x + 1])
+				d[x + 1] = s[x + 1];
+		}
+	}
+	for (; x < n; x++) {
+		WORD w = s[x];
+		if (w)
+			d[x] = w;
+	}
+}
+
+/* d[x] = s[x] where s[x] != 0 and (f[x] & mask) */
+static void wd_sub_flag(WORD *d, const WORD *s, const BYTE *f, int mask, int n)
+{
+	int x = 0;
+
+	if (WD_ALIGNED(d, s)) {
+		for (; x + 2 <= n; x += 2) {
+			if (*(const WD_PAIR *)(s + x) == 0)
+				continue;
+			if ((f[x] & mask) && s[x])
+				d[x] = s[x];
+			if ((f[x + 1] & mask) && s[x + 1])
+				d[x + 1] = s[x + 1];
+		}
+	}
+	for (; x < n; x++) {
+		WORD w = s[x];
+		if ((f[x] & mask) && w)
+			d[x] = w;
+	}
+}
+
+/* half colour of v (text/BG) and w (graphics, != 0) */
+#define WD_HALF(v, w)				\
 {						\
-	w = (src);				\
-	if (w != 0)				\
-		ScrBuf##SUFFIX[adr] = w;	\
+	w &= halfmask;				\
+	if (v & ibit)				\
+		w += ix2;			\
+	v &= halfmask;				\
+	v += w;					\
+	v >>= 1;				\
 }
-
 
 INLINE void WinDraw_DrawGrpLine(int opaq)
 {
-#define _DGL_SUB(SUFFIX) WD_SUB(SUFFIX, Grp_LineBuf[i])
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
-	WORD w;
-	int i;
-
-	if (opaq) {
-		WD_MEMCPY(Grp_LineBuf);
-	} else {
-		WD_LOOP(0,  TextDotX, _DGL_SUB);
-	}
+	if (opaq)
+		memcpy(wd_dst, Grp_LineBuf, wd_n * 2);
+	else
+		wd_sub(wd_dst, Grp_LineBuf, wd_n);
 }
 
 INLINE void WinDraw_DrawGrpLineNonSP(int opaq)
 {
-#define _DGL_NSP_SUB(SUFFIX) WD_SUB(SUFFIX, Grp_LineBufSP2[i])
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
-	WORD w;
-	int i;
-
-	if (opaq) {
-		WD_MEMCPY(Grp_LineBufSP2);
-	} else {
-		WD_LOOP(0,  TextDotX, _DGL_NSP_SUB);
-	}
+	if (opaq)
+		memcpy(wd_dst, Grp_LineBufSP2, wd_n * 2);
+	else
+		wd_sub(wd_dst, Grp_LineBufSP2, wd_n);
 }
 
 INLINE void WinDraw_DrawTextLine(int opaq, int td)
 {
-#define _DTL_SUB2(SUFFIX) WD_SUB(SUFFIX, BG_LineBuf[i])
-#define _DTL_SUB(SUFFIX)		\
-{					\
-	if (Text_TrFlag[i] & 1) {	\
-		_DTL_SUB2(SUFFIX);	\
-	}				\
-}	
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
-	WORD w;
-	int i;
-
-	if (opaq) {
-		WD_MEMCPY(&BG_LineBuf[16]);
-	} else {
-		if (td) {
-			WD_LOOP(16, TextDotX + 16, _DTL_SUB);
-		} else {
-			WD_LOOP(16, TextDotX + 16, _DTL_SUB2);
-		}
-	}
+	if (opaq)
+		memcpy(wd_dst, &BG_LineBuf[16], wd_n * 2);
+	else if (td)
+		wd_sub_flag(wd_dst, &BG_LineBuf[16], &Text_TrFlag[16], 1, wd_n);
+	else
+		wd_sub(wd_dst, &BG_LineBuf[16], wd_n);
 }
 
 INLINE void WinDraw_DrawTextLineTR(int opaq)
 {
-#define _DTL_TR_SUB(SUFFIX)			   \
-{						   \
-	w = Grp_LineBufSP[i - 16];		   \
-	if (w != 0) {				   \
-		w &= Pal_HalfMask;		   \
-		v = BG_LineBuf[i];		   \
-		if (v & Ibit)			   \
-			w += Pal_Ix2;		   \
-		v &= Pal_HalfMask;		   \
-		v += w;				   \
-		v >>= 1;			   \
-	} else {				   \
-		if (Text_TrFlag[i] & 1)		   \
-			v = BG_LineBuf[i];	   \
-		else				   \
-			v = 0;			   \
-	}					   \
-	ScrBuf##SUFFIX[adr] = (WORD)v;		   \
-}
-
-#define _DTL_TR_SUB2(SUFFIX)			   \
-{						   \
-	if (Text_TrFlag[i] & 1) {		   \
-		w = Grp_LineBufSP[i - 16];	   \
-		v = BG_LineBuf[i];		   \
-						   \
-		if (v != 0) {			   \
-			if (w != 0) {			\
-				w &= Pal_HalfMask;	\
-				if (v & Ibit)		\
-					w += Pal_Ix2;	\
-				v &= Pal_HalfMask;	\
-				v += w;			\
-				v >>= 1;		\
-			}				\
-			ScrBuf##SUFFIX[adr] = (WORD)v;	\
-		}					\
-	}						\
-}
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
+	WORD *d = wd_dst;
+	const WORD *sp = Grp_LineBufSP, *bg = &BG_LineBuf[16];
+	const BYTE *f = &Text_TrFlag[16];
+	const WORD halfmask = Pal_HalfMask, ibit = Ibit, ix2 = Pal_Ix2;
+	int x, n = wd_n;
 	DWORD v;
 	WORD w;
-	int i;
 
 	if (opaq) {
-		WD_LOOP(16, TextDotX + 16, _DTL_TR_SUB);
+		for (x = 0; x < n; x++) {
+			w = sp[x];
+			if (w != 0) {
+				v = bg[x];
+				WD_HALF(v, w);
+			} else if (f[x] & 1) {
+				v = bg[x];
+			} else {
+				v = 0;
+			}
+			d[x] = (WORD)v;
+		}
 	} else {
-		WD_LOOP(16, TextDotX + 16, _DTL_TR_SUB2);
+		for (x = 0; x < n; x++) {
+			if (f[x] & 1) {
+				v = bg[x];
+				if (v != 0) {
+					w = sp[x];
+					if (w != 0)
+						WD_HALF(v, w);
+					d[x] = (WORD)v;
+				}
+			}
+		}
 	}
 }
 
 INLINE void WinDraw_DrawBGLine(int opaq, int td)
 {
-#define _DBL_SUB2(SUFFIX) WD_SUB(SUFFIX, BG_LineBuf[i])
-#define _DBL_SUB(SUFFIX)			 \
-{						 \
-	if (Text_TrFlag[i] & 2) {		 \
-		_DBL_SUB2(SUFFIX); \
-	} \
-}
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
-	WORD w;
-	int i;
-
-#if 0 // debug for segv
-	static int log_start = 0;
-
-	if (TextDotX == 128 && TextDotY == 128) {
-		log_start = 1;
-	}
-	if (log_start) {
-		printf("opaq/td: %d/%d VLINE: %d, TextDotX: %d\n", opaq, td, VLINE, TextDotX);
-	}
-#endif
-
-	if (opaq) {
-		WD_MEMCPY(&BG_LineBuf[16]);
-	} else {
-		if (td) {
-			WD_LOOP(16, TextDotX + 16, _DBL_SUB);
-		} else {
-			WD_LOOP(16, TextDotX + 16, _DBL_SUB2);
-		}
-	}
+	if (opaq)
+		memcpy(wd_dst, &BG_LineBuf[16], wd_n * 2);
+	else if (td)
+		wd_sub_flag(wd_dst, &BG_LineBuf[16], &Text_TrFlag[16], 2, wd_n);
+	else
+		wd_sub(wd_dst, &BG_LineBuf[16], wd_n);
 }
 
 INLINE void WinDraw_DrawBGLineTR(int opaq)
 {
-
-#define _DBL_TR_SUB3()			\
-{					\
-	if (w != 0) {			\
-		w &= Pal_HalfMask;	\
-		if (v & Ibit)		\
-			w += Pal_Ix2;	\
-		v &= Pal_HalfMask;	\
-		v += w;			\
-		v >>= 1;		\
-	}				\
-}
-
-#define _DBL_TR_SUB(SUFFIX) \
-{					\
-	w = Grp_LineBufSP[i - 16];	\
-	v = BG_LineBuf[i];		\
-					\
-	_DBL_TR_SUB3()			\
-	ScrBuf##SUFFIX[adr] = (WORD)v;	\
-}
-
-#define _DBL_TR_SUB2(SUFFIX) \
-{							\
-	if (Text_TrFlag[i] & 2) {  			\
-		w = Grp_LineBufSP[i - 16];		\
-		v = BG_LineBuf[i];			\
-							\
-		if (v != 0) {				\
-			_DBL_TR_SUB3()			\
-			ScrBuf##SUFFIX[adr] = (WORD)v;	\
-		}					\
-	}						\
-}
-
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
+	WORD *d = wd_dst;
+	const WORD *sp = Grp_LineBufSP, *bg = &BG_LineBuf[16];
+	const BYTE *f = &Text_TrFlag[16];
+	const WORD halfmask = Pal_HalfMask, ibit = Ibit, ix2 = Pal_Ix2;
+	int x, n = wd_n;
 	DWORD v;
 	WORD w;
-	int i;
 
 	if (opaq) {
-		WD_LOOP(16, TextDotX + 16, _DBL_TR_SUB);
+		for (x = 0; x < n; x++) {
+			w = sp[x];
+			v = bg[x];
+			if (w != 0)
+				WD_HALF(v, w);
+			d[x] = (WORD)v;
+		}
 	} else {
-		WD_LOOP(16, TextDotX + 16, _DBL_TR_SUB2);
+		for (x = 0; x < n; x++) {
+			if (f[x] & 2) {
+				v = bg[x];
+				if (v != 0) {
+					w = sp[x];
+					if (w != 0)
+						WD_HALF(v, w);
+					d[x] = (WORD)v;
+				}
+			}
+		}
 	}
-
 }
 
 INLINE void WinDraw_DrawPriLine(void)
 {
-#define _DPL_SUB(SUFFIX) WD_SUB(SUFFIX, Grp_LineBufSP[i])
+	wd_sub(wd_dst, Grp_LineBufSP, wd_n);
+}
 
-	DWORD adr = VLINE*FULLSCREEN_WIDTH;
+/* AQUALES: fill the pixels nothing was drawn to with the half colour */
+INLINE void WinDraw_DrawHalfLine(void)
+{
+	WORD *d = wd_dst;
+	const WORD *sp = Grp_LineBufSP;
+	const WORD halfmask = Pal_HalfMask;
+	int x = 0, n = wd_n;
 	WORD w;
-	int i;
 
-	WD_LOOP(0, TextDotX, _DPL_SUB);
+	if (WD_ALIGNED(d, sp)) {
+		for (; x + 2 <= n; x += 2) {
+			if (*(const WD_PAIR *)(sp + x) == 0)
+				continue;
+			w = sp[x];
+			if (w != 0 && d[x] == 0)
+				d[x] = (w & halfmask) >> 1;
+			w = sp[x + 1];
+			if (w != 0 && d[x + 1] == 0)
+				d[x + 1] = (w & halfmask) >> 1;
+		}
+	}
+	for (; x < n; x++) {
+		w = sp[x];
+		if (w != 0 && d[x] == 0)
+			d[x] = (w & halfmask) >> 1;
+	}
 }
 
 static void DrawLine(void);
@@ -1249,6 +1302,13 @@ static void DrawLine(void)
 
 
 	opaq = 1;
+#ifdef PSP
+	wd_dst = psp_line;
+	wd_n = (TextDotX > PSP_LINE_MAX) ? PSP_LINE_MAX : TextDotX;
+#else
+	wd_dst = &ScrBuf[VLINE * FULLSCREEN_WIDTH];
+	wd_n = TextDotX;
+#endif
 
 
 #if 0
@@ -1421,36 +1481,15 @@ static void DrawLine(void)
 		else if ( ((VCReg2[0]&0x5d)==0x1c)&&(tron) )	// 半透明時に全てが透明なドットをハーフカラーで埋める
 		{						// （AQUALES）
 
-#define _DL_SUB(SUFFIX) \
-{								\
-	w = Grp_LineBufSP[i];					\
-	if (w != 0 && (ScrBuf##SUFFIX[adr] & 0xffff) == 0)	\
-		ScrBuf##SUFFIX[adr] = (w & Pal_HalfMask) >> 1;	\
-}
-
-			DWORD adr = VLINE*FULLSCREEN_WIDTH;
-			WORD w;
-			int i;
-
-			WD_LOOP(0, TextDotX, _DL_SUB);
+			WinDraw_DrawHalfLine();
 		}
 
 
 	if (opaq)
-	{
-		DWORD adr = VLINE*FULLSCREEN_WIDTH;
+		bzero(wd_dst, wd_n * 2);
 #ifdef PSP
-		if (TextDotX > 512) {
-			bzero(&ScrBufL[adr], TextDotX * 2);
-			adr = VLINE * 256;
-			bzero(&ScrBufR[adr], (TextDotX - 512) * 2);
-		} else {
-			bzero(&ScrBufL[adr], TextDotX * 2);
-		}
-#else
-		bzero(&ScrBuf[adr], TextDotX * 2);
+	psp_flush_line();
 #endif
-	}
 }
 
 /********** menu 関連ルーチン **********/
@@ -1726,6 +1765,7 @@ int WinDraw_MenuInit(void)
 #ifdef PSP
 static void psp_draw_menu(void)
 {
+	psp_ge_wait();
 	sceKernelDcacheWritebackAll();
 
 	sceGuStart(GU_DIRECT, list);
@@ -2050,6 +2090,9 @@ void WinDraw_reverse_key(int x, int y)
 	
 	kp = Keyboard_get_key_ptr(kbd_kx, kbd_ky);
 
+#ifdef PSP
+	psp_ge_wait();	/* the GE may still be reading kbd_buffer */
+#endif
 	p = kbd_buffer + KBDBUF_WIDTH * kbd_key[kp].y + kbd_key[kp].x;
 
 	for (i = 0; i < kbd_key[kp].h; i++) {
