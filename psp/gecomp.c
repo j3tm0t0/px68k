@@ -495,7 +495,6 @@ void GE_SpriteGuard(void)
 	GE_Stat[GE_ST_SPR_COPY]++;
 }
 
-static int ge_marking;	/* ge_tiles/ge_sprites only note what they use */
 static void ge_mark_bg(void);
 
 /* BG[] is about to be written: maps/patterns of the waiting bands, pattern copies */
@@ -796,116 +795,158 @@ static void ge_draw(GE_TV *start, GE_TV *end)
 }
 
 /*
- * Quads sorted by palette block (16 CLUT offsets): counted in a first walk,
- * written in a second one.
+ * Quads sorted by palette block (16 CLUT offsets): made in one walk into
+ * ge_sq (tagged with their block in ge_sb), then copied into the list
+ * memory block by block (in order: the same quads as a walk per block).
  */
-typedef struct {
-	int	pass;		/* 0: count, 1: write */
-	int	n[16];
-	GE_TV	*base[16], *cur[16];
-} GE_Batch;
+#define GE_MAXQ		(65 * 34 + 128)	/* tiles of a plane: 512 dots, 256 lines of 8x8; or sprites */
+static GE_TV ge_sq[GE_MAXQ * 2];
+static BYTE ge_sb[GE_MAXQ];
+static GE_CV ge_cq[GE_MAXQ * 2];
 
-static void ge_batch_init(GE_Batch *bt)
+/* draw the nq quads of ge_sq/ge_sb, n[blk] of each block */
+static void ge_sorted_draw(int nq, const int *n)
 {
-	memset(bt, 0, sizeof(*bt));
-}
-
-static void ge_batch_alloc(GE_Batch *bt)
-{
-	int k;
+	GE_TV *base[16], *cur[16];
+	int k, q;
 
 	for (k = 0; k < 16; k++)
-		if (bt->n[k])
-			bt->base[k] = bt->cur[k] = (GE_TV *)ge_mem(bt->n[k] * 2 * sizeof(GE_TV));
-	bt->pass = 1;
-}
+		if (n[k])
+			base[k] = cur[k] = (GE_TV *)ge_mem(n[k] * 2 * sizeof(GE_TV));
+	for (q = 0; q < nq; q++) {
+		GE_TV *d = cur[ge_sb[q]];
 
-static inline void ge_add(GE_Batch *bt, int blk, int x, int y, int w, int h, int u, int v, int hf, int vf, int z)
-{
-	if (bt->pass == 0)
-		bt->n[blk]++;	/* upper bound: before clipping */
-	else
-		bt->cur[blk] = ge_quad(bt->cur[blk], x, y, w, h, u, v, hf, vf, z);
-}
-
-static void ge_batch_draw(GE_Batch *bt)
-{
-	int k;
-
+		d[0] = ge_sq[q * 2];
+		d[1] = ge_sq[q * 2 + 1];
+		cur[ge_sb[q]] = d + 2;
+	}
 	for (k = 0; k < 16; k++)
-		if (bt->cur[k] > bt->base[k]) {
+		if (n[k]) {
 			sceGuClutMode(GU_PSM_8888, 0, 0x0f, k);
-			ge_draw(bt->base[k], bt->cur[k]);
+			ge_draw(base[k], cur[k]);
 		}
 }
 
 /*
  * The tiles of a BG plane on the band, as bg_drawline_loopx8/16: per line,
  * (TextDotX >> 3 or 4) + 1 tiles from x = -(scroll & (size - 1)).
- * under: the "gd" rectangles (palette block != 0) instead, into cv/ncv.
+ * mode 0: textured quads (ge_sq), 1: the "gd" rectangles (palette block
+ * != 0, runs of one colour merged, into ge_cq), 2: note what they use.
+ * Returns the number of quads / rectangles.
  */
-static void ge_tiles(GE_Batch *bt, const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy,
-		     DWORD adj, const GE_Pal *pal, GE_CV **cv, int *ncv)
+static inline __attribute__((always_inline))
+int ge_tiles_sz(const GE_Band *b, const int sz, const int mode, DWORD top, DWORD scx, DWORD scy, DWORD adj,
+		const GE_Pal *pal, int *n)
 {
 	const GE_State *s = &b->st;
 	const int sh = (sz == 8) ? 3 : 4;
-	const int ncol = (s->dotx >> sh) + 1;
+	const int ncol = (s->dotx >> sh) + 1, dotx = s->dotx;
 	const DWORD sy = scy + s->lbase + b->y0;	/* scroll + VLINEBG - BG_VLINE */
 	const DWORD sx = scx - adj;
-	int i = 0;
+	const int x00 = -(int)(sx & (sz - 1));
+	unsigned int c32[16];
+	GE_TV *t = ge_sq;
+	GE_CV *c = ge_cq;
+	int i = 0, nq = 0, px = 0;
 
+	if (mode == 1)
+		for (i = 1; i < 16; i++)
+			c32[i] = ge_c32(pal->text[i * 16], 255);
+	i = 0;
 	while (i < b->h) {
 		const DWORD yy = sy + i;
 		const int r = yy & (sz - 1);
-		const int n = (sz - r < b->h - i) ? sz - r : b->h - i;
+		const int nn = (sz - r < b->h - i) ? sz - r : b->h - i;
+		const int y0 = b->y0 + i;
 		const BYTE *map = BG + top + ((sz == 8) ? ((yy & 0x1f8) << 4) : ((yy & 0x3f0) << 3));
 		DWORD col = (sx >> sh) & 63;
-		int x = -(int)(sx & (sz - 1));
-		int k;
+		int x = x00, k, run = 0;
 
 		for (k = 0; k < ncol; k++, x += sz, col = (col + 1) & 63) {
 			const DWORD bl = map[col * 2], pat = map[col * 2 + 1];
 			const int blk = bl & 15;
 
-			if (ge_marking) {
+			if (mode == 2) {
 				GE_SET(ge_usemap, (DWORD)(map + col * 2 - BG) >> 1);
 				if (sz == 8)
 					GE_SET(ge_use8, pat);
 				else
 					GE_SET(ge_use16, pat);
-			} else if (cv) {
-				if (blk) {
-					if (*cv) {
-						GE_CV *c = *cv;
-						int x0 = x < 0 ? 0 : x, x1 = x + sz > ge_dotx ? ge_dotx : x + sz;
-						unsigned int col32 = ge_c32(pal->text[blk * 16], 255);
+			} else if (mode == 1) {
+				const int x0 = x < 0 ? 0 : x, x1 = x + sz > dotx ? dotx : x + sz;
 
-						c[0].c = c[1].c = col32;
-						c[0].x = x0;
-						c[1].x = x1;
-						c[0].y = b->y0 + i;
-						c[1].y = b->y0 + i + n;
-						c[0].z = c[1].z = 0;
-						c[0].pad = c[1].pad = 0;
-						*cv = c + 2;
-					} else
-						(*ncv)++;
+				if (!blk)
+					run = 0;
+				else if (run == blk && c[-1].x == x0)
+					c[-1].x = x1;	/* the same colour goes on */
+				else {
+					c[0].c = c[1].c = c32[blk];
+					c[0].x = x0;
+					c[1].x = x1;
+					c[0].y = y0;
+					c[1].y = y0 + nn;
+					c[0].z = c[1].z = 0;
+					c[0].pad = c[1].pad = 0;
+					c += 2;
+					nq++;
+					run = blk;
 				}
 			} else {
-				const int pu = (sz == 8) ? (pat & 63) * 8 : (pat & 31) * 16;
+				/* as ge_quad: clipped to 0 <= x < dotx, at most 16 wide: no strips */
+				const int hf = (bl & 0x40) != 0, vf = (bl & 0x80) != 0;
 				const int pv = (sz == 8) ? (pat >> 6) * 8 : (pat >> 5) * 16;
-				const int vf = (bl & 0x80) != 0;
+				const int v = vf ? pv + sz - r - nn : pv + r;
+				int u = (sz == 8) ? (pat & 63) * 8 : (pat & 31) * 16;
+				int xx = x, w = sz;
 
-				ge_add(bt, blk, x, b->y0 + i, sz, n, pu, vf ? pv + sz - r - n : pv + r,
-				       (bl & 0x40) != 0, vf, 0);
+				if (xx < 0) {
+					if (!hf)
+						u -= xx;
+					w += xx;
+					xx = 0;
+				}
+				if (xx + w > dotx) {
+					if (hf)
+						u += xx + w - dotx;
+					w = dotx - xx;
+				}
+				if (w <= 0)
+					continue;
+				px += w * nn;
+				t[0].u = hf ? u + w : u;
+				t[1].u = hf ? u : u + w;
+				t[0].v = vf ? v + nn : v;
+				t[1].v = vf ? v : v + nn;
+				t[0].x = xx;
+				t[1].x = xx + w;
+				t[0].y = y0;
+				t[1].y = y0 + nn;
+				t[0].z = t[1].z = 0;
+				t += 2;
+				ge_sb[nq++] = blk;
+				n[blk]++;
 			}
 		}
-		i += n;
+		i += nn;
 	}
+	GE_Stat[GE_ST_PIXELS] += px;
+	return nq;
 }
 
-/* the sprites of priority 'level' on the band (Sprite_CollectLine) */
-static void ge_sprites(GE_Batch *bt, const GE_Band *b, int level)
+static int ge_tiles(const GE_Band *b, int sz, int mode, DWORD top, DWORD scx, DWORD scy, DWORD adj,
+		    const GE_Pal *pal, int *n)
+{
+	if (sz == 8)
+		return ge_tiles_sz(b, 8, mode, top, scx, scy, adj, pal, n);
+	return ge_tiles_sz(b, 16, mode, top, scx, scy, adj, pal, n);
+}
+
+/*
+ * The sprites shown on the band (Sprite_CollectLine), per priority 1-3,
+ * from sprite 127 down to 0, into lst[level - 1][]; marking: note what
+ * they use instead.
+ */
+static void ge_sprites(const GE_Band *b, BYTE lst[3][128], int *cnt, int marking)
 {
 	const GE_State *s = &b->st;
 	const WORD *sr = (const WORD *)(s->spr == GE_LIVE ? Sprite_Regs : ge_spr[s->spr]);
@@ -914,81 +955,90 @@ static void ge_sprites(GE_Batch *bt, const GE_Band *b, int level)
 
 	for (n = 127; n >= 0; n--) {
 		const WORD *sp = sr + n * 4;
-		DWORD t, ctrl;
-		int d, top, i0, i1, pu, pv, vf;
+		const int level = sp[3] & 3;
+		int top;
 
-		if ((sp[3] & 3) != level)
+		if (!level)
 			continue;
-		t = (sp[0] + s->hadj) & 0x3ff;
-		if (t >= (DWORD)s->dotx + 16)
+		if (((sp[0] + s->hadj) & 0x3ff) >= (DWORD)s->dotx + 16)
 			continue;
 		/* line i of the band shows row i - top, if 0-15 */
-		d = (int)((DWORD)(sp[1] & 0x3ff) - l0 - 1);
-		top = d - 15;
-		i0 = top < 0 ? 0 : top;
-		i1 = top + 16 > b->h ? b->h : top + 16;
-		if (i0 >= i1)
+		top = (int)((DWORD)(sp[1] & 0x3ff) - l0 - 1) - 15;
+		if (top >= b->h || top + 16 <= 0)
 			continue;
-		ctrl = sp[2];
-		if (ge_marking) {
-			GE_SET(ge_use16, ctrl & 0xff);
-			continue;
-		}
-		pu = (ctrl & 31) * 16;
-		pv = ((ctrl >> 5) & 7) * 16;
-		vf = (ctrl & 0x8000) != 0;
-		ge_add(bt, (ctrl >> 8) & 15, (int)t - 16, b->y0 + i0, 16, i1 - i0, pu,
-		       vf ? pv + 16 - (i0 - top) - (i1 - i0) : pv + (i0 - top),
-		       (ctrl & 0x4000) != 0, vf, n * 256);
+		if (marking)
+			GE_SET(ge_use16, sp[2] & 0xff);
+		else
+			lst[level - 1][cnt[level - 1]++] = n;
 	}
+}
+
+/* the sprites of priority 'level' on the band, from ge_sprites' list */
+static void ge_spritelevel(const GE_Band *b, const BYTE *lst, int cnt)
+{
+	const GE_State *s = &b->st;
+	const WORD *sr = (const WORD *)(s->spr == GE_LIVE ? Sprite_Regs : ge_spr[s->spr]);
+	const DWORD l0 = s->lbase + b->y0;
+	int n[16], j, nq = 0;
+	GE_TV *t = ge_sq;
+
+	if (!cnt)
+		return;
+	memset(n, 0, sizeof(n));
+	for (j = 0; j < cnt; j++) {
+		const int sn = lst[j];
+		const WORD *sp = sr + sn * 4;
+		const DWORD ctrl = sp[2];
+		const int top = (int)((DWORD)(sp[1] & 0x3ff) - l0 - 1) - 15;
+		const int i0 = top < 0 ? 0 : top, i1 = top + 16 > b->h ? b->h : top + 16;
+		const int pv = ((ctrl >> 5) & 7) * 16, vf = (ctrl & 0x8000) != 0;
+		GE_TV *e = ge_quad(t, (int)((sp[0] + s->hadj) & 0x3ff) - 16, b->y0 + i0, 16, i1 - i0,
+				   (ctrl & 31) * 16, vf ? pv + 16 - (i0 - top) - (i1 - i0) : pv + (i0 - top),
+				   (ctrl & 0x4000) != 0, vf, sn * 256);
+
+		if (e > t) {
+			const int blk = (ctrl >> 8) & 15;
+
+			t = e;
+			ge_sb[nq++] = blk;
+			n[blk]++;
+		}
+	}
+	sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
+	sceGuEnable(GU_DEPTH_TEST);
+	sceGuDepthFunc(GU_LEQUAL);
+	ge_sorted_draw(nq, n);
 }
 
 static void ge_bgplane(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, DWORD adj)
 {
-	GE_Batch bt;
+	int n[16], nq;
 
-	ge_batch_init(&bt);
-	ge_tiles(&bt, b, sz, top, scx, scy, adj, NULL, NULL, NULL);
-	ge_batch_alloc(&bt);
-	ge_tiles(&bt, b, sz, top, scx, scy, adj, NULL, NULL, NULL);
+	memset(n, 0, sizeof(n));
+	nq = ge_tiles(b, sz, 0, top, scx, scy, adj, NULL, n);
 	if (sz == 8)
 		sceGuTexImage(0, 512, 32, 512, GE_VRAM(GE_ATLAS8));
 	else
 		sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
 	sceGuDisable(GU_DEPTH_TEST);
-	ge_batch_draw(&bt);
-}
-
-static void ge_spritelevel(const GE_Band *b, int level)
-{
-	GE_Batch bt;
-
-	ge_batch_init(&bt);
-	ge_sprites(&bt, b, level);
-	ge_batch_alloc(&bt);
-	ge_sprites(&bt, b, level);
-	sceGuTexImage(0, 512, 128, 512, GE_VRAM(GE_ATLAS16));
-	sceGuEnable(GU_DEPTH_TEST);
-	sceGuDepthFunc(GU_LEQUAL);
-	ge_batch_draw(&bt);
+	ge_sorted_draw(nq, n);
 }
 
 static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, DWORD adj, const GE_Pal *pal)
 {
-	GE_CV *cv = NULL, *base;
-	int n = 0;
+	const int n = ge_tiles(b, sz, 1, top, scx, scy, adj, pal, NULL);
+	GE_CV *v;
 
-	ge_tiles(NULL, b, sz, top, scx, scy, adj, pal, &cv, &n);
 	if (!n)
 		return;
-	base = cv = (GE_CV *)ge_mem(n * 2 * sizeof(GE_CV));
-	ge_tiles(NULL, b, sz, top, scx, scy, adj, pal, &cv, &n);
+	v = (GE_CV *)ge_mem(n * 2 * sizeof(GE_CV));
+	memcpy(v, ge_cq, n * 2 * sizeof(GE_CV));
 	sceGuDisable(GU_TEXTURE_2D);
 	sceGuDisable(GU_ALPHA_TEST);
 	sceGuDisable(GU_DEPTH_TEST);
-	sceGuDrawArray(GU_SPRITES, GE_CVFMT, cv - base, 0, base);
+	sceGuDrawArray(GU_SPRITES, GE_CVFMT, n * 2, 0, v);
 	GE_Stat[GE_ST_DRAWS]++;
-	GE_Stat[GE_ST_VERTS] += cv - base;
+	GE_Stat[GE_ST_VERTS] += n * 2;
 	sceGuEnable(GU_TEXTURE_2D);
 	sceGuEnable(GU_ALPHA_TEST);
 }
@@ -1012,6 +1062,8 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 	const int sz0 = s->chr8 ? 8 : 16;
 	/* the original passed no H adjust for 16x16 without graphics */
 	const DWORD adj0 = (s->chr8 || gd) ? s->hadj : 0;
+	BYTE lst[3][128];
+	int cnt[3] = { 0, 0, 0 };
 
 	if (gd) {
 		/* under everything: BG0's, then BG1's (BG1 comes first, wins) */
@@ -1023,25 +1075,25 @@ static void ge_bg(const GE_Band *b, int gd, const GE_Pal *pal)
 	ge_ltick(1);
 	sceGuTexMode(GU_PSM_T4, 0, 0, 0);
 	sceGuEnable(GU_ALPHA_TEST);
-	ge_spritelevel(b, 1);
+	ge_sprites(b, lst, cnt, 0);
+	ge_spritelevel(b, lst[0], cnt[0]);
 	if (bg1)
 		ge_bgplane(b, 8, s->bg1top, s->bg1sx, s->bg1sy, s->hadj);
-	ge_spritelevel(b, 2);
+	ge_spritelevel(b, lst[1], cnt[1]);
 	if (bg0)
 		ge_bgplane(b, sz0, s->bg0top, s->bg0sx, s->bg0sy, adj0);
-	ge_spritelevel(b, 3);
+	ge_spritelevel(b, lst[2], cnt[2]);
 	ge_ltick(2);
 }
 
 /* what the waiting bands use of BG[] (GE_BGData) */
 static void ge_mark_bg(void)
 {
-	int i, level;
+	int i;
 
 	memset(ge_use16, 0, sizeof(ge_use16));
 	memset(ge_use8, 0, sizeof(ge_use8));
 	memset(ge_usemap, 0, sizeof(ge_usemap));
-	ge_marking = 1;
 	for (i = 0; i < ge_nband; i++) {
 		const GE_Band *b = &ge_band[i];
 		const GE_State *s = &b->st;
@@ -1050,14 +1102,12 @@ static void ge_mark_bg(void)
 			continue;
 		ge_dotx = s->dotx;
 		if (s->chr8 && (s->bg9 & 8))
-			ge_tiles(NULL, b, 8, s->bg1top, s->bg1sx, s->bg1sy, s->hadj, NULL, NULL, NULL);
+			ge_tiles(b, 8, 2, s->bg1top, s->bg1sx, s->bg1sy, s->hadj, NULL, NULL);
 		if (s->bg9 & 1)
-			ge_tiles(NULL, b, s->chr8 ? 8 : 16, s->bg0top, s->bg0sx, s->bg0sy,
-				 (s->chr8 || s->mcase) ? s->hadj : 0, NULL, NULL, NULL);
-		for (level = 1; level <= 3; level++)
-			ge_sprites(NULL, b, level);
+			ge_tiles(b, s->chr8 ? 8 : 16, 2, s->bg0top, s->bg0sx, s->bg0sy,
+				 (s->chr8 || s->mcase) ? s->hadj : 0, NULL, NULL);
+		ge_sprites(b, NULL, NULL, 1);
 	}
-	ge_marking = 0;
 	ge_usevalid = 1;
 	GE_Stat[GE_ST_BG_SCAN]++;
 }

@@ -86,3 +86,6 @@ PSP_EBOOT_ICON = psp_logo.png
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
+
+# objects that use psp/gecomp.h: rebuilt when it changes (its GE_ST_* indices must agree)
+x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o psp/gecomp.o: psp/gecomp.h
