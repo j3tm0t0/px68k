@@ -443,11 +443,15 @@ void WinX68k_Exec(void)
 			C68K.ICount = m68000_ICountBk = 0;
 		}
 
-		MFP_Timer(usedclk);
-		RTC_Timer(usedclk);
-		DMA_Exec(0);
-		DMA_Exec(1);
-		DMA_Exec(2);
+		{
+			PROF_BEGIN(slice);
+			MFP_Timer(usedclk);
+			RTC_Timer(usedclk);
+			DMA_Exec(0);
+			DMA_Exec(1);
+			DMA_Exec(2);
+			PROF_END(slice, PROF_SLICE);
+		}
 
 		if ( clk_count>=clk_next ) {
 			//OPM_RomeoOut(Config.BufferSize*5);
@@ -468,6 +472,7 @@ void WinX68k_Exec(void)
 				}
 			}
 
+			PROF_BEGIN(pline);
 			ADPCM_PreUpdate(clk_line);
 			OPM_Timer(clk_line);
 			MIDI_Timer(clk_line);
@@ -486,6 +491,7 @@ void WinX68k_Exec(void)
 				SCC_IntCheck();
 			}
 			DSound_Send0(clk_line);
+			PROF_END(pline, PROF_LINE);
 
 			vline++;
 			clk_next  = (clk_total*(vline+1))/VLINE_TOTAL;
@@ -633,6 +639,25 @@ static void psp_capture(void)
 			sceIoWrite(fd, ScrBufR + y * 256, (TextDotX - 512) * 2);
 	}
 	sceIoClose(fd);
+	/* The state behind it, for checking which rendering is right (tools/capstate.py). */
+	{
+		char path[280];
+		snprintf(path, sizeof(path), "%.*s.state", (int)strlen(psp_cap_path) - 4, psp_cap_path);
+		fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+		if (fd >= 0) {
+			sceIoWrite(fd, TVRAM, 0x80000);
+			sceIoWrite(fd, TextPal, 512);
+			sceIoWrite(fd, GrphPal, 512);
+			sceIoWrite(fd, CRTC_Regs, 0x30);
+			sceIoWrite(fd, BG_Regs, 0x12);
+			sceIoWrite(fd, VCReg0, 2);
+			sceIoWrite(fd, VCReg1, 2);
+			sceIoWrite(fd, VCReg2, 2);
+			sceIoWrite(fd, &TextScrollX, 4);
+			sceIoWrite(fd, &TextScrollY, 4);
+			sceIoClose(fd);
+		}
+	}
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
@@ -723,10 +748,12 @@ static void psp_debug_frame(unsigned us)
 			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
 			/* us per emulated frame */
 			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
-				   "draw %u snd %u lines %u shown %u cpu %d/%d\n", n, total / n,
+				   "draw %u snd %u slice %u line %u lines %u shown %u cpu %d/%d\n", n, total / n,
 				   n * 1000000u / total, n * 10000000u / total % 10,
 				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
 				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
+				   prof_us[PROF_SLICE] / n,
+				   (prof_us[PROF_LINE] > prof_us[PROF_SOUND] ? prof_us[PROF_LINE] - prof_us[PROF_SOUND] : 0) / n,
 				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency(),
 				   scePowerGetBusClockFrequency());
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");

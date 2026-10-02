@@ -21,4 +21,5 @@ until [ -f "$CAP" ] && [ "$(stat -f %z "$CAP")" -gt 0 ]; do
 done
 sleep 1
 cp "$CAP" "$OUT"
+[ ! -f "${CAP%.raw}.state" ] || cp "${CAP%.raw}.state" "${OUT%.raw}.state"
 md5 -q "$OUT"
