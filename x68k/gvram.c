@@ -12,15 +12,622 @@
 #include	"m68000.h"
 #include	"memory.h"
 
-	BYTE	GVRAM[0x80000];
-	WORD	Grp_LineBuf[1024];
-	WORD	Grp_LineBufSP[1024];		// 特殊プライオリティ／半透明用バッファ
-	WORD	Grp_LineBufSP2[1024];		// 半透明ベースプレーン用バッファ（非半透明ビット格納）
+#if defined(__GNUC__)
+#define GRP_ALIGN	__attribute__((__aligned__(4)))
+#else
+#define GRP_ALIGN
+#endif
+
+	BYTE	GVRAM[0x80000] GRP_ALIGN;
+	WORD	Grp_LineBuf[1024] GRP_ALIGN;
+	WORD	Grp_LineBufSP[1024] GRP_ALIGN;		// 特殊プライオリティ／半透明用バッファ
+	WORD	Grp_LineBufSP2[1024] GRP_ALIGN;		// 半透明ベースプレーン用バッファ（非半透明ビット格納）
 
 	WORD	Pal16Adr[256];			// 16bit color パレットアドレス計算用
 
 // xxx: for little endian only
 #define GET_WORD_W8(src) (*(BYTE *)(src) | *((BYTE *)(src) + 1) << 8)
+
+#if !defined(USE_ASM) && !(defined(USE_GAS) && defined(__i386__))
+// -----------------------------------------------------------------------
+//   Portable C line decoders (used by every build without the x86 asm)
+//
+//   These produce exactly the same line buffers as the straightforward
+//   per-pixel loops they replace, including their quirks (where a line
+//   wraps at the 512 dot boundary, which reads go outside the line, ...),
+//   but split each line at its wrap points instead of testing every dot,
+//   read GVRAM with aligned 16-bit loads instead of assembling bytes, and
+//   write two dots at a time where that is possible.
+// -----------------------------------------------------------------------
+#if defined(__GNUC__)
+typedef WORD  __attribute__((__may_alias__)) GWORD;
+typedef DWORD __attribute__((__may_alias__)) GDWORD;
+#define GRP_INLINE	static inline __attribute__((__always_inline__))
+#else
+typedef WORD  GWORD;
+typedef DWORD GDWORD;
+#define GRP_INLINE	static __inline
+#endif
+
+// two dots for one 32-bit store into a WORD line buffer
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define GRP_PAIR(a, b)	(((DWORD)(a) << 16) | (DWORD)(b))
+#else
+#define GRP_PAIR(a, b)	((DWORD)(a) | ((DWORD)(b) << 16))
+#endif
+
+#define GRP_ODD(p)	(((size_t)(p)) & 2)
+
+// GVRAM offset of the first byte of the line shown at VLINE
+GRP_INLINE DWORD Grp_LineOfs(DWORD scry)
+{
+	DWORD y = scry + VLINE;
+	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
+		y += VLINE;
+	return (y & 0x1ff) << 10;
+}
+
+// translucency: mix a dot with the dot under it (Grp_LineBufSP)
+GRP_INLINE DWORD Grp_Blend(DWORD v0, DWORD v)
+{
+	v0 &= Pal_HalfMask;
+	if (v & Ibit)
+		v0 |= Pal_Ix2;
+	v &= Pal_HalfMask;
+	return (v + v0) >> 1;
+}
+
+// ---- 16 colours: one page is the nibble at bit 'sh' of each word ----
+//
+// Two dots are looked up at once in a table indexed by their two nibbles
+// (low dot in bits 0-3, high dot in bits 4-7).  The tables are made from
+// GrphPal[0..15] and remade whenever those change.
+
+typedef struct {
+	DWORD	col;		// both dots, 0 where the nibble is 0
+	DWORD	keep;		// 0xffff where the nibble is 0 (keep what is there)
+} GRP4TR;
+
+static DWORD	Grp4_OpTab[256] GRP_ALIGN;
+static GRP4TR	Grp4_TrTab[256] GRP_ALIGN;
+static WORD	Grp4_PalSnap[16];
+static int	Grp4_TabOk = 0;		// bit0: Grp4_OpTab, bit1: Grp4_TrTab
+
+static void Grp4_MakeTab(int which)
+{
+	DWORD i, lo, hi;
+
+	if (which & 1) {
+		for (i = 0; i < 256; i++)
+			Grp4_OpTab[i] = GRP_PAIR(Grp4_PalSnap[i & 15], Grp4_PalSnap[i >> 4]);
+	}
+	if (which & 2) {
+		for (i = 0; i < 256; i++) {
+			lo = i & 15;
+			hi = i >> 4;
+			Grp4_TrTab[i].col = GRP_PAIR(lo ? Grp4_PalSnap[lo] : 0, hi ? Grp4_PalSnap[hi] : 0);
+			Grp4_TrTab[i].keep = GRP_PAIR(lo ? 0 : 0xffff, hi ? 0 : 0xffff);
+		}
+	}
+	Grp4_TabOk |= which;
+}
+
+// make sure the table 'which' (1: opaque, 2: transparent) is up to date
+GRP_INLINE void Grp4_PalCheck(int which)
+{
+	DWORD i, diff;
+
+#define GRP4_D(i)	((GrphPal[i] ^ Grp4_PalSnap[i]) | (GrphPal[i+1] ^ Grp4_PalSnap[i+1]))
+	diff = GRP4_D(0) | GRP4_D(2) | GRP4_D(4) | GRP4_D(6)
+	     | GRP4_D(8) | GRP4_D(10) | GRP4_D(12) | GRP4_D(14);
+#undef GRP4_D
+	if (diff) {
+		for (i = 0; i < 16; i++)
+			Grp4_PalSnap[i] = GrphPal[i];
+		Grp4_TabOk = 0;
+	}
+	if (!(Grp4_TabOk & which))
+		Grp4_MakeTab(which);
+}
+
+#define GRP4_IDX(a, b, sh)	((((a) >> (sh)) & 15) | ((((b) >> (sh)) & 15) << 4))
+
+GRP_INLINE void Grp4_Opaq(const GWORD *src, WORD *dst, DWORD n, const int sh)
+{
+	const DWORD *tab = Grp4_OpTab;
+
+	if (n == 0)
+		return;
+	if (GRP_ODD(dst)) {
+		*dst++ = GrphPal[(*src++ >> sh) & 15];
+		n--;
+	}
+	for (; n >= 4; n -= 4) {
+		DWORD a = src[0], b = src[1], c = src[2], d = src[3];
+		src += 4;
+		((GDWORD *)dst)[0] = tab[GRP4_IDX(a, b, sh)];
+		((GDWORD *)dst)[1] = tab[GRP4_IDX(c, d, sh)];
+		dst += 4;
+	}
+	for (; n; n--)
+		*dst++ = GrphPal[(*src++ >> sh) & 15];
+}
+
+GRP_INLINE void Grp4_Trans(const GWORD *src, WORD *dst, DWORD n, const int sh)
+{
+	const GRP4TR *tab = Grp4_TrTab;
+	DWORD a;
+
+	if (n == 0)
+		return;
+	if (GRP_ODD(dst)) {
+		a = (*src++ >> sh) & 15;
+		if (a)
+			*dst = GrphPal[a];
+		dst++;
+		n--;
+	}
+	for (; n >= 2; n -= 2) {
+		a = GRP4_IDX(src[0], src[1], sh);
+		src += 2;
+		if (a) {
+			const GRP4TR *t = &tab[a];
+			*(GDWORD *)dst = (*(GDWORD *)dst & t->keep) | t->col;
+		}
+		dst += 2;
+	}
+	if (n) {
+		a = (*src >> sh) & 15;
+		if (a)
+			*dst = GrphPal[a];
+	}
+}
+
+// the second run of a line starts 0x200 words before where the first ended
+#define GRP4_RUNS(func, sh) do {					\
+		func(src, Grp_LineBuf, n1, sh);				\
+		func(src + n1 - 0x200, Grp_LineBuf + n1, n - n1, sh);	\
+	} while (0)
+
+static void Grp_DrawLine4_C(DWORD page, int opaq)
+{
+	DWORD x, n1, n = TextDotX;
+	const GWORD *src;
+
+	page &= 3;
+	x = GrphScrollX[page] & 0x1ff;
+	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]) + x * 2);
+
+	// NB: the first run is one dot short of the end of the line (so the
+	// last dot of the line is read from the line above); kept as it was.
+	n1 = x ^ 0x1ff;
+	if (n1 >= n)
+		n1 = n;
+
+	if (opaq) {
+		Grp4_PalCheck(1);
+		switch (page) {
+		case 0: GRP4_RUNS(Grp4_Opaq, 0); break;
+		case 1: GRP4_RUNS(Grp4_Opaq, 4); break;
+		case 2: GRP4_RUNS(Grp4_Opaq, 8); break;
+		default: GRP4_RUNS(Grp4_Opaq, 12); break;
+		}
+	} else {
+		Grp4_PalCheck(2);
+		switch (page) {
+		case 0: GRP4_RUNS(Grp4_Trans, 0); break;
+		case 1: GRP4_RUNS(Grp4_Trans, 4); break;
+		case 2: GRP4_RUNS(Grp4_Trans, 8); break;
+		default: GRP4_RUNS(Grp4_Trans, 12); break;
+		}
+	}
+}
+
+// 1024 dot mode: the right half of the line is the next nibble
+static void Grp_DrawLine4h_C(void)
+{
+	const GWORD *src;
+	const WORD *pal = GrphPal;
+	WORD *dst = Grp_LineBuf;
+	DWORD x, y, run, n = TextDotX;
+	int bits;
+
+	y = GrphScrollY[0] + VLINE;
+	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
+		y += VLINE;
+	y &= 0x3ff;
+
+	if ((y & 0x200) == 0x000) {
+		y <<= 10;
+		bits = (GrphScrollX[0] & 0x200) ? 4 : 0;
+	} else {
+		y = (y & 0x1ff) << 10;
+		bits = (GrphScrollX[0] & 0x200) ? 12 : 8;
+	}
+
+	x = GrphScrollX[0] & 0x1ff;
+	src = (const GWORD *)(GVRAM + y + x * 2);
+	run = 512 - x;
+
+	while (n) {
+		if (run > n)
+			run = n;
+		n -= run;
+		for (; run; run--)
+			*dst++ = pal[(*src++ >> bits) & 0x0f];
+		src -= 0x200;
+		bits ^= 4;
+		run = 512;
+	}
+}
+
+// ---- base page for translucency / special priority ----
+
+GRP_INLINE void Grp4_SP(const GWORD *src, WORD *sp, WORD *sp2, DWORD n, const int sh)
+{
+	const WORD *pal = GrphPal;
+	DWORD a, b, ca, cb, ma, mb;
+
+	if (n == 0)
+		return;
+	if (GRP_ODD(sp)) {
+		a = (*src++ >> sh) & 15;
+		ca = pal[a & 0x0e];
+		ma = 0 - (a & 1);
+		*sp++ = ca & ma;
+		*sp2++ = ca & ~ma;
+		n--;
+	}
+	for (; n >= 2; n -= 2) {
+		a = (src[0] >> sh) & 15;
+		b = (src[1] >> sh) & 15;
+		src += 2;
+		ca = pal[a & 0x0e];
+		cb = pal[b & 0x0e];
+		ma = 0 - (a & 1);
+		mb = 0 - (b & 1);
+		*(GDWORD *)sp = GRP_PAIR(ca & ma, cb & mb);
+		*(GDWORD *)sp2 = GRP_PAIR(ca & ~ma, cb & ~mb);
+		sp += 2;
+		sp2 += 2;
+	}
+	if (n) {
+		a = (*src >> sh) & 15;
+		ca = pal[a & 0x0e];
+		ma = 0 - (a & 1);
+		*sp = ca & ma;
+		*sp2 = ca & ~ma;
+	}
+}
+
+#define GRP4SP_RUNS(sh) do {							\
+		Grp4_SP(src, Grp_LineBufSP, Grp_LineBufSP2, n1, sh);		\
+		Grp4_SP(src + n1 - 0x200, Grp_LineBufSP + n1,			\
+			Grp_LineBufSP2 + n1, n - n1, sh);			\
+	} while (0)
+
+static void Grp_DrawLine4SP_C(DWORD page, DWORD scrx, DWORD scry)
+{
+	DWORD x, n1, n = TextDotX;
+	const GWORD *src;
+
+	x = scrx & 0x1ff;
+	src = (const GWORD *)(GVRAM + Grp_LineOfs(scry) + x * 2);
+	n1 = 512 - x;
+	if (n1 >= n)
+		n1 = n;
+
+	switch (page & 3) {
+	case 0: GRP4SP_RUNS(0); break;
+	case 1: GRP4SP_RUNS(4); break;
+	case 2: GRP4SP_RUNS(8); break;
+	default: GRP4SP_RUNS(12); break;
+	}
+}
+
+static void Grp_DrawLine4hSP_C(void)
+{
+	const GWORD *src;
+	const WORD *pal = GrphPal;
+	DWORD x, y, i, n1, n = TextDotX;
+	DWORD v, c, m;
+	int bits;
+
+	y = GrphScrollY[0] + VLINE;
+	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
+		y += VLINE;
+	y &= 0x3ff;
+
+	if ((y & 0x200) == 0x000) {
+		y <<= 10;
+		bits = (GrphScrollX[0] & 0x200) ? 4 : 0;
+	} else {
+		y = (y & 0x1ff) << 10;
+		bits = (GrphScrollX[0] & 0x200) ? 12 : 8;
+	}
+
+	x = GrphScrollX[0] & 0x1ff;
+	src = (const GWORD *)(GVRAM + y + x * 2);
+	n1 = 512 - x;
+	if (n1 >= n)
+		n1 = n;
+
+	// NB: after the first run the source goes back 0x400 words (two
+	// lines), as it always did.
+	for (i = 0; i < n1; i++) {
+		v = *src++ >> bits;
+		c = pal[v & 0x0e];
+		m = 0 - (v & 1);
+		Grp_LineBufSP[i] = c & m;
+		Grp_LineBufSP2[i] = c & ~m;
+	}
+	src -= 0x400;
+	for (; i < n; i++) {
+		v = *src++ >> bits;
+		c = pal[v & 0x0e];
+		m = 0 - (v & 1);
+		Grp_LineBufSP[i] = c & m;
+		Grp_LineBufSP2[i] = c & ~m;
+	}
+}
+
+// ---- translucent page (16 colours) ----
+
+GRP_INLINE void Grp4_TR(const GWORD *src, DWORD i, DWORD end, const int sh, int opaq, int odd)
+{
+	const WORD *pal = GrphPal;
+	DWORD v, v0, c;
+
+	if (opaq) {
+		for (; i < end; i++) {
+			v = (*src++ >> sh) & 15;
+			v0 = Grp_LineBufSP[i];
+			c = pal[v];
+			if (v0 != 0)
+				c = (v != 0 && c != 0) ? Grp_Blend(v0, c) : 0;
+			Grp_LineBuf[i] = (WORD)c;
+		}
+	} else {
+		for (; i < end; i++) {
+			v = (*src++ >> sh) & 15;
+			v0 = Grp_LineBufSP[i];
+			if (v0 == 0) {
+				if (v != 0)
+					Grp_LineBuf[i] = pal[v];
+			} else if (v == 0) {
+				Grp_LineBuf[i] = 0;
+			} else {
+				c = pal[v];
+				if (c != 0) {
+					c = Grp_Blend(v0, c);
+					// NB: odd pages look the mixed colour up in
+					// the palette again, as they always did
+					Grp_LineBuf[i] = odd ? GrphPal[c] : (WORD)c;
+				}
+			}
+		}
+	}
+}
+
+static void Grp_DrawLine4TR_C(DWORD page, int opaq)
+{
+	const GWORD *line;
+	DWORD x, i, end, n = TextDotX;
+
+	page &= 3;
+	line = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]));
+	x = GrphScrollX[page] & 0x1ff;
+
+	for (i = 0; i < n; i = end, x = 0) {
+		end = i + (512 - x);
+		if (end > n)
+			end = n;
+		switch (page) {
+		case 0: Grp4_TR(line + x, i, end, 0, opaq, 0); break;
+		case 1: Grp4_TR(line + x, i, end, 4, opaq, 1); break;
+		case 2: Grp4_TR(line + x, i, end, 8, opaq, 0); break;
+		default: Grp4_TR(line + x, i, end, 12, opaq, 1); break;
+		}
+	}
+}
+
+// ---- 256 colours: low nibble from one plane, high nibble from another ----
+//
+// 'a' wraps back once, after 512-x dots; 'b' wraps at every line end.
+
+GRP_INLINE void Grp8_Run(const BYTE *a, const BYTE *b, WORD *dst, DWORD n, int opaq)
+{
+	const WORD *pal = GrphPal;
+	DWORD v;
+
+	if (opaq) {
+		for (; n; n--, a += 2, b += 2)
+			*dst++ = pal[(*b & 0xf0) | (*a & 0x0f)];
+	} else {
+		for (; n; n--, a += 2, b += 2, dst++) {
+			v = (*b & 0xf0) | (*a & 0x0f);
+			if (v != 0)
+				*dst = pal[v];
+		}
+	}
+}
+
+static void Grp_DrawLine8_C(int page, int opaq)
+{
+	const BYTE *a, *b;
+	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
+
+	page &= 1;
+	x = GrphScrollX[page * 2] & 0x1ff;
+	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
+	a = GVRAM + Grp_LineOfs(GrphScrollY[page * 2]) + page + x * 2;
+	b = GVRAM + Grp_LineOfs(GrphScrollY[page * 2 + 1]) + page + x0 * 2;
+
+	awrap = 512 - x;
+	bwrap = 512 - x0;
+	for (i = 0; i < n; i = end) {
+		if (i == awrap)
+			a -= 0x400;
+		if (i == bwrap) {
+			b -= 0x400;
+			bwrap += 512;
+		}
+		end = n;
+		if (awrap > i && awrap < end)
+			end = awrap;
+		if (bwrap < end)
+			end = bwrap;
+		Grp8_Run(a, b, Grp_LineBuf + i, end - i, opaq);
+		a += (end - i) * 2;
+		b += (end - i) * 2;
+	}
+}
+
+GRP_INLINE void Grp8_SPRun(const BYTE *a, const BYTE *b, DWORD i, DWORD end)
+{
+	const WORD *pal = GrphPal;
+	DWORD v, c;
+
+	for (; i < end; i++, a += 2, b += 2) {
+		v = (*a & 0x0f) | (*b & 0xf0);
+		c = v & 0xfe;
+		if (v & 1) {
+			if (c != 0)
+				c = pal[c] | Ibit;
+			Grp_LineBufSP[i] = c;
+			Grp_LineBufSP2[i] = 0;
+		} else {
+			if (c != 0)
+				c = pal[c];
+			Grp_LineBufSP[i] = 0;
+			Grp_LineBufSP2[i] = c;
+		}
+	}
+}
+
+static void Grp_DrawLine8SP_C(int page)
+{
+	const BYTE *a, *b;
+	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
+
+	page &= 1;
+	x = GrphScrollX[page * 2] & 0x1ff;
+	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
+	a = GVRAM + Grp_LineOfs(GrphScrollY[page * 2]) + page + x * 2;
+	b = GVRAM + Grp_LineOfs(GrphScrollY[page * 2 + 1]) + page + x0 * 2;
+
+	awrap = 512 - x;
+	bwrap = 512 - x0;
+	for (i = 0; i < n; i = end) {
+		if (i == awrap)
+			a -= 0x400;
+		if (i == bwrap) {
+			b -= 0x400;
+			bwrap += 512;
+		}
+		end = n;
+		if (awrap > i && awrap < end)
+			end = awrap;
+		if (bwrap < end)
+			end = bwrap;
+		Grp8_SPRun(a, b, i, end);
+		a += (end - i) * 2;
+		b += (end - i) * 2;
+	}
+}
+
+static void Grp_DrawLine8TR_C(int page, int opaq)
+{
+	const WORD *pal = GrphPal;
+	const BYTE *line, *src;
+	DWORD x, i, end, v, v0, c, n = TextDotX;
+
+	if (!opaq)
+		return;
+
+	page &= 1;
+	line = GVRAM + Grp_LineOfs(GrphScrollY[page * 2]) + page;
+	x = GrphScrollX[page * 2] & 0x1ff;
+
+	for (i = 0; i < n; x = 0) {
+		end = i + (512 - x);
+		if (end > n)
+			end = n;
+		for (src = line + x * 2; i < end; i++, src += 2) {
+			v = *src;
+			v0 = Grp_LineBufSP[i];
+			c = pal[v];
+			if (v0 != 0)
+				c = (v != 0 && c != 0) ? Grp_Blend(v0, c) : 0;
+			Grp_LineBuf[i] = (WORD)c;
+		}
+	}
+}
+
+// ---- 65536 colours ----
+
+GRP_INLINE DWORD Grp16_Col(DWORD v)
+{
+	if (v != 0) {
+		v = Pal_Regs[Pal16Adr[v & 0xff]]
+		  | (Pal_Regs[Pal16Adr[v >> 8] + 2] << 8);
+		v = Pal16[v];
+	}
+	return v;
+}
+
+static void Grp_DrawLine16_C(void)
+{
+	const GWORD *src;
+	WORD *dst = Grp_LineBuf;
+	DWORD x, n1, n = TextDotX;
+
+	x = GrphScrollX[0] & 0x1ff;
+	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
+	n1 = 512 - x;
+	if (n1 >= n)
+		n1 = n;
+	n -= n1;
+
+	for (; n1; n1--)
+		*dst++ = Grp16_Col(*src++);
+	src -= 0x200;
+	for (; n; n--)
+		*dst++ = Grp16_Col(*src++);
+}
+
+GRP_INLINE void Grp16_SP(DWORD w, DWORD i)
+{
+	DWORD lo = w & 0xff, hi = w >> 8, c;
+
+	c = Pal16[((Pal_Regs[hi * 2] << 8) | Pal_Regs[lo * 2 + 1]) & 0xfffe];
+	if (lo & 1) {
+		Grp_LineBufSP[i] = c;
+		Grp_LineBufSP2[i] = 0;
+	} else {
+		Grp_LineBufSP[i] = 0;
+		Grp_LineBufSP2[i] = c;
+	}
+}
+
+static void Grp_DrawLine16SP_C(void)
+{
+	const GWORD *src;
+	DWORD x, i, n1, n = TextDotX;
+
+	x = GrphScrollX[0] & 0x1ff;
+	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
+	n1 = 512 - x;
+	if (n1 >= n)
+		n1 = n;
+
+	for (i = 0; i < n1; i++)
+		Grp16_SP(*src++, i);
+	src -= 0x200;
+	for (; i < n; i++)
+		Grp16_SP(*src++, i);
+}
+#endif /* !USE_ASM && !(USE_GAS && __i386__) */
 
 
 // -----------------------------------------------------------------------
@@ -445,52 +1052,7 @@ LABEL void Grp_DrawLine16(void)
 	  "m" (GrphScrollX[0]), "m" (TextDotX), "g" (Grp_LineBuf)
 	: "ax", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	WORD *srcp, *destp;
-	DWORD x, y;
-	DWORD i;
-	WORD v, v0;
-
-	y = GrphScrollY[0] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y = (y & 0x1ff) << 10;
-
-	x = GrphScrollX[0] & 0x1ff;
-	srcp = (WORD *)(GVRAM + y + x * 2);
-	destp = (WORD *)Grp_LineBuf;
-
-	x = (x ^ 0x1ff) + 1;
-
-	v = v0 = 0;
-	i = 0;
-	if (x < TextDotX) {
-		for (; i < x; ++i) {
-			v = *srcp++;
-			if (v != 0) {
-				v0 = (v >> 8) & 0xff;
-				v &= 0x00ff;
-
-				v = Pal_Regs[Pal16Adr[v]];
-				v |= Pal_Regs[Pal16Adr[v0] + 2] << 8;
-				v = Pal16[v];
-			}
-			*destp++ = v;
-		}
-		srcp -= 0x200;
-	}
-
-	for (; i < TextDotX; ++i) {
-		v = *srcp++;
-		if (v != 0) {
-			v0 = (v >> 8) & 0xff;
-			v &= 0x00ff;
-
-			v = Pal_Regs[Pal16Adr[v]];
-			v |= Pal_Regs[Pal16Adr[v0] + 2] << 8;
-			v = Pal16[v];
-		}
-		*destp++ = v;
-	}
+	Grp_DrawLine16_C();
 #endif /* USE_ASM */
 }
 
@@ -788,91 +1350,7 @@ LABEL void FASTCALL Grp_DrawLine8(int page, int opaq)
 	  "m" (TextDotX), "g" (Grp_LineBuf)
 	: "ax", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	WORD *srcp, *destp;
-	DWORD x, x0;
-	DWORD y, y0;
-	DWORD off;
-	DWORD i;
-	WORD v;
-
-	page &= 1;
-
-	y = GrphScrollY[page * 2] + VLINE;
-	y0 = GrphScrollY[page * 2 + 1] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c) {
-		y += VLINE;
-		y0 += VLINE;
-	}
-	y = ((y & 0x1ff) << 10) + page;
-	y0 = ((y0 & 0x1ff) << 10) + page;
-
-	x = GrphScrollX[page * 2] & 0x1ff;
-	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
-
-	off = y0 + x0 * 2;
-	srcp = (WORD *)(GVRAM + y + x * 2);
-	destp = (WORD *)Grp_LineBuf;
-
-	x = (x ^ 0x1ff) + 1;
-
-	v = 0;
-	i = 0;
-
-	if (opaq) {
-		if (x < TextDotX) {
-			for (; i < x; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v = GrphPal[(GVRAM[off] & 0xf0) | (v & 0x0f)];
-				*destp++ = v;
-
-				off += 2;
-				if ((off & 0x3fe) == 0x000)
-					off -= 0x400;
-			}
-			srcp -= 0x200;
-		}
-
-		for (; i < TextDotX; ++i) {
-			v = GET_WORD_W8(srcp);
-			srcp++;
-			v = GrphPal[(GVRAM[off] & 0xf0) | (v & 0x0f)];
-			*destp++ = v;
-
-			off += 2;
-			if ((off & 0x3fe) == 0x000)
-				off -= 0x400;
-		}
-	} else {
-		if (x < TextDotX) {
-			for (; i < x; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v = (GVRAM[off] & 0xf0) | (v & 0x0f);
-				if (v != 0x00)
-					*destp = GrphPal[v];
-				destp++;
-
-				off += 2;
-				if ((off & 0x3fe) == 0x000)
-					off -= 0x400;
-			}
-			srcp -= 0x200;
-		}
-
-		for (; i < TextDotX; ++i) {
-			v = GET_WORD_W8(srcp);
-			srcp++;
-			v = (GVRAM[off] & 0xf0) | (v & 0x0f);
-			if (v != 0x00)
-				*destp = GrphPal[v];
-			destp++;
-
-			off += 2;
-			if ((off & 0x3fe) == 0x000)
-				off -= 0x400;
-		}
-	}
+	Grp_DrawLine8_C(page, opaq);
 #endif /* USE_ASM */
 }
 
@@ -1186,107 +1664,7 @@ LABEL void FASTCALL Grp_DrawLine4(DWORD page, int opaq)
 	  "m" (TextDotX), "g" (Grp_LineBuf)
 	: "ax", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	WORD *srcp, *destp;	// XXX: ALIGN
-	DWORD x, y;
-	DWORD off;
-	DWORD i;
-	WORD v;
-
-	page &= 3;
-
-	y = GrphScrollY[page] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y = (y & 0x1ff) << 10;
-
-	x = GrphScrollX[page] & 0x1ff;
-	off = y + x * 2;
-
-	x ^= 0x1ff;
-
-	srcp = (WORD *)(GVRAM + off + (page >> 1));
-	destp = (WORD *)Grp_LineBuf;
-
-	v = 0;
-	i = 0;
-
-	if (page & 1) {
-		if (opaq) {
-			if (x < TextDotX) {
-				for (; i < x; ++i) {
-					v = GET_WORD_W8(srcp);
-					srcp++;
-					v = GrphPal[(v >> 4) & 0xf];
-					*destp++ = v;
-				}
-				srcp -= 0x200;
-			}
-			for (; i < TextDotX; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v = GrphPal[(v >> 4) & 0xf];
-				*destp++ = v;
-			}
-		} else {
-			if (x < TextDotX) {
-				for (; i < x; ++i) {
-					v = GET_WORD_W8(srcp);
-					srcp++;
-					v = (v >> 4) & 0x0f;
-					if (v != 0x00)
-						*destp = GrphPal[v];
-					destp++;
-				}
-				srcp -= 0x200;
-			}
-			for (; i < TextDotX; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v = (v >> 4) & 0x0f;
-				if (v != 0x00)
-					*destp = GrphPal[v];
-				destp++;
-			}
-		}
-	} else {
-		if (opaq) {
-			if (x < TextDotX) {
-				for (; i < x; ++i) {
-					v = GET_WORD_W8(srcp);
-					srcp++;
-					v = GrphPal[v & 0x0f];
-					*destp++ = v;
-				}
-				srcp -= 0x200;
-			}
-			for (; i < TextDotX; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v = GrphPal[v & 0x0f];
-				*destp++ = v;
-			}
-		} else {
-			if (x < TextDotX) {
-				for (; i < x; ++i) {
-					v = GET_WORD_W8(srcp);
-					srcp++;
-					v &= 0x0f;
-					if (v != 0x00)
-						*destp = GrphPal[v];
-					destp++;
-				}
-				srcp -= 0x200;
-			}
-			for (; i < TextDotX; ++i) {
-				v = GET_WORD_W8(srcp);
-				srcp++;
-				v &= 0x0f;
-				if (v != 0x00)
-					*destp = GrphPal[v];
-				destp++;
-			}
-		}
-	}
+	Grp_DrawLine4_C(page, opaq);
 #endif /* USE_ASM */
 }
 
@@ -1426,41 +1804,7 @@ void FASTCALL Grp_DrawLine4h(void)
 	  "m" (GrphScrollX[0]), "m" (TextDotX)
 	: "ax", "bx", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	WORD *srcp, *destp;
-	DWORD x, y;
-	DWORD i;
-	WORD v;
-	int bits;
-
-	y = GrphScrollY[0] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y &= 0x3ff;
-
-	if ((y & 0x200) == 0x000) {
-		y <<= 10;
-		bits = (GrphScrollX[0] & 0x200) ? 4 : 0;
-	} else {
-		y = (y & 0x1ff) << 10;
-		bits = (GrphScrollX[0] & 0x200) ? 12 : 8;
-	}
-
-	x = GrphScrollX[0] & 0x1ff;
-	srcp = (WORD *)(GVRAM + y + x * 2);
-	destp = (WORD *)Grp_LineBuf;
-
-	x = ((x & 0x1ff) ^ 0x1ff) + 1;
-
-	for (i = 0; i < TextDotX; ++i) {
-		v = *srcp++;
-		*destp++ = GrphPal[(v >> bits) & 0x0f];
-
-		if (--x == 0) {
-			srcp -= 0x200;
-			bits ^= 4;
-			x = 512;
-		}
-	}
+	Grp_DrawLine4h_C();
 #endif /* !USE_ASM */
 }
 
@@ -1579,34 +1923,7 @@ void FASTCALL Grp_DrawLine16SP(void)
 	  "m" (GrphScrollX[0]), "m" (TextDotX)
 	: "ax", "bx", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	DWORD x, y;
-	DWORD off;
-	DWORD i;
-	WORD v;
-
-	y = GrphScrollY[0] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y = (y & 0x1ff) << 10;
-
-	x = GrphScrollX[0] & 0x1ff;
-	off = y + x * 2;
-	x = (x ^ 0x1ff) + 1;
-
-	for (i = 0; i < TextDotX; ++i) {
-		v = (Pal_Regs[GVRAM[off+1]*2] << 8) | Pal_Regs[GVRAM[off]*2+1];
-		if ((GVRAM[off] & 1) == 0) {
-			Grp_LineBufSP[i] = 0;
-			Grp_LineBufSP2[i] = Pal16[v & 0xfffe];
-		} else {
-			Grp_LineBufSP[i] = Pal16[v & 0xfffe];
-			Grp_LineBufSP2[i] = 0;
-		}
-
-		off += 2;
-		if (--x == 0)
-			off -= 0x400;
-	}
+	Grp_DrawLine16SP_C();
 #endif /* USE_ASM */
 }
 
@@ -1773,54 +2090,7 @@ pop	edi
 	  "m" (Ibit)
 	: "ax", "bx", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	DWORD x, x0;
-	DWORD y, y0;
-	DWORD off, off0;
-	DWORD i;
-	WORD v;
-
-	page &= 1;
-
-	y = GrphScrollY[page * 2] + VLINE;
-	y0 = GrphScrollY[page * 2 + 1] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c) {
-		y += VLINE;
-		y0 += VLINE;
-	}
-	y = (y & 0x1ff) << 10;
-	y0 = (y0 & 0x1ff) << 10;
-
-	x = GrphScrollX[page * 2] & 0x1ff;
-	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
-
-	off = y + x * 2 + page;
-	off0 = y0 + x0 * 2 + page;
-
-	x = (x ^ 0x1ff) + 1;
-
-	for (i = 0; i < TextDotX; ++i) {
-		v = (GVRAM[off] & 0x0f) | (GVRAM[off0] & 0xf0);
-		if ((v & 1) == 0) {
-			v &= 0xfe;
-			if (v != 0x00)
-				v = GrphPal[v];
-			Grp_LineBufSP[i] = 0;
-			Grp_LineBufSP2[i] = v;
-		} else {
-			v &= 0xfe;
-			if (v != 0x00)
-				v = GrphPal[v] | Ibit;
-			Grp_LineBufSP[i] = v;
-			Grp_LineBufSP2[i] = 0;
-		}
-
-		off += 2;
-		off0 += 2;
-		if ((off0 & 0x3fe) == 0)
-			off0 -= 0x400;
-		if (--x == 0)
-			off -= 0x400;
-	}
+	Grp_DrawLine8SP_C(page);
 #endif /* USE_ASM */
 }
 
@@ -2169,70 +2439,7 @@ void FASTCALL Grp_DrawLine4SP(DWORD page/*, int opaq*/)
 		: "ax", "bx", "cx", "dx");
 	}
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-{
-	DWORD x, y;
-	DWORD off;
-	DWORD i;
-	WORD v;
-
-	if (page & 1) {
-		y = scry + VLINE;
-		if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-			y += VLINE;
-		y = (y & 0x1ff) << 10;
-
-		x = scrx & 0x1ff;
-		off = y + x * 2;
-		if (page & 2)
-			off++;
-		x = (x ^ 0x1ff) + 1;
-
-		for (i = 0; i < TextDotX; ++i) {
-			v = GVRAM[off] >> 4;
-			if ((v & 1) == 0) {
-				v &= 0x0e;
-				Grp_LineBufSP[i] = 0;
-				Grp_LineBufSP2[i] = GrphPal[v];
-			} else {
-				v &= 0x0e;
-				Grp_LineBufSP[i] = GrphPal[v];
-				Grp_LineBufSP2[i] = 0;
-			}
-
-			off += 2;
-			if (--x == 0)
-				off -= 0x400;
-		}
-	} else {
-		y = scry + VLINE;
-		if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-			y += VLINE;
-		y = (y & 0x1ff) << 10;
-
-		x = scrx & 0x1ff;
-		off = y + x * 2;
-		if (page & 2)
-			off++;
-		x = (x ^ 0x1ff) + 1;
-
-		for (i = 0; i < TextDotX; ++i) {
-			v = GVRAM[off];
-			if ((v & 1) == 0) {
-				v &= 0x0e;
-				Grp_LineBufSP[i] = 0;
-				Grp_LineBufSP2[i] = GrphPal[v];
-			} else {
-				v &= 0x0e;
-				Grp_LineBufSP[i] = GrphPal[v];
-				Grp_LineBufSP2[i] = 0;
-			}
-
-			off += 2;
-			if (--x == 0)
-				off -= 0x400;
-		}
-	}
-}
+	Grp_DrawLine4SP_C(page, scrx, scry);
 #endif /* USE_ASM */
 }
 
@@ -2387,42 +2594,7 @@ void FASTCALL Grp_DrawLine4hSP(void)
 	  "m" (GrphScrollX[0]), "m" (TextDotX)
 	: "ax", "bx", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	WORD *srcp;
-	DWORD x, y;
-	DWORD i;
-	int bits;
-	WORD v;
-
-	y = GrphScrollY[0] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y &= 0x3ff;
-
-	if ((y & 0x200) == 0x000) {
-		y <<= 10;
-		bits = (GrphScrollX[0] & 0x200) ? 4 : 0;
-	} else {
-		y = (y & 0x1ff) << 10;
-		bits = (GrphScrollX[0] & 0x200) ? 12 : 8;
-	}
-
-	x = GrphScrollX[0] & 0x1ff;
-	srcp = (WORD *)(GVRAM + y + x * 2);
-	x = ((x & 0x1ff) ^ 0x1ff) + 1;
-
-	for (i = 0; i < TextDotX; ++i) {
-		v = *srcp++ >> bits;
-		if ((v & 1) == 0) {
-			Grp_LineBufSP[i] = 0;
-			Grp_LineBufSP2[i] = GrphPal[v & 0x0e];
-		} else {
-			Grp_LineBufSP[i] = GrphPal[v & 0x0e];
-			Grp_LineBufSP2[i] = 0;
-		}
-
-		if (--x == 0)
-			srcp -= 0x400;
-	}
+	Grp_DrawLine4hSP_C();
 #endif /* USE_ASM */
 }
 
@@ -2556,40 +2728,7 @@ Grp_DrawLine8TR(int page, int opaq)
 	  "m" (TextDotX), "m" (Pal_HalfMask), "m" (Ibit), "m" (Pal_Ix2)
 	: "ax", "bx", "cx", "dx", "si", "di");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	if (opaq) {
-		DWORD x, y;
-		DWORD v, v0;
-		DWORD i;
-
-		page &= 1;
-
-		y = GrphScrollY[page * 2] + VLINE;
-		if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-			y += VLINE;
-		y = ((y & 0x1ff) << 10) + page;
-		x = GrphScrollX[page * 2] & 0x1ff;
-
-		for (i = 0; i < TextDotX; ++i, x = (x + 1) & 0x1ff) {
-			v0 = Grp_LineBufSP[i];
-			v = GVRAM[y + x * 2];
-
-			if (v0 != 0) {
-				if (v != 0) {
-					v = GrphPal[v];
-					if (v != 0) {
-						v0 &= Pal_HalfMask;
-						if (v & Ibit)
-							v0 |= Pal_Ix2;
-						v &= Pal_HalfMask;
-						v += v0;
-						v >>= 1;
-					}
-				}
-			} else
-				v = GrphPal[v];
-			Grp_LineBuf[i] = (WORD)v;
-		}
-	}
+	Grp_DrawLine8TR_C(page, opaq);
 #endif /* USE_ASM */
 }
 
@@ -2952,118 +3091,7 @@ Grp_DrawLine4TR(DWORD page, int opaq)
 	  "m" (TextDotX), "m" (Pal_HalfMask), "m" (Ibit), "m" (Pal_Ix2)
 	: "ax", "bx", "cx", "dx");
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-	DWORD x, y;
-	DWORD v, v0;
-	DWORD i;
-
-	page &= 3;
-
-	y = GrphScrollY[page] + VLINE;
-	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
-		y += VLINE;
-	y = (y & 0x1ff) << 10;
-	x = GrphScrollX[page] & 0x1ff;
-
-	if (page & 1) {
-		page >>= 1;
-		y += page;
-
-		if (opaq) {
-			for (i = 0; i < TextDotX; ++i, x = (x + 1) & 0x1ff) {
-				v0 = Grp_LineBufSP[i];
-				v = GVRAM[y + x * 2] >> 4;
-
-				if (v0 != 0) {
-					if (v != 0) {
-						v = GrphPal[v];
-						if (v != 0) {
-							v0 &= Pal_HalfMask;
-							if (v & Ibit)
-								v0 |= Pal_Ix2;
-							v &= Pal_HalfMask;
-							v += v0;
-							v >>= 1;
-						}
-					}
-				} else
-					v = GrphPal[v];
-				Grp_LineBuf[i] = (WORD)v;
-			}
-		} else {
-			for (i = 0; i < TextDotX; ++i, x = (x + 1) & 0x1ff) {
-				v0 = Grp_LineBufSP[i];
-
-				if (v0 == 0) {
-					v = GVRAM[y + x * 2] >> 4;
-					if (v != 0)
-						Grp_LineBuf[i] = GrphPal[v];
-				} else {
-					v = GVRAM[y + x * 2] >> 4;
-					if (v != 0) {
-						v = GrphPal[v];
-						if (v != 0) {
-							v0 &= Pal_HalfMask;
-							if (v & Ibit)
-								v0 |= Pal_Ix2;
-							v &= Pal_HalfMask;
-							v += v0;
-							v = GrphPal[v >> 1];
-							Grp_LineBuf[i]=(WORD)v;
-						}
-					} else
-						Grp_LineBuf[i] = (WORD)v;
-				}
-			}
-		}
-	} else {
-		page >>= 1;
-		y += page;
-
-		if (opaq) {
-			for (i = 0; i < TextDotX; ++i, x = (x + 1) & 0x1ff) {
-				v = GVRAM[y + x * 2] & 0x0f;
-				v0 = Grp_LineBufSP[i];
-
-				if (v0 != 0) {
-					if (v != 0) {
-						v = GrphPal[v];
-						if (v != 0) {
-							v0 &= Pal_HalfMask;
-							if (v & Ibit)
-								v0 |= Pal_Ix2;
-							v &= Pal_HalfMask;
-							v += v0;
-							v >>= 1;
-						}
-					}
-				} else
-					v = GrphPal[v];
-				Grp_LineBuf[i] = (WORD)v;
-			}
-		} else {
-			for (i = 0; i < TextDotX; ++i, x = (x + 1) & 0x1ff) {
-				v = GVRAM[y + x * 2] & 0x0f;
-				v0 = Grp_LineBufSP[i];
-
-				if (v0 != 0) {
-					if (v != 0) {
-						v = GrphPal[v];
-						if (v != 0) {
-							v0 &= Pal_HalfMask;
-							if (v & Ibit)
-								v0 |= Pal_Ix2;
-							v &= Pal_HalfMask;
-							v += v0;
-							v >>= 1;
-							Grp_LineBuf[i]=(WORD)v;
-						}
-					} else
-						Grp_LineBuf[i] = (WORD)v;
-				} else if (v != 0)
-					Grp_LineBuf[i] = GrphPal[v];
-			}
-		}
-	}
+	Grp_DrawLine4TR_C(page, opaq);
 #endif /* USE_ASM */
 }
 
