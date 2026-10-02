@@ -282,6 +282,81 @@ struct Vertexes *vtxr = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struc
 struct Vertexes *vtxm = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 2);
 struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 3);
 
+#ifdef PSP
+/*
+ * Frame rate overlay ("Show FPS" in the menu): "FPS <emulated>/<shown>",
+ * counted in x11/winx68k.cpp, drawn 2x from a tiny 3x5 font texture.
+ */
+int WinDraw_FpsEmu10 = -1;	/* emulated frames per second x10; -1: not measured yet */
+int WinDraw_FpsShown;		/* frames presented per second */
+
+#define FPS_TEX_W 64
+#define FPS_TEX_H 8
+static unsigned short __attribute__((aligned(16))) fps_tex[FPS_TEX_W * FPS_TEX_H];
+static char fps_text[16];
+
+static const unsigned char *fps_glyph(char c)
+{
+	static const unsigned char digits[10][5] = {
+		{7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
+		{7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
+	};
+	static const unsigned char dot[5] = {0,0,0,0,2}, slash[5] = {1,1,2,4,4};
+	static const unsigned char F[5] = {7,4,6,4,4}, P[5] = {7,5,7,4,4}, S[5] = {7,4,7,1,7};
+	static const unsigned char blank[5] = {0,0,0,0,0};
+
+	if (c >= '0' && c <= '9')
+		return digits[c - '0'];
+	switch (c) {
+	case '.': return dot;
+	case '/': return slash;
+	case 'F': return F;
+	case 'P': return P;
+	case 'S': return S;
+	default: return blank;
+	}
+}
+
+static void fps_overlay(void)
+{
+	char text[16];
+	struct Vertexes *v;
+	int i, x, y;
+
+	if (WinDraw_FpsEmu10 < 0)
+		return;
+	snprintf(text, sizeof(text), "FPS %d.%d/%d", WinDraw_FpsEmu10 / 10, WinDraw_FpsEmu10 % 10,
+		 WinDraw_FpsShown);
+	if (strcmp(text, fps_text)) {
+		strcpy(fps_text, text);
+		for (i = 0; i < FPS_TEX_W * FPS_TEX_H; i++)
+			fps_tex[i] = 0;
+		for (i = 0; text[i] && (i + 1) * 4 <= FPS_TEX_W; i++) {
+			const unsigned char *g = fps_glyph(text[i]);
+			for (y = 0; y < 5; y++)
+				for (x = 0; x < 3; x++)
+					if (g[y] & (4 >> x))
+						fps_tex[(y + 1) * FPS_TEX_W + i * 4 + x + 1] = 0xffff;
+		}
+		sceKernelDcacheWritebackRange(fps_tex, sizeof(fps_tex));
+	}
+	v = (struct Vertexes *)sceGuGetMemory(sizeof(struct Vertexes));
+	memset(v, 0, sizeof(*v));
+	v->u2 = FPS_TEX_W;
+	v->v2 = FPS_TEX_H;
+	v->x = 2;
+	v->y = 2;
+	v->x2 = 2 + FPS_TEX_W * 2;
+	v->y2 = 2 + FPS_TEX_H * 2;
+	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+	sceGuTexImage(0, FPS_TEX_W, FPS_TEX_H, FPS_TEX_W, fps_tex);
+	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
+	sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+	sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, v);
+}
+#endif
+
+
 #define PSP_BUF_WIDTH (512)
 #define PSP_SCR_WIDTH (480)
 #define PSP_SCR_HEIGHT (272)
@@ -829,6 +904,9 @@ WinDraw_Draw(void)
 
 		sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, vtxk);
 	}
+
+	if (Config.ShowFPS)
+		fps_overlay();
 
 	sceGuFinish();
 	if (GE_TimeSync) {	/* "ge time": how long the GE takes for the frame */

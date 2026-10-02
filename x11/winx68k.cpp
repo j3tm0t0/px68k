@@ -933,6 +933,26 @@ static void psp_debug_poll(void)
 	}
 }
 
+/* For the "Show FPS" overlay (x11/windraw.c). */
+extern "C" int WinDraw_FpsEmu10, WinDraw_FpsShown;
+static void psp_count_fps(void)
+{
+	static unsigned start, emu, shown;
+	unsigned now = timeGetTime();
+
+	emu++;
+	if (!DispFrame)
+		shown++;
+	if (!start)
+		start = now;
+	if (now - start >= 1000) {
+		WinDraw_FpsEmu10 = emu * 10000 / (now - start);
+		WinDraw_FpsShown = shown * 1000 / (now - start);
+		start = now;
+		emu = shown = 0;
+	}
+}
+
 PSP_HEAP_SIZE_KB(-1024);
 
 extern "C" int
@@ -1173,6 +1193,7 @@ int main(int argc, char *argv[])
 			unsigned t0 = sceKernelGetSystemTimeLow();
 			WinX68k_Exec();
 			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
+			psp_count_fps();
 #else
 			WinX68k_Exec();
 #endif
