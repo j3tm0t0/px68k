@@ -12,7 +12,11 @@
                                       px68k runs from, or "ms0:/...")
   psp-debug.py push [EBOOT.PBP]       replace the running EBOOT (default ./EBOOT.PBP),
                                       restart it and follow the log
+  psp-debug.py pause | resume         stop / restart the emulation
   psp-debug.py back                   return to pspbrew.dev (ends `psp.py run`)
+  psp-debug.py bench [skip...]        with the profiler on, run "bench" at each
+                                      frame skip (default 5 2 1; BENCH_SEC each,
+                                      default 6) and print the averages
 
 The key is PSP_DEBUG_KEY_FILE (default: ../pspbrew/tools/.debug.key, the key
 pspbrew.dev uses); px68k must have the same key as debug.key next to its
@@ -152,16 +156,8 @@ def main():
     elif cmd == "push":
         data = open(args[0] if args else "EBOOT.PBP", "rb").read()
         s = connect()
-        # pspbrew.dev answers a different port, but make sure it is px68k anyway.
-        s.settimeout(1)
-        seen, deadline = b"", time.time() + 3
-        while b"PX68K" not in seen and time.time() < deadline:
-            try:
-                seen += s.recv(4096)
-            except socket.timeout:
-                pass
-        if b"PX68K" not in seen:
-            sys.exit(f"push: the app on {HOST}:{PORT} is not px68k")
+        drain(s)
+        # Only px68k serves this port (pspbrew.dev uses 8023).
         s.settimeout(120)
         s.sendall(f"push {len(data)}\n".encode() + data)
         s.sendall(b"exec\n")
@@ -169,6 +165,69 @@ def main():
         print("--- waiting for restart ---")
         time.sleep(5)
         follow(connect(), float(os.environ.get("FOLLOW_SEC", "0")) or None)
+    elif cmd == "bench":
+        seconds = int(os.environ.get("BENCH_SEC", "6"))
+        results = []
+        for skip in (args or ["5", "2", "1"]):
+            s = connect()
+            drain(s)
+            s.sendall(f"prof on\nskip {skip}\nbench {seconds}\n".encode())
+            # Wait until the emulator has taken the command (it leaves the WLAN).
+            seen, s_deadline = b"", time.time() + 30
+            s.settimeout(1)
+            while b"bench: %d s" % seconds not in seen and time.time() < s_deadline:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                seen += chunk
+            s.close()
+            time.sleep(seconds + 1)
+            # The WLAN was left during the run; the log comes back with it.
+            s = connect()
+            text = b""
+            s.settimeout(1)
+            deadline = time.time() + 60
+            while b"bench: done" not in text.split(b"bench: %d s" % seconds)[-1] and time.time() < deadline:
+                try:
+                    chunk = s.recv(65536)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                text += chunk
+            s.close()
+            run = text.decode("utf-8", "replace").split(f"bench: {seconds} s")[-1].split("bench: done")[0]
+            lines = run.splitlines()
+            fps = [l for l in lines if l.startswith("fps:")][1:]  # the first second is partial
+            prof = [l for l in lines if l.startswith("prof:")][1:]
+            def avg(rows, key):
+                vals = []
+                for r in rows:
+                    w = r.split()
+                    if key in w:
+                        v = w[w.index(key) + 1].rstrip("ms").split("/")[0]
+                        vals.append(float(v))
+                return sum(vals) / len(vals) if vals else float("nan")
+            row = {"skip": skip, "emu": avg(fps, "emu"), "drawn": avg(fps, "drawn"), "exec": avg(fps, "avg")}
+            for k in ("cpu", "grp", "text", "bg", "mix", "draw", "snd", "lines"):
+                row[k] = avg(prof, k) / (1 if k == "lines" else 10)
+            results.append(row)
+        print("skip  emu  drawn  exec | cpu   grp   text  bg    mix   draw  snd  (ms/frame) | lines/f")
+        for r in results:
+            print(f"{r['skip']:>4} {r['emu']:4.0f} {r['drawn']:6.0f} {r['exec']:5.1f} |"
+                  f" {r['cpu']:4.1f}  {r['grp']:4.1f}  {r['text']:4.1f}  {r['bg']:4.1f}  {r['mix']:4.1f}"
+                  f"  {r['draw']:4.1f}  {r['snd']:4.1f}             | {r['lines']:5.0f}")
+        s = connect()
+        s.sendall(b"skip 5\n")
+        s.close()
+    elif cmd in ("pause", "resume"):
+        s = connect()
+        drain(s)
+        s.sendall(f"{cmd}\n".encode())
+        follow(s, 2)
     elif cmd == "back":
         s = connect()
         drain(s)

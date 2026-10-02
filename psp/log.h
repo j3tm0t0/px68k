@@ -17,11 +17,11 @@ void log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  */
 void log_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /*
- * Text logged since the running byte offset *from (raised past lines that
- * were dropped to make room); returns its length (0 if nothing new). The
- * caller advances *from by what it consumed.
+ * Copies up to cap bytes logged at or after the running byte offset *from
+ * (raised past lines that were dropped to make room) into out, advances
+ * *from and returns the length (0 if nothing new).
  */
-size_t log_read(size_t *from, const char **data);
+size_t log_read(size_t *from, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

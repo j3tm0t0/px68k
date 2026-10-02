@@ -21,6 +21,8 @@ extern "C" {
  *   exec\n                     restart this EBOOT.PBP
  *   launch <path>\n            run another EBOOT.PBP ("/PSP/..." = the device this one runs from)
  *   shot\n                     reply "SHOT <size>\n" + a BMP of the screen
+ *   pause\n / resume\n          stop / restart the emulation (also stopped
+ *                              while push, get or shot transfer)
  *   pad <button>[+<button>...] [ms]\n
  *                              hold PSP buttons for ms (default 100; 0 releases):
  *                              up/down/left/right/cross/circle/square/triangle/
@@ -32,6 +34,9 @@ int debug_start(const char *eboot_path, const char *key_path);
 
 /* Copy the next queued command into buf; returns 0 if there is none. */
 int debug_poll(char *buf, int len);
+
+/* Whether the emulator should idle (sleeping, so the WLAN gets the CPU). */
+int debug_paused(void);
 
 /* Buttons the debug client is holding down (PSP_CTRL_* bits). */
 unsigned debug_pad(void);

@@ -45,6 +45,7 @@
 #include "prop.h"
 #include "status.h"
 #include "tvram.h"
+#include "../psp/prof.h"
 #include "joystick.h"
 #include "keyboard.h"
 
@@ -572,6 +573,8 @@ WinDraw_Draw(void)
 	SDL_GL_SwapWindow(sdl_window);
 
 #elif defined(PSP)
+	PROF_BEGIN(draw);
+	PROF_COUNT(PROF_FRAMES, 1);
 	sceGuStart(GU_DIRECT, list);
 
 	sceGuClearColor(0);
@@ -649,6 +652,7 @@ WinDraw_Draw(void)
 	sceGuSync(0, 0);
 
 	sceGuSwapBuffers();
+	PROF_END(draw, PROF_DRAW);
 
 #else // OpenGL ES 未使用
 
@@ -1020,13 +1024,25 @@ INLINE void WinDraw_DrawPriLine(void)
 	WD_LOOP(0, TextDotX, _DPL_SUB);
 }
 
+static void DrawLine(void);
+
 void WinDraw_DrawLine(void)
 {
-	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
-
 	if (!TextDirtyLine[VLINE]) return;
 	TextDirtyLine[VLINE] = 0;
 	Draw_DrawFlag = 1;
+	PROF_COUNT(PROF_LINES, 1);
+	{
+		PROF_BEGIN(line);
+		DrawLine();
+		PROF_END(line, PROF_MIX);	/* the decoders are subtracted when reported */
+	}
+}
+
+static void DrawLine(void)
+{
+	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
+	PROF_BEGIN(grp);
 
 
 	if (Debug_Grp)
@@ -1166,6 +1182,7 @@ void WinDraw_DrawLine(void)
 		break;
 	}
 	}
+	PROF_END(grp, PROF_GRP);
 
 
 //	if ( ( ((VCReg1[0]&0x30)>>4) < (VCReg1[0]&0x03) ) && (gon) )
@@ -1175,7 +1192,7 @@ void WinDraw_DrawLine(void)
 	{						// BGの方が上
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			Text_DrawLine(1);
+			{ PROF_BEGIN(t); Text_DrawLine(1); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 		else
@@ -1190,7 +1207,7 @@ void WinDraw_DrawLine(void)
 			VLINEBG <<= s1;
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
-			BG_DrawLine(!ton, 0);
+			{ PROF_BEGIN(b); BG_DrawLine(!ton, 0); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 	}
@@ -1206,7 +1223,7 @@ void WinDraw_DrawLine(void)
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
 			ZeroMemory(Text_TrFlag, TextDotX+16);
-			BG_DrawLine(1, 1);
+			{ PROF_BEGIN(b); BG_DrawLine(1, 1); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 		else
@@ -1225,7 +1242,7 @@ void WinDraw_DrawLine(void)
 
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			Text_DrawLine(!bgon);
+			{ PROF_BEGIN(t); Text_DrawLine(!bgon); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 	}

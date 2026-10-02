@@ -25,6 +25,7 @@ static char queue[QUEUE_MAX][256];
 static volatile int queue_head, queue_tail;
 
 static volatile unsigned pad_buttons;
+static volatile int paused, transfers;
 static volatile SceUInt64 pad_until;
 
 static int send_all(int fd, const void *buf, size_t len)
@@ -222,6 +223,11 @@ static void press(int fd, const char *args)
 	reply(fd, "OK pad");
 }
 
+int debug_paused(void)
+{
+	return paused || transfers;
+}
+
 unsigned debug_pad(void)
 {
 	if (pad_buttons && sceKernelGetSystemTimeWide() >= pad_until)
@@ -262,23 +268,20 @@ void debug_launch(const char *path)
 /* Serve one client until it disconnects. */
 static void serve(int fd)
 {
-	char cmd[256];
+	char cmd[256], out[2048];
 	size_t cmd_len = 0, sent = 0;
 	int authed = 0;
 
 	for (;;) {
 		fd_set rd;
 		struct timeval tv = { 0, 100 * 1000 };
-		const char *data;
 		size_t n;
 		char *nl;
 		int r;
 
-		if (authed && (n = log_read(&sent, &data)) > 0) {
-			if (send_all(fd, data, n) != 0)
+		while (authed && (n = log_read(&sent, out, sizeof(out))) > 0)
+			if (send_all(fd, out, n) != 0)
 				return;
-			sent += n;
-		}
 
 		FD_ZERO(&rd);
 		FD_SET(fd, &rd);
@@ -304,12 +307,16 @@ static void serve(int fd)
 				authed = 1;
 				send_all(fd, "OK auth\n", 8);
 			} else if (strncmp(cmd, "push ", 5) == 0) {
+				transfers++;
 				receive_eboot(fd, atol(cmd + 5), cmd + line_len, cmd_len - line_len);
+				transfers--;
 				cmd_len = 0; /* the rest of the buffer was file data */
 				cmd[0] = '\0';
 				break;
 			} else if (strncmp(cmd, "get ", 4) == 0) {
+				transfers++;
 				send_file(fd, cmd + 4);
+				transfers--;
 			} else if (strcmp(cmd, "exec") == 0) {
 				reply(fd, "OK exec");
 				close(fd);
@@ -330,7 +337,12 @@ static void serve(int fd)
 					return; /* only reached if loadexec failed */
 				}
 			} else if (strcmp(cmd, "shot") == 0) {
+				transfers++;
 				send_shot(fd);
+				transfers--;
+			} else if (strcmp(cmd, "pause") == 0 || strcmp(cmd, "resume") == 0) {
+				paused = cmd[0] == 'p';
+				reply(fd, paused ? "OK paused" : "OK resumed");
 			} else if (strncmp(cmd, "pad ", 4) == 0) {
 				press(fd, cmd + 4);
 			} else if (strcmp(cmd, "quit") == 0) {

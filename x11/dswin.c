@@ -30,6 +30,7 @@
 #include	"adpcm.h"
 #include	"mercury.h"
 #include	"fmg_wrap.h"
+#include	"../psp/prof.h"
 
 short	playing = FALSE;
 
@@ -135,6 +136,7 @@ static void sound_send(int length)
 	rate = 0;
 #endif
 	SDL_LockAudio();
+	PROF_BEGIN(snd);
 	ADPCM_Update((short *)pbwp, length, rate, pbsp, pbep);
 	OPM_Update((short *)pbwp, length, rate, pbsp, pbep);
 #ifndef	NO_MERCURY
@@ -151,7 +153,9 @@ static void sound_send(int length)
 		pbwp = pbsp + (pbwp - pbep);
 	}
 #endif
+	PROF_END(snd, PROF_SOUND);
 	SDL_UnlockAudio();
+	PROF_COUNT(PROF_SOUND_SAMPLES, length);
 }
 
 void FASTCALL DSound_Send0(long clock)

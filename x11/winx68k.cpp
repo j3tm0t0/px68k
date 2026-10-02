@@ -28,6 +28,7 @@ extern "C" {
 #include "crtc.h"
 #include "mfp.h"
 #include "fdc.h"
+#include "../psp/prof.h"
 #include "fdd.h"
 #include "dmac.h"
 #include "irqh.h"
@@ -426,7 +427,11 @@ void WinX68k_Exec(void)
 #endif
 		{
 			C68K.ICount = n;
-			C68k_Exec(&C68K, C68K.ICount);
+			{
+				PROF_BEGIN(cpu);
+				C68k_Exec(&C68K, C68K.ICount);
+				PROF_END(cpu, PROF_CPU);
+			}
 			m = (n-C68K.ICount-m68000_ICountBk);			// 経過クロック数
 			ClkUsed += m*10;
 			usedclk = ClkUsed/clkdiv;
@@ -574,11 +579,16 @@ int SetupCallbacks(void)
 #include "../psp/log.h"
 #include "../psp/net.h"
 
+int prof_on;
+unsigned prof_us[PROF_N];
+unsigned prof_count[PROF_COUNT_N];
+
 static int psp_debug_on;
 static int psp_fps_log;
 static int psp_emu_frames, psp_drawn_frames;
 static unsigned psp_exec_us, psp_exec_max_us;
 static unsigned psp_fps_start;
+static int psp_paused;
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
 
@@ -609,6 +619,11 @@ static void psp_debug_init(const char *eboot)
 	profiles[1] = devcfg;
 	if (net_start(profiles, 2) != 0 || debug_start(eboot, keypath) != 0)
 		return;
+	/*
+	 * The net stack runs at priorities 42-48; above them the emulator, which
+	 * never sleeps while it is behind, starved it (ping took seconds).
+	 */
+	sceKernelChangeThreadPriority(sceKernelGetThreadId(), 0x38);
 	psp_debug_on = psp_fps_log = 1;
 	psp_fps_start = timeGetTime();
 	log_printf("cpu %d MHz, bus %d MHz, free %d KB (max block %d KB)\n", scePowerGetCpuClockFrequency(),
@@ -643,6 +658,19 @@ static void psp_debug_frame(unsigned us)
 		log_printf("bench: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
 		now = timeGetTime();
 	}
+	if (prof_on) {
+		unsigned decode = prof_us[PROF_GRP] + prof_us[PROF_TEXT] + prof_us[PROF_BG];
+		unsigned mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
+		int f = psp_emu_frames ? psp_emu_frames : 1;
+		/* per emulated frame, in units of 0.1 ms */
+		log_note("prof: cpu %u grp %u text %u bg %u mix %u draw %u snd %u (0.1ms/frame) lines %u/f shown %u snd %u/s\n",
+			 prof_us[PROF_CPU] / f / 100, prof_us[PROF_GRP] / f / 100, prof_us[PROF_TEXT] / f / 100,
+			 prof_us[PROF_BG] / f / 100, mix / f / 100, prof_us[PROF_DRAW] / f / 100,
+			 prof_us[PROF_SOUND] / f / 100, prof_count[PROF_LINES] / f,
+			 prof_count[PROF_FRAMES], prof_count[PROF_SOUND_SAMPLES]);
+	}
+	memset(prof_us, 0, sizeof(prof_us));
+	memset(prof_count, 0, sizeof(prof_count));
 	psp_emu_frames = psp_drawn_frames = 0;
 	psp_exec_us = psp_exec_max_us = 0;
 	psp_fps_start = now;
@@ -656,7 +684,8 @@ static void psp_debug_poll(void)
 
 	if (!psp_debug_on)
 		return;
-	while (debug_poll(cmd, sizeof(cmd))) {
+	/* One per emulated frame, so that a button press and release don't cancel out. */
+	if (debug_poll(cmd, sizeof(cmd))) {
 		if (sscanf(cmd, "fdd %d %127[^\n]", &n, arg) == 2 && (n == 0 || n == 1)) {
 			/* "/PSP/..." is on the device px68k runs from */
 			snprintf(Config.FDDImage[n], sizeof(Config.FDDImage[n]), "%s%s",
@@ -685,6 +714,8 @@ static void psp_debug_poll(void)
 		} else if (strcmp(cmd, "reset") == 0) {
 			WinX68k_Reset();
 			log_printf("reset\n");
+		} else if (strcmp(cmd, "prof on") == 0 || strcmp(cmd, "prof off") == 0) {
+			prof_on = cmd[6] == 'n';
 		} else if (strcmp(cmd, "fps on") == 0 || strcmp(cmd, "fps off") == 0) {
 			psp_fps_log = cmd[5] == 'n';
 		} else if (sscanf(cmd, "skip %d", &n) == 1 && n >= 1 && n <= 7) {
@@ -695,7 +726,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, bench <sec>, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, bench <sec>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
@@ -917,6 +948,23 @@ int main(int argc, char *argv[])
 
 	while (1) {
 		// OPM_RomeoOut(Config.BufferSize * 5);
+#ifdef PSP
+		if (psp_debug_on && debug_paused()) {
+			/* Idle (sound too, its callback would synthesize) so the WLAN gets the CPU. */
+			if (!psp_paused) {
+				psp_paused = 1;
+				DSound_Stop();
+			}
+			sceKernelDelayThread(20 * 1000);
+			psp_debug_poll();
+			continue;
+		}
+		if (psp_paused) {
+			psp_paused = 0;
+			if (menu_mode == menu_out)
+				DSound_Play();
+		}
+#endif
 		if (menu_mode == menu_out
 		    && (Config.NoWaitMode || Timer_GetCount())) {
 #ifdef PSP

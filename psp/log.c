@@ -83,9 +83,9 @@ void log_note(const char *fmt, ...)
 	va_end(ap);
 }
 
-size_t log_read(size_t *from, const char **data)
+size_t log_read(size_t *from, char *out, size_t cap)
 {
-	size_t base, len;
+	size_t base, len, n;
 
 	if (lock >= 0)
 		sceKernelWaitSema(lock, 1, NULL);
@@ -93,9 +93,13 @@ size_t log_read(size_t *from, const char **data)
 	len = history_len;
 	if (*from < base)
 		*from = base;	/* those lines were dropped */
-	*data = history + (*from - base);
-	len = base + len - *from;
+	n = base + len - *from;
+	if (n > cap)
+		n = cap;
+	/* Copied under the lock: the next line may move the history. */
+	memcpy(out, history + (*from - base), n);
+	*from += n;
 	if (lock >= 0)
 		sceKernelSignalSema(lock, 1);
-	return len;
+	return n;
 }
