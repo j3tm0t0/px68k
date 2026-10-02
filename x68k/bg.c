@@ -40,6 +40,31 @@
 #define	BG_USE_CHRBUF
 	BYTE	BGCHR8[8*8*256];
 	BYTE	BGCHR16[16*16*256];
+#else
+/*
+ * BG[] with the 16x16 patterns rearranged so that a row is 8 contiguous
+ * bytes (pattern p, row r at p * 128 + r * 8): one cache line per row of
+ * a tile instead of two.  Kept in sync by BG_Write.
+ */
+	BYTE	BG16L[0x8000] __attribute__ ((aligned (64)));
+
+/*
+ * Sprites by Y position: bit n of Sprite_YBucket[b] is set when
+ * (Y of sprite n & 0x3ff) >> 4 == b.  Kept in sync by BG_Write, so that a
+ * line only has to look at the sprites of 2 buckets instead of all 128.
+ */
+static	DWORD	Sprite_YBucket[64][4];
+
+static void
+Sprite_ResetYBucket(void)
+{
+	const WORD *sr = (const WORD *)Sprite_Regs;
+	int n;
+
+	memset(Sprite_YBucket, 0, sizeof(Sprite_YBucket));
+	for (n = 0; n < 128; n++)
+		Sprite_YBucket[(sr[n * 4 + 1] & 0x3ff) >> 4][n >> 5] |= 1u << (n & 31);
+}
 #endif
 
 	WORD	BG_LineBuf[1600] __attribute__ ((aligned (64)));
@@ -56,7 +81,10 @@ void BG_Init(void)
 	DWORD i;
 	ZeroMemory(Sprite_Regs, 0x800);
 	ZeroMemory(BG, 0x8000);
-#ifdef BG_USE_CHRBUF
+#ifndef BG_USE_CHRBUF
+	ZeroMemory(BG16L, 0x8000);
+	Sprite_ResetYBucket();
+#else
 	ZeroMemory(BGCHR8, 8*8*256);
 	ZeroMemory(BGCHR16, 16*16*256);
 #endif
@@ -201,7 +229,20 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 			t = t0 = (*pw + v) & 0x3ff;
 			UPDATE_TDL(t);
 
-			Sprite_Regs[adr] = data;
+			{
+				const DWORD ob = (*pw & 0x3ff) >> 4;
+
+				Sprite_Regs[adr] = data;
+				if ((adr & 6) == 2) {	/* Y changed */
+					const DWORD nb = (*pw & 0x3ff) >> 4;
+					const DWORD n = adr >> 3;
+
+					if (nb != ob) {
+						Sprite_YBucket[ob][n >> 5] &= ~(1u << (n & 31));
+						Sprite_YBucket[nb][n >> 5] |= 1u << (n & 31);
+					}
+				}
+			}
 
 			t = (*pw + v) & 0x3ff;
 			if (t != t0) {
@@ -331,6 +372,8 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		bg16chr = ((adr&3)*2)+((adr&0x3c)*4)+((adr&0x40)>>3)+((adr&0x7f80)*2);
 		BGCHR16[bg16chr]   = data>>4;
 		BGCHR16[bg16chr+1] = data&15;
+#else
+		BG16L[(adr&0x7f80)|((adr&0x3c)<<1)|((adr&0x40)>>4)|(adr&3)] = data;
 #endif
 
 		if (adr<BG_CHREND)				// パターンエリア
@@ -477,11 +520,12 @@ LABEL void FASTCALL BG_DrawLine(int opaq, int gd) {
  *   right to left: byte-swap L
  *
  * 8x8 pattern p, row r:   BG[p * 32 + r * 4], 4 bytes
- * 16x16 pattern p, row r: BG[p * 128 + r * 4] (left 8 pixels),
- *                         BG[p * 128 + 64 + r * 4] (right 8 pixels)
+ * 16x16 pattern p, row r: BG16L[p * 128 + r * 8] (left 8 pixels),
+ *                         BG16L[p * 128 + r * 8 + 4] (right 8 pixels)
  */
 typedef DWORD __attribute__((__may_alias__)) DWORD_A;	/* 32-bit access to BYTE/WORD arrays */
 #define BG_ROW(off)	(*(const DWORD_A *)(BG + (off)))
+#define BG16_ROW(off)	(*(const DWORD_A *)(BG16L + (off)))
 
 static inline DWORD
 bg_nibswap(DWORD l)
@@ -497,9 +541,10 @@ bg_bswap(DWORD l)
 
 /*
  * Sprites on the current line, per priority (1-3), in drawing order (127
- * down to 0). One pass over the 128 sprites per line instead of one per
- * priority; the registers are read as WORDs (Sprite_Regs holds them in host
- * order: x, y, control, priority in the low byte of the 4th word).
+ * down to 0). Only the sprites of the (at most 2) Y buckets that overlap
+ * the line are looked at, with the same tests as before; the registers are
+ * read as WORDs (Sprite_Regs holds them in host order: x, y, control,
+ * priority in the low byte of the 4th word).
  */
 static BYTE Sprite_Line[4][128];
 static int Sprite_LineCount[4];
@@ -507,28 +552,49 @@ static int Sprite_LineCount[4];
 static void
 Sprite_CollectLine(void)
 {
-	const WORD *s = (const WORD *)Sprite_Regs + 127 * 4;
+	const WORD *sr = (const WORD *)Sprite_Regs;
 	/* the sprite is on the line if 16 - (y - VLINEBG + BG_VLINE) <= 15 */
 	const DWORD ybase = (DWORD)BG_VLINE - VLINEBG - 1;
 	const DWORD hadj = (DWORD)BG_HAdjust;
 	const DWORD xmax = TextDotX + 16;
+	/* y (0-0x3ff) on the line: y + ybase in 0..15, i.e. y in lo..lo+15 */
+	const DWORD lo = -ybase, hi = lo + 15;
+	DWORD m[4] = { 0, 0, 0, 0 };
 	int c1 = 0, c2 = 0, c3 = 0;
-	int n;
+	int w;
 
-	for (n = 127; n >= 0; --n, s -= 4) {
-		int pri;
+	if (lo < 0x400) {
+		const DWORD *b = Sprite_YBucket[lo >> 4];
+		m[0] = b[0]; m[1] = b[1]; m[2] = b[2]; m[3] = b[3];
+	}
+	if (hi < 0x400 && (hi >> 4) != (lo >> 4)) {
+		const DWORD *b = Sprite_YBucket[hi >> 4];
+		m[0] |= b[0]; m[1] |= b[1]; m[2] |= b[2]; m[3] |= b[3];
+	}
 
-		if ((DWORD)((s[1] & 0x3ff) + ybase) > 15)
-			continue;
-		pri = s[3] & 3;
-		if (!pri)
-			continue;	/* priority 0: not displayed */
-		if (((s[0] + hadj) & 0x3ff) >= xmax)
-			continue;
-		switch (pri) {
-		case 1: Sprite_Line[1][c1++] = n; break;
-		case 2: Sprite_Line[2][c2++] = n; break;
-		default: Sprite_Line[3][c3++] = n; break;
+	/* candidates, 127 down to 0 */
+	for (w = 3; w >= 0; w--) {
+		DWORD mw = m[w];
+
+		while (mw) {
+			const int bit = 31 - __builtin_clz(mw);
+			const int n = w * 32 + bit;
+			const WORD *s = sr + n * 4;
+			int pri;
+
+			mw &= ~(1u << bit);
+			if ((DWORD)((s[1] & 0x3ff) + ybase) > 15)
+				continue;
+			pri = s[3] & 3;
+			if (!pri)
+				continue;	/* priority 0: not displayed */
+			if (((s[0] + hadj) & 0x3ff) >= xmax)
+				continue;
+			switch (pri) {
+			case 1: Sprite_Line[1][c1++] = n; break;
+			case 2: Sprite_Line[2][c2++] = n; break;
+			default: Sprite_Line[3][c3++] = n; break;
+			}
 		}
 	}
 	Sprite_LineCount[1] = c1;
@@ -577,13 +643,13 @@ Sprite_DrawLineMcr(int pri_level)
 
 		if (ctrl & 0x8000)		/* V flip */
 			y ^= 15;
-		off = (ctrl & 0xff) * 128 + y * 4;
+		off = (ctrl & 0xff) * 128 + y * 8;
 		if (ctrl & 0x4000) {		/* H flip */
-			s0 = bg_bswap(BG_ROW(off + 64));
-			s1 = bg_bswap(BG_ROW(off));
+			s0 = bg_bswap(BG16_ROW(off + 4));
+			s1 = bg_bswap(BG16_ROW(off));
 		} else {
-			s0 = bg_nibswap(BG_ROW(off));
-			s1 = bg_nibswap(BG_ROW(off + 64));
+			s0 = bg_nibswap(BG16_ROW(off));
+			s1 = bg_nibswap(BG16_ROW(off + 4));
 		}
 		SPRITE_PIX8(s0);
 		lb += 8; tf += 8; pb += 8;
@@ -678,15 +744,15 @@ bg_drawline_loopx16(DWORD BGTOP, DWORD BGScrollX, DWORD BGScrollY, long adjust, 
 		const DWORD bl = map[col * 2];
 		const DWORD pat = map[col * 2 + 1];
 		const WORD *pp = TextPal + ((bl & 15) << 4);
-		const DWORD off = pat * 128 + ((bl & 0x80) ? (15 - r) : r) * 4;
+		const DWORD off = pat * 128 + ((bl & 0x80) ? (15 - r) : r) * 8;
 		DWORD s0, s1;
 
 		if (bl & 0x40) {
-			s0 = bg_bswap(BG_ROW(off + 64));
-			s1 = bg_bswap(BG_ROW(off));
+			s0 = bg_bswap(BG16_ROW(off + 4));
+			s1 = bg_bswap(BG16_ROW(off));
 		} else {
-			s0 = bg_nibswap(BG_ROW(off));
-			s1 = bg_nibswap(BG_ROW(off + 64));
+			s0 = bg_nibswap(BG16_ROW(off));
+			s1 = bg_nibswap(BG16_ROW(off + 4));
 		}
 		if (gd && (bl & 15)) {
 			BG_PIX8_FULL(s0);
