@@ -49,12 +49,16 @@ int GE_Line(void);
 /* bands are waiting to be drawn */
 int GE_Pending(void);
 /*
- * Put the drawing of the waiting bands into the open display list (between
- * sceGuStart and sceGuFinish); fbp: draw buffer to switch back to.  The
- * caller writes the D-cache back before sceGuFinish and calls GE_Done()
- * once the GE has finished the list.
+ * The drawing of the waiting bands as a call list (GU_CALL, ends with RET)
+ * in the GE's list memory; fbp: draw buffer to switch back to.  Nothing
+ * runs before the caller calls the list (sceGuCallList), after it has
+ * written the D-cache back (vertices, GVRAM, TextDrawWork).  GE_Done()
+ * once the GE has finished all lists; the list memory is reused then.
+ * GE_Room(): the waiting bands fit in what is left of the list memory (they
+ * always do when the GE is idle).
  */
-void GE_Render(void *fbp, int passes);
+void *GE_Build(void *fbp, int passes);
+int GE_Room(void);
 void GE_Done(void);
 
 /* GE_Render passes, in this order ("ge time" times them one by one) */
@@ -99,6 +103,10 @@ enum {
 	GE_ST_GE_US,		/* "ge time": GE time of the frame's display list */
 	GE_ST_PASS_US,		/* "ge time": + log2(GE_P_*): GE time of each pass */
 	GE_ST_COPY_BYTES = GE_ST_PASS_US + GE_NPASS,	/* bytes copied to VRAM */
+	GE_ST_FRAME_WAIT_US,	/* CPU time waiting for the GE when a frame is shown */
+	GE_ST_LINE_WAITS,	/* CPU lines that waited for the GE */
+	GE_ST_LINE_WAIT_US,	/* ... and how long */
+	GE_ST_DONE_US,		/* CPU time of GE_Done (queued BG writes) */
 	GE_ST_FRAMES,		/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10

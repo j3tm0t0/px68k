@@ -295,6 +295,8 @@ int GE_Pending(void)
  */
 
 static int ge_inflight;		/* bands handed to the GE, not done yet */
+static int ge_voff, ge_coff;	/* list memory used (see ge_mem) */
+static int ge_vneed;		/* ge_varena bytes the waiting bands may take */
 static int ge_bgfly;		/* ... and some of them read the BG patterns */
 static DWORD ge_grow[4][16], ge_gcol[4][16];	/* GVRAM rows/columns read, per page */
 static DWORD ge_trow[32], ge_tcol[4];		/* TextDrawWork rows, 8-dot columns read */
@@ -339,9 +341,15 @@ void GE_Done(void)
 
 	ge_inflight = 0;
 	ge_bgfly = 0;
-	for (i = 0; i < ge_nq; i++)
-		GE_BGWrite(ge_qadr[i], ge_qdat[i]);
-	ge_nq = 0;
+	ge_voff = ge_coff = 0;	/* the GE is idle */
+	if (ge_nq) {
+		const unsigned t0 = sceKernelGetSystemTimeLow();
+
+		for (i = 0; i < ge_nq; i++)
+			GE_BGWrite(ge_qadr[i], ge_qdat[i]);
+		ge_nq = 0;
+		GE_Stat[GE_ST_DONE_US] += sceKernelGetSystemTimeLow() - t0;
+	}
 	if (!ge_nband)
 		ge_clear_masks();
 	GE_Guard = ge_nband != 0;
@@ -469,11 +477,21 @@ void GE_BGData(DWORD adr, BYTE data)
 	GE_BGWrite(adr, data);
 }
 
+/* list memory (see ge_mem) */
+#define GE_VARENA	(1024 * 1024)	/* vertices and CLUTs */
+#define GE_CLIST	(288 * 1024)	/* the lists */
+#define GE_CBAND	8192		/* list bytes per band, at most */
+#define GE_CFIXED	4096		/* ... and per list */
+#define GE_VPAL		(256 * 4 + 16 * 4 + 32)	/* CLUT bytes per palette */
+
+static int ge_vband(const GE_State *s);
+static int ge_vline(const GE_State *s);
+
 int GE_Line(void)
 {
 	GE_State s;
 	GE_Band *b;
-	int r;
+	int r, vb, vl;
 
 	r = VLINE >= GE_ROWS ? GE_R_VLINE : ge_eval(&s);
 	if (r) {
@@ -483,7 +501,9 @@ int GE_Line(void)
 	}
 	if (ge_inflight)
 		ge_sync(GE_ST_INFLIGHT);	/* the last frame's bands: normally done long ago */
-	if (ge_nband == GE_NBAND)
+	vb = ge_vband(&s);
+	vl = ge_vline(&s);
+	if (ge_nband == GE_NBAND || ge_vneed + vb + vl + GE_VPAL > GE_VARENA)
 		ge_sync(GE_ST_BANDS);	/* draws the bands, empties the snapshots */
 
 	if (ge_npal == 0 || GE_PalDirty) {
@@ -495,6 +515,7 @@ int GE_Line(void)
 			ge_palcur = ge_npal++;
 			memcpy(ge_pal[ge_palcur].text, TextPal, sizeof(ge_pal[0].text));
 			memcpy(ge_pal[ge_palcur].grp, GrphPal, sizeof(ge_pal[0].grp));
+			ge_vneed += GE_VPAL;
 		}
 	}
 	s.pal = ge_palcur;
@@ -509,7 +530,9 @@ int GE_Line(void)
 		b->y0 = VLINE;
 		b->h = 1;
 		ge_mark_line(b, 1);
+		ge_vneed += vb;
 	}
+	ge_vneed += vl;
 	GE_StatLines++;
 	GE_Guard = 1;
 	return 1;
@@ -532,12 +555,67 @@ typedef struct {
 
 static int ge_dotx;	/* width of the band being drawn */
 
-/* display list memory, 64-byte aligned */
+/*
+ * List memory.  sceGuStart() writes a list through the uncached alias
+ * (| 0x40000000), so sceGuGetMemory() returns uncached memory: one bus write
+ * per vertex field, made while the GE (started at every sceGuGetMemory /
+ * sceGuDrawArray of a GU_DIRECT list) already reads main RAM for its copies.
+ * The bands' lists are built as GU_CALL lists in ge_clist instead (no stall
+ * address updates: the GE does not start before the list is complete), with
+ * the vertices and CLUTs in ge_varena, cached; the caller writes the D-cache
+ * back before it calls the list.  Both are reused once the GE is idle
+ * (GE_Done); ge_vneed bounds what the waiting bands take of ge_varena.
+ */
+static BYTE ge_varena[GE_VARENA] __attribute__((aligned(64)));
+static unsigned int ge_clist[GE_CLIST / 4] __attribute__((aligned(64)));
+
+/* vertex / CLUT memory, 16-byte aligned */
 static void *ge_mem(int size)
 {
-	unsigned int p = (unsigned int)sceGuGetMemory(size + 64);
+	void *p = ge_varena + ge_voff;
 
-	return (void *)((p + 63) & ~63u);
+	ge_voff += (size + 15) & ~15;
+	return p;
+}
+
+/*
+ * The GE's texture cache is small: a wide sprite is drawn as strips at most
+ * GE_STRIP texels wide (cut at multiples of GE_STRIP in u).
+ */
+#define GE_STRIP	32
+#define GE_NSTRIP(w)	((w) / GE_STRIP + 2)	/* sprites a quad w wide can become */
+
+/*
+ * Upper bounds of the ge_varena bytes GE_Render takes for a band with state
+ * s: per band (ge_vband), and per line (ge_vline): the BG tiles, 8 dots high
+ * at least, a row of them per 8 lines and 2 more per band, for 2 planes, as
+ * textured quads and as "gd" rectangles.
+ */
+static int ge_vtilerow(const GE_State *s)
+{
+	if (!((s->mode == GE_M || s->mode == GE_GM) && s->bgon))
+		return 0;
+	return 2 * ((s->dotx >> 3) + 1) * 2 * (sizeof(GE_TV) + sizeof(GE_CV));
+}
+
+static int ge_vband(const GE_State *s)
+{
+	int n = 16 + 2 * sizeof(GE_CV);		/* fill */
+
+	if (s->mode == GE_G || s->mode == GE_GM)	/* ge_grp */
+		n += s->ng * (16 + 2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV) + 16 + 2 * 2 * sizeof(GE_TV));
+	if (s->mode == GE_M || s->mode == GE_GM) {
+		n += 16 + GE_NSTRIP(512) * 2 * sizeof(GE_TV);			/* composite */
+		n += 4 * (16 + GE_NSTRIP(256) * 2 * sizeof(GE_TV));		/* ge_text */
+		if (s->bgon)	/* sprites, tile batches (16 blocks each, aligned), "gd" */
+			n += 128 * 2 * sizeof(GE_TV) + 5 * 16 * 16 + 2 * 16 + 2 * ge_vtilerow(s);
+	}
+	return n;
+}
+
+static int ge_vline(const GE_State *s)
+{
+	return (ge_vtilerow(s) + 7) / 8;
 }
 
 /* RGB565 value -> 8888 that the GE writes back as the same value */
@@ -551,7 +629,7 @@ static unsigned int ge_c32(DWORD w, unsigned int a)
 /* coloured rectangle; with depth: also sets the depth to 0xffff (BG_PriBuf) */
 static void ge_fill(int x, int y, int w, int h, unsigned int c, int depth)
 {
-	GE_CV *v = (GE_CV *)sceGuGetMemory(2 * sizeof(GE_CV));
+	GE_CV *v = (GE_CV *)ge_mem(2 * sizeof(GE_CV));
 
 	v[0].c = c;
 	v[0].x = x;
@@ -578,12 +656,6 @@ static void ge_fill(int x, int y, int w, int h, unsigned int c, int depth)
 	sceGuEnable(GU_TEXTURE_2D);
 }
 
-/*
- * The GE's texture cache is small: a wide sprite is drawn as strips at most
- * GE_STRIP texels wide (cut at multiples of GE_STRIP in u).
- */
-#define GE_STRIP	32
-#define GE_NSTRIP(w)	((w) / GE_STRIP + 2)	/* sprites a quad w wide can become */
 
 static GE_TV *ge_sprite(GE_TV *t, int x, int y, int w, int h, int u, int v, int hf, int vf, int z)
 {
@@ -668,7 +740,7 @@ static void ge_batch_alloc(GE_Batch *bt)
 
 	for (k = 0; k < 16; k++)
 		if (bt->n[k])
-			bt->base[k] = bt->cur[k] = (GE_TV *)sceGuGetMemory(bt->n[k] * 2 * sizeof(GE_TV));
+			bt->base[k] = bt->cur[k] = (GE_TV *)ge_mem(bt->n[k] * 2 * sizeof(GE_TV));
 	bt->pass = 1;
 }
 
@@ -833,7 +905,7 @@ static void ge_under(const GE_Band *b, int sz, DWORD top, DWORD scx, DWORD scy, 
 	ge_tiles(NULL, b, sz, top, scx, scy, adj, pal, &cv, &n);
 	if (!n)
 		return;
-	base = cv = (GE_CV *)sceGuGetMemory(n * 2 * sizeof(GE_CV));
+	base = cv = (GE_CV *)ge_mem(n * 2 * sizeof(GE_CV));
 	ge_tiles(NULL, b, sz, top, scx, scy, adj, pal, &cv, &n);
 	sceGuDisable(GU_TEXTURE_2D);
 	sceGuDisable(GU_ALPHA_TEST);
@@ -970,7 +1042,7 @@ static void ge_text(const GE_Band *b, int opaque)
 	else
 		sceGuEnable(GU_ALPHA_TEST);
 	if (ws >= 0) {
-		v = (GE_TV *)sceGuGetMemory(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
+		v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 		sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_TCOPY));
 		ge_draw(v, ge_quad(v, 0, b->y0, s->dotx, b->h, s->tx - ws, b->y0, 0, 0, 0));
 		return;
@@ -984,7 +1056,7 @@ static void ge_text(const GE_Band *b, int opaque)
 			const int x = s->tx + c0;
 			const int w = (s->dotx - c0 < 256) ? s->dotx - c0 : 256;
 
-			v = e = (GE_TV *)sceGuGetMemory(GE_NSTRIP(256) * 2 * sizeof(GE_TV));
+			v = e = (GE_TV *)ge_mem(GE_NSTRIP(256) * 2 * sizeof(GE_TV));
 			sceGuTexImage(0, 512, 512, 1024, TextDrawWork + row * 1024 + (x & ~15));
 			e = ge_quad(e, c0, b->y0 + i, w, n, x & 15, 0, 0, 0, 0);
 			ge_draw(v, e);
@@ -1022,7 +1094,7 @@ static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 		else
 			sceGuEnable(GU_ALPHA_TEST);
 
-		v = e = (GE_TV *)sceGuGetMemory(2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV));
+		v = e = (GE_TV *)ge_mem(2 * 2 * GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 		for (i = 0; i < b->h; i += n) {
 			/* the copy has the row of line y at y */
 			const int row = copy ? b->y0 : (s->gy[p] + b->y0 + i) & 511;
@@ -1040,7 +1112,7 @@ static void ge_grp(const GE_Band *b, const unsigned int *gclut)
 
 		if (n1 < s->dotx) {
 			/* the odd dot: GVRAM - 1 line as the texture, so that row 0 reads GVRAM[-2] too */
-			v = e = (GE_TV *)sceGuGetMemory(2 * 2 * sizeof(GE_TV));
+			v = e = (GE_TV *)ge_mem(2 * 2 * sizeof(GE_TV));
 			for (i = 0; i < b->h; i += n) {
 				const int row = (s->gy[p] + b->y0 + i) & 511;
 
@@ -1058,7 +1130,7 @@ static int ge_layer_band(const GE_State *s)
 	return s->mode == GE_M || s->mode == GE_GM;
 }
 
-void GE_Render(void *fbp, int passes)
+static void GE_Render(void *fbp, int passes)
 {
 	unsigned int *tclut[GE_NPAL], *gclut[GE_NPAL];
 	const int dither = sceGuGetStatus(GU_DITHER);
@@ -1140,7 +1212,7 @@ void GE_Render(void *fbp, int passes)
 			if ((passes & GE_P_COMP) && s->mode == GE_ZERO)
 				ge_fill(0, b->y0, s->dotx, b->h, 0, 0);
 			if ((passes & GE_P_COMP) && ge_layer_band(s)) {
-				GE_TV *v = (GE_TV *)sceGuGetMemory(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
+				GE_TV *v = (GE_TV *)ge_mem(GE_NSTRIP(512) * 2 * sizeof(GE_TV));
 
 				sceGuTexMode(GU_PSM_5650, 0, 0, 0);
 				sceGuTexImage(0, 512, 256, 512, GE_VRAM(GE_LAYER));
@@ -1176,9 +1248,31 @@ void GE_Render(void *fbp, int passes)
 			ge_bgfly = 1;
 	ge_nband = 0;
 	ge_npal = 0;
+	ge_vneed = 0;
 	ge_inflight = 1;	/* until GE_Done() */
 	GE_Guard = 1;
 	GE_Stat[GE_ST_RENDERS]++;
+}
+
+int GE_Room(void)
+{
+	return ge_voff + ge_vneed <= GE_VARENA && ge_coff + ge_nband * GE_CBAND + GE_CFIXED <= GE_CLIST;
+}
+
+void *GE_Build(void *fbp, int passes)
+{
+	unsigned int *l = ge_clist + ge_coff / 4;
+
+	sceGuStart(GU_CALL, l);
+	GE_Render(fbp, passes);
+	ge_coff += (sceGuFinish() + 63) & ~63;
+	if (ge_voff > GE_VARENA || ge_coff > GE_CLIST) {	/* the bounds are wrong */
+		static int logged;
+
+		if (!logged++)
+			log_printf("GE_Build: list memory overrun, %d/%d %d/%d\n", ge_voff, GE_VARENA, ge_coff, GE_CLIST);
+	}
+	return l;
 }
 
 void GE_LogStats(void)
@@ -1194,12 +1288,17 @@ void GE_LogStats(void)
 	char buf[512];
 	int i, n;
 
-	log_printf("ge %s: %u frames; per frame: lines ge %u cpu %u, bands %u, lists %u, draws %u, "
+	log_printf("ge %s: %u frames; per frame: lines ge %u cpu %u, bands %u.%02u, lists %u.%02u, draws %u, "
 		   "verts %u, pixels %u, build %u us, guard wait %u us, GE %u us (ge time %s)\n",
 		   GE_Enabled ? "on" : "off", GE_Stat[GE_ST_FRAMES], GE_StatLines / f, GE_StatCpuLines / f,
-		   GE_StatBands / f, GE_Stat[GE_ST_RENDERS] / f, GE_Stat[GE_ST_DRAWS] / f,
+		   GE_StatBands / f, GE_StatBands * 100 / f % 100,
+		   GE_Stat[GE_ST_RENDERS] / f, GE_Stat[GE_ST_RENDERS] * 100 / f % 100, GE_Stat[GE_ST_DRAWS] / f,
 		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
 		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
+	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us\n",
+		   GE_Stat[GE_ST_FRAME_WAIT_US] / f, GE_Stat[GE_ST_LINE_WAITS] / f,
+		   GE_Stat[GE_ST_LINE_WAITS] * 100 / f % 100, GE_Stat[GE_ST_LINE_WAIT_US] / f,
+		   GE_Stat[GE_ST_DONE_US] / f);
 	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
 		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,
