@@ -56,7 +56,7 @@ extern BYTE Debug_Text, Debug_Grp, Debug_Sp;
 extern BYTE Sprite_Regs[0x800];
 extern BYTE BG[0x8000];
 
-int GE_Enabled = 0;
+int GE_Enabled = 1;	/* GE compositing where supported; "ge off" for the CPU path */
 int GE_TimeSync = 0;
 volatile int GE_Guard = 0;
 int GE_PalDirty = 1;
