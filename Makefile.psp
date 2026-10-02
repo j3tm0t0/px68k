@@ -68,6 +68,9 @@ CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION)
 # for debugging
 #CFLAGS = -g -G0 -Wall $(SDL_INCLUDE)
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
+# c68kmacro.h writes the low word/byte of the 32-bit registers through
+# UINT16/UINT8 pointers (WRITE_REG_16/8): type punning
+m68000/c68k.o: CFLAGS += -fno-strict-aliasing
 
 LIBDIR =
 LDFLAGS =
