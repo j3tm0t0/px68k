@@ -44,6 +44,9 @@ void TVRAM_Init(void)
 	int i, j, bit;
 	ZeroMemory(TVRAM, 0x80000);
 	ZeroMemory(TextDrawWork, 1024*1024);
+#ifdef PSP
+	GE_TGenAll++;	/* the GE's copies (psp/gecomp.c) */
+#endif
 	TVRAM_SetAllDirty();
 
 	ZeroMemory(TextDrawPattern, 2048*4);		// パターンテーブル初期化
@@ -114,6 +117,7 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
 	GE_GUARD_TVRAM(adr);
+	GE_TVRAM_TOUCH(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
 	if (CRTC_Regs[0x2a]&1)			// 同時アクセス
@@ -252,6 +256,9 @@ void FASTCALL TVRAM_RCUpdate(void)
 	DWORD adr = ((DWORD)CRTC_Regs[0x2d]<<9);
 
 	GE_GUARD_FULL(GE_ST_RCUPD);
+#ifdef PSP
+	GE_TGenAll++;
+#endif
 
 #ifdef USE_ASM
 	_asm

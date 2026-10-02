@@ -45,6 +45,18 @@ void GE_TvramGuard(DWORD adr);	/* TVRAM_Write, its address */
 void GE_SpriteGuard(void);	/* a sprite register changes */
 void GE_FullGuard(int why);	/* anything else: wait (why: GE_ST_*) */
 
+/*
+ * Generations of the GVRAM rows (16 colour 512 dot layout) and TextDrawWork
+ * rows, bumped by every write (the GE's copies of them in VRAM are only
+ * refreshed when they changed); *GenAll: all rows.
+ */
+extern DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
+#define GE_GVRAM_TOUCH(a)	do { if (CRTC_Regs[0x28] & 0x0f) GE_GGenAll++; \
+				     else GE_GRowGen[((a) >> 10) & 511]++; } while (0)
+#define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
+/* windraw.c: ScrBufL row y was written by the CPU */
+void GE_ScrRowWritten(DWORD y);
+
 #define GE_GUARD_GVRAM(a)	do { if (GE_Guard) GE_GvramGuard(a); } while (0)
 #define GE_GUARD_TVRAM(a)	do { if (GE_Guard) GE_TvramGuard(a); } while (0)
 #define GE_GUARD_SPRITE()	do { if (GE_Guard) GE_SpriteGuard(); } while (0)
@@ -148,6 +160,8 @@ void GE_LogStats(void);
 #define GE_GUARD_TVRAM(a)	do { } while (0)
 #define GE_GUARD_SPRITE()	do { } while (0)
 #define GE_GUARD_FULL(why)	do { } while (0)
+#define GE_GVRAM_TOUCH(a)	do { } while (0)
+#define GE_TVRAM_TOUCH(a)	do { } while (0)
 
 #endif /* PSP */
 

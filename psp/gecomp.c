@@ -1051,30 +1051,148 @@ static int ge_tcopy_x(const GE_State *s)	/* first dot copied, or -1 */
 	return (s->tx - ws) + s->dotx <= 512 ? ws : -1;
 }
 
+/* the 32-word columns of GVRAM words a .. e - 1, as bits */
+static unsigned ge_chunks(int a, int e)
+{
+	return ((1u << ((e + 31) >> 5)) - 1) & ~((1u << (a >> 5)) - 1);
+}
+
+/* the 32-word columns of the GVRAM rows the pages textured from the copy read (ge_grp) */
+static unsigned ge_gcopy_cols(const GE_State *s)
+{
+	unsigned m = 0;
+	int k;
+
+	for (k = 0; k < s->ng; k++) {
+		const int p = s->gpage[k];
+		const int x = s->gx[p];
+		int n1 = 511 - x;
+
+		if (!ge_gcopy_ok(s, p))
+			continue;
+		if (n1 > s->dotx)
+			n1 = s->dotx;
+		if (n1 > 0)
+			m |= ge_chunks(x, x + n1);
+		if (n1 + 1 < s->dotx)
+			m |= ge_chunks(0, s->dotx - n1 - 1);
+	}
+	return m;
+}
+
+/*
+ * What the copies hold, per row y: the source row, its generation (GE_GRowGen,
+ * GE_TRowGen, bumped by every write to it) and the columns copied.  The rows
+ * and columns that still hold what the band reads are not copied again: a
+ * still graphic or text screen is not copied at all, one that scrolls
+ * sideways only for the columns that come into view.  (A write between the
+ * build and the copy may leave a newer row than recorded: copied again.)
+ */
+DWORD GE_GRowGen[512], GE_TRowGen[1024], GE_GGenAll, GE_TGenAll;
+
+typedef struct {
+	DWORD	gen, all;
+	WORD	src;
+	WORD	cols;		/* 32-word columns held, 0: nothing */
+} GE_GCopy;
+
+typedef struct {
+	DWORD	gen, all;
+	WORD	src, ws;	/* bytes ws .. ws + 2 * w - 1 of row src */
+	WORD	w;		/* 0: nothing */
+} GE_TCopy;
+
+static GE_GCopy ge_gc[256];
+static GE_TCopy ge_tc[256];
+
+void GE_ScrRowWritten(DWORD y)
+{
+	if (y >= 256 && y < 512)
+		ge_gc[y - 256].cols = 0;	/* the GVRAM copy's row */
+}
+
+/* the columns row y misses of need (bit 16: it holds nothing of row src) */
+static unsigned ge_gmiss(int y, int src, unsigned need)
+{
+	const GE_GCopy *g = &ge_gc[y];
+
+	if (g->cols && g->src == src && g->gen == GE_GRowGen[src] && g->all == GE_GGenAll)
+		return need & ~g->cols;
+	return need | 0x10000;
+}
+
+static int ge_tmiss(int y, int src, int ws, int w)
+{
+	const GE_TCopy *t = &ge_tc[y];
+
+	return !(t->w >= w && t->src == src && t->ws == ws && t->gen == GE_TRowGen[src] && t->all == GE_TGenAll);
+}
+
 static void ge_copy(const GE_Band *b)
 {
 	const GE_State *s = &b->st;
-	int i, row, n;
+	int i, k, n;
 
 	if ((s->mode == GE_G || s->mode == GE_GM) && ge_gcopy_ok(s, s->gpage[0])) {
+		/* the columns read only (a 256 dot screen reads half of them) */
+		const unsigned need = ge_gcopy_cols(s);
+		const int gy = s->gy[s->gpage[0]];
+
 		for (i = 0; i < b->h; i += n) {
-			row = (s->gy[s->gpage[0]] + b->y0 + i) & 511;
-			n = (512 - row < b->h - i) ? 512 - row : b->h - i;
-			sceGuCopyImage(GU_PSM_5650, 0, row, 512, n, 512, GVRAM, 0, b->y0 + i, 512, GE_VRAM(GE_GCOPY));
+			const int y = b->y0 + i, row = (gy + y) & 511;
+			const unsigned miss = ge_gmiss(y, row, need), m = miss & 0xffff;
+			int c0, c1;
+
+			/* the rows after it that miss the same, up to the wrap */
+			for (n = 1; i + n < b->h && row + n < 512 && ge_gmiss(y + n, row + n, need) == miss; n++)
+				;
+			for (k = 0; k < n; k++) {
+				GE_GCopy *g = &ge_gc[y + k];
+
+				g->cols = (miss & 0x10000) ? need : g->cols | need;
+				g->src = row + k;
+				g->gen = GE_GRowGen[row + k];
+				g->all = GE_GGenAll;
+			}
+			for (c0 = 0; c0 < 16; c0 = c1) {
+				if (!(m & (1u << c0))) {
+					c1 = c0 + 1;
+					continue;
+				}
+				for (c1 = c0 + 1; c1 < 16 && (m & (1u << c1)); c1++)
+					;
+				sceGuCopyImage(GU_PSM_5650, c0 * 32, row, (c1 - c0) * 32, n, 512, GVRAM,
+					       c0 * 32, y, 512, GE_VRAM(GE_GCOPY));
+				GE_Stat[GE_ST_COPY_BYTES] += n * (c1 - c0) * 64;
+			}
 		}
-		GE_Stat[GE_ST_COPY_BYTES] += b->h * 1024;
 	}
 	if ((s->mode == GE_M || s->mode == GE_GM) && s->ton && ge_tcopy_x(s) >= 0) {
 		const int ws = ge_tcopy_x(s);
+		/* the bytes read (ge_text): tx - ws .. tx - ws + dotx - 1, as 16-bit dots */
+		const int w = (s->tx - ws + s->dotx + 1) >> 1;
 
 		for (i = 0; i < b->h; i += n) {
-			row = (s->ty + b->y0 + i) & 1023;
-			n = (1024 - row < b->h - i) ? 1024 - row : b->h - i;
-			/* bytes copied as 16-bit dots */
-			sceGuCopyImage(GU_PSM_5650, ws / 2, row, 256, n, 512, TextDrawWork, 0, b->y0 + i, 256,
+			const int y = b->y0 + i, row = (s->ty + y) & 1023;
+			const int miss = ge_tmiss(y, row, ws, w);
+
+			for (n = 1; i + n < b->h && row + n < 1024 && ge_tmiss(y + n, row + n, ws, w) == miss; n++)
+				;
+			if (!miss)
+				continue;
+			for (k = 0; k < n; k++) {
+				GE_TCopy *t = &ge_tc[y + k];
+
+				t->src = row + k;
+				t->ws = ws;
+				t->w = w;
+				t->gen = GE_TRowGen[row + k];
+				t->all = GE_TGenAll;
+			}
+			sceGuCopyImage(GU_PSM_5650, ws / 2, row, w, n, 512, TextDrawWork, 0, y, 256,
 				       GE_VRAM(GE_TCOPY));
+			GE_Stat[GE_ST_COPY_BYTES] += n * w * 2;
 		}
-		GE_Stat[GE_ST_COPY_BYTES] += b->h * 512;
 	}
 }
 

@@ -1027,6 +1027,7 @@ static void psp_flush_line(void)
 	}
 	if (VLINE >= PSP_SCRBUF_ROWS)
 		return;		/* below the textures */
+	GE_ScrRowWritten(VLINE);	/* the GE's GVRAM copy may use the row */
 	psp_copy_line(ScrBufL + VLINE * 512, psp_line, (n > 512) ? 512 : n);
 	if (n > 512)
 		psp_copy_line(ScrBufR + VLINE * 256, psp_line + 512, n - 512);
