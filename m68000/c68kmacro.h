@@ -104,6 +104,43 @@
 #define WRITE_MEM_32PD(A, D)	WRITE_MEM_16((A) + 2, (D)); WRITE_MEM_16((A), (D) >> 16)
 #endif
 
+/*
+ * px68k: the memory handlers are always the cpu_*mem24* functions of
+ * x68k/mem_wrap.c (set in m68000.c), so call them directly instead of
+ * through the Read_xxx/Write_xxx pointers.  The 32-bit accesses are single
+ * calls doing the same two word accesses in the same order as above.
+ */
+#ifndef C68K_NO_DIRECT_MEM
+UINT8  cpu_readmem24(UINT32 adr);
+UINT16 cpu_readmem24_word(UINT32 adr);
+UINT32 cpu_readmem24_long(UINT32 adr);
+void   cpu_writemem24(UINT32 adr, UINT8 data);
+void   cpu_writemem24_word(UINT32 adr, UINT16 data);
+void   cpu_writemem24_long(UINT32 adr, UINT32 data);
+void   cpu_writemem24_long_pd(UINT32 adr, UINT32 data);
+
+#undef READ_MEM_8
+#undef READ_MEM_16
+#undef READ_MEM_32
+#undef READ_PCREL_8
+#undef READ_PCREL_16
+#undef READ_PCREL_32
+#undef WRITE_MEM_8
+#undef WRITE_MEM_16
+#undef WRITE_MEM_32
+#undef WRITE_MEM_32PD
+#define READ_MEM_8(A)			cpu_readmem24(A)
+#define READ_MEM_16(A)			cpu_readmem24_word(A)
+#define READ_MEM_32(A)			cpu_readmem24_long(A)
+#define READ_PCREL_8(A)			cpu_readmem24(A)
+#define READ_PCREL_16(A)		cpu_readmem24_word(A)
+#define READ_PCREL_32(A)		cpu_readmem24_long(A)
+#define WRITE_MEM_8(A, D)		cpu_writemem24(A, D)
+#define WRITE_MEM_16(A, D)		cpu_writemem24_word(A, D)
+#define WRITE_MEM_32(A, D)		cpu_writemem24_long(A, D)
+#define WRITE_MEM_32PD(A, D)	cpu_writemem24_long_pd(A, D)
+#endif
+
 #define GET_QUICK()				(((Opcode >> 9) - 1) & 7) + 1
 
 #define PUSH_16_F(D)			A7 -= 2; WRITE_MEM_16(A7, D);
