@@ -1608,7 +1608,8 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode);
 	{																		\
 		icount -= 10;														\
 		PC += MAKE_INT_8(Opcode);											\
-		if ((Opcode & 0xff) == 0xfa && icount > 0)							\
+		if (((Opcode & 0xff) == 0xfa || (Opcode & 0xff) == 0xfc ||			\
+		     (Opcode & 0xff) == 0xf6) && icount > 0)						\
 		{																	\
 			C68K_CALL_OUT													\
 			PC = C68k_Idle_Loop(CPU, PC, Opcode);							\

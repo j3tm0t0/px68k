@@ -70,7 +70,9 @@ DEV(ADPCM, 1) DEV(BG, 2) DEV(CRTC, 3) DEV(DMA, 4) DEV(FDC, 6)
 DEV(IOC, 7) DEV(Mcry, 8) DEV(MIDI, 9) DEV(Pal, 10) DEV(PIA, 11) DEV(RTC, 12)
 DEV(SASI, 13) DEV(SCC, 14) DEV(SCSI, 15) DEV(SRAM, 16) DEV(SysPort, 17)
 DEV(VCtrl, 18)
-BYTE MFP_Read(DWORD a) { return devread(5, a); }
+/* GPIP ($e88001) has no side effect in mfp.c and only changes between slices */
+static BYTE gpip;
+BYTE MFP_Read(DWORD a) { return a == 0xe88001 ? gpip : devread(5, a); }
 void MFP_Write(DWORD a, BYTE v) { devwrite(5, a, v); }
 /* TVRAM / GVRAM behave like memory (plus logging of writes) */
 BYTE TVRAM_Read(DWORD a) { a &= 0x7ffff; a ^= 1; return TVRAM[a]; }
@@ -180,6 +182,25 @@ int main(int argc, char **argv)
 			C68k_Set_Reg(&C68K, C68K_PC, (rnd() % 32) ? 0x1000 + ((rnd() & 0x3f) << 1) : rand_adr());
 			if (idle) {
 				C68k_Set_Reg(&C68K, C68K_PC, (rnd() % 3) ? 0x1014 : 0x1010);
+				switch (rnd() % 3) {	/* GPIP polls: btst Dn,(An) / btst #n,abs.l; bcc.s back */
+				case 0: {
+					int r = rnd() & 7;
+					*(WORD *)(MEM + 0x1012) = 0x0110 | ((rnd() & 7) << 9) | r;
+					*(WORD *)(MEM + 0x1014) = (*(WORD *)(MEM + 0x1014) & 0xff00) | (rnd() % 4 ? 0xfc : 0xfa);
+					if (rnd() % 4) C68K.A[r] = 0xe88001 | (rnd() % 4 ? 0 : 0xff000000);
+					if (rnd() % 2) C68k_Set_Reg(&C68K, C68K_PC, 0x1012);
+					break;
+				}
+				case 1:
+					*(WORD *)(MEM + 0x100c) = 0x0839;
+					*(WORD *)(MEM + 0x100e) = rnd() & (rnd() % 4 ? 7 : 0xffff);
+					*(WORD *)(MEM + 0x1010) = rnd() % 4 ? 0x00e8 : rnd();
+					*(WORD *)(MEM + 0x1012) = rnd() % 4 ? 0x8001 : 0x8000 | (rnd() & 0x3f);
+					*(WORD *)(MEM + 0x1014) = (*(WORD *)(MEM + 0x1014) & 0xff00) | (rnd() % 4 ? 0xf6 : 0xfa);
+					if (rnd() % 2) C68k_Set_Reg(&C68K, C68K_PC, 0x100c);
+					break;
+				}
+				gpip = rnd();
 				if (rnd() % 2) { DWORD a = (C68K.A[MEM[0x1010] & 7] + (INT16)*(WORD *)(MEM + 0x1012)) & 0x1ffff; *(WORD *)(MEM + (a & ~1)) = (rnd() % 2) ? 0 : (rnd() % 2) ? (WORD)C68K.D[(MEM[0x1011] >> 1) & 7] + (rnd() % 3) - 1 : rnd(); }
 			}
 			if (rnd() % 4 == 0) C68k_Set_IRQ(&C68K, rnd() % 8, rnd() % 4);
