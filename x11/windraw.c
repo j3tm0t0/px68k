@@ -330,10 +330,12 @@ static unsigned psp_ge_wait(void)
  */
 static void *psp_ge_build(int passes)
 {
-	unsigned t0 = sceKernelGetSystemTimeLow();
+	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
 	void *l = GE_Build(psp_drawbuf, passes);
 
+	t1 = sceKernelGetSystemTimeLow();
 	sceKernelDcacheWritebackAll();
+	GE_Stat[GE_ST_BUILD_US + 4] += sceKernelGetSystemTimeLow() - t1;
 	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
 	return l;
 }

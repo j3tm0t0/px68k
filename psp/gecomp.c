@@ -1304,10 +1304,13 @@ static void GE_Render(void *fbp, int passes)
 {
 	unsigned int *tclut[GE_NPAL], *gclut[GE_NPAL];
 	const int dither = sceGuGetStatus(GU_DITHER);
+	unsigned t0 = sceKernelGetSystemTimeLow(), t1;
 	int i, k;
 
 	if (!ge_nband)
 		return;
+#define GE_BUILD_TIME(n)	do { t1 = sceKernelGetSystemTimeLow(); \
+				     GE_Stat[GE_ST_BUILD_US + (n)] += t1 - t0; t0 = t1; } while (0)
 
 	/* CLUTs: alpha 0 for dot 0 (transparent where drawn so) */
 	for (i = 0; i < ge_npal; i++) {
@@ -1329,12 +1332,14 @@ static void GE_Render(void *fbp, int passes)
 	sceGuColorFunc(GU_NOTEQUAL, 0, 0xffffff);
 	sceGuDepthMask(GU_FALSE);	/* depth writes on (only with the test on) */
 	sceGuTexFlush();
+	GE_BUILD_TIME(0);
 
 	if (passes & GE_P_COPY) {
 		for (i = 0; i < ge_nband; i++)
 			ge_copy(&ge_band[i]);
 		sceGuTexSync();
 	}
+	GE_BUILD_TIME(1);
 
 	/*
 	 * The text/BG layers: per band the fill, then BG and text in the order
@@ -1368,6 +1373,7 @@ static void GE_Render(void *fbp, int passes)
 		sceGuTexSync();
 		sceGuTexFlush();
 	}
+	GE_BUILD_TIME(2);
 
 	/* the screen */
 	if (passes & (GE_P_GRP | GE_P_COMP)) {
@@ -1397,6 +1403,8 @@ static void GE_Render(void *fbp, int passes)
 			}
 		}
 	}
+	GE_BUILD_TIME(3);
+#undef GE_BUILD_TIME
 
 	/* back to what WinDraw_Draw expects */
 	sceGuDisable(GU_ALPHA_TEST);
@@ -1479,10 +1487,12 @@ void GE_LogStats(void)
 		   GE_Stat[GE_ST_RENDERS] / f, GE_Stat[GE_ST_RENDERS] * 100 / f % 100, GE_Stat[GE_ST_DRAWS] / f,
 		   GE_Stat[GE_ST_VERTS] / f, GE_Stat[GE_ST_PIXELS] / f, GE_Stat[GE_ST_RENDER_US] / f,
 		   GE_Stat[GE_ST_WAIT_US] / f, GE_Stat[GE_ST_GE_US] / f, GE_TimeSync ? "on" : "off");
-	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us\n",
+	log_printf("ge per frame: wait at frame end %u us, cpu-line waits %u.%02u (%u us), bg queue replay %u us; "
+		   "build us: setup %u copy %u layer %u screen %u dcache %u\n",
 		   GE_Stat[GE_ST_FRAME_WAIT_US] / f, GE_Stat[GE_ST_LINE_WAITS] / f,
 		   GE_Stat[GE_ST_LINE_WAITS] * 100 / f % 100, GE_Stat[GE_ST_LINE_WAIT_US] / f,
-		   GE_Stat[GE_ST_DONE_US] / f);
+		   GE_Stat[GE_ST_DONE_US] / f, GE_Stat[GE_ST_BUILD_US] / f, GE_Stat[GE_ST_BUILD_US + 1] / f,
+		   GE_Stat[GE_ST_BUILD_US + 2] / f, GE_Stat[GE_ST_BUILD_US + 3] / f, GE_Stat[GE_ST_BUILD_US + 4] / f);
 	log_printf("ge per frame: copied %u bytes; pass us (ge time): copy %u fill %u bg-below %u text %u "
 		   "bg-above %u grp %u comp %u\n", GE_Stat[GE_ST_COPY_BYTES] / f,
 		   GE_Stat[GE_ST_PASS_US + 0] / f, GE_Stat[GE_ST_PASS_US + 1] / f, GE_Stat[GE_ST_PASS_US + 2] / f,

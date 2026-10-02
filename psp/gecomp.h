@@ -129,7 +129,8 @@ enum {
 	GE_ST_LINE_WAITS,	/* CPU lines that waited for the GE */
 	GE_ST_LINE_WAIT_US,	/* ... and how long */
 	GE_ST_DONE_US,		/* CPU time of GE_Done (queued BG writes) */
-	GE_ST_FRAMES,		/* frames shown */
+	GE_ST_BUILD_US,		/* + 0-4: CPU time of the build: CLUTs/setup, copy, layer, screen, D-cache */
+	GE_ST_FRAMES = GE_ST_BUILD_US + 5,	/* frames shown */
 	GE_ST_CPU_REASON,	/* + GE_R_*: lines left to the CPU, by reason */
 	GE_ST_N = GE_ST_CPU_REASON + 10
 };
