@@ -605,6 +605,13 @@ static unsigned psp_cap_frame;
 static int psp_cap_saved_skip;
 static char psp_cap_path[272];
 
+/* capf/benchf: the RTC follows emulated time from a fixed date, not the host clock. */
+extern "C" time_t (*RTC_TimeHook)(void);
+static time_t psp_fixed_time(void)
+{
+	return 946684800 + psp_frame_no * 10 / 555;	/* 2000-01-01, ~55.5 frames/s */
+}
+
 /* Write the composited X68000 screen (ScrBuf, RGB565) for pixel comparisons. */
 static void psp_capture(void)
 {
@@ -679,6 +686,7 @@ static void psp_debug_frame(unsigned us)
 		psp_capture();
 		psp_cap_frame = 0;
 		Config.FrameRate = psp_cap_saved_skip;
+		RTC_TimeHook = NULL;
 		DSound_Play();
 	}
 	if (psp_bf_end) {
@@ -716,6 +724,7 @@ static void psp_debug_frame(unsigned us)
 				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
 				   prof_count[PROF_LINES], prof_count[PROF_FRAMES]);
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+			RTC_TimeHook = NULL;
 			DSound_Play();
 			memset(prof_us, 0, sizeof(prof_us));
 			memset(prof_count, 0, sizeof(prof_count));
@@ -808,6 +817,7 @@ static void psp_debug_poll(void)
 			psp_bf_prof = dx != 0;
 			psp_frame_no = 0;
 			DSound_Stop();	/* deterministic, see capf */
+			RTC_TimeHook = psp_fixed_time;
 			WinX68k_Reset();
 			log_printf("benchf: reset, measuring from frame %u\n", bf_start);
 		} else if (sscanf(cmd, "capf %u", &bf_start) == 1 && bf_start > 0 && !psp_bf_end && !psp_cap_frame) {
@@ -818,6 +828,7 @@ static void psp_debug_poll(void)
 			psp_frame_no = 0;
 			/* The sound callback pulls ADPCM data in real time; synthesize on this thread only. */
 			DSound_Stop();
+			RTC_TimeHook = psp_fixed_time;
 			WinX68k_Reset();
 			log_printf("capf: reset, capturing frame %u\n", bf_start);
 		} else if (strcmp(cmd, "reset") == 0) {

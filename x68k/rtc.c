@@ -28,12 +28,15 @@ void RTC_Init(void)
 // -----------------------------------------------------------------------
 //   とけいのりーど
 // -----------------------------------------------------------------------
+/* Replaces the host clock, e.g. for reproducible test runs. */
+time_t (*RTC_TimeHook)(void);
+
 BYTE FASTCALL RTC_Read(DWORD adr)
 {
 	BYTE ret = 0;
 	struct tm *tm;
 	time_t t;
-	t = time(NULL);
+	t = RTC_TimeHook ? RTC_TimeHook() : time(NULL);
 	tm = localtime(&t);
 
 	adr &= 0x1f;
