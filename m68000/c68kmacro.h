@@ -38,8 +38,15 @@
 #define LOW_NIBBLE(A)			((A) & 0x0f)
 #define HIGH_NIBBLE(A)			((A) & 0xf0)
 
-#define USE_CYCLES(A)			CPU->ICount -= (A);
-#define RELEASE_CYCLES()		CPU->ICount = 0;
+/*
+ * The cycle counter is the local icount of C68k_Exec (kept in a register);
+ * CPU->ICount is only up to date across the calls that leave the core
+ * (memory handlers, callbacks), where a device may read or clear it.
+ */
+#define USE_CYCLES(A)			icount -= (A);
+#define RELEASE_CYCLES()		icount = 0;
+#define C68K_CALL_OUT			CPU->ICount = icount;
+#define C68K_CALL_IN			icount = CPU->ICount;
 
 #define READ_REG_8(A)			MAKE_UINT_8(A)
 #define READ_REG_16(A)			MAKE_UINT_16(A)
@@ -129,16 +136,105 @@ void   cpu_writemem24_long_pd(UINT32 adr, UINT32 data);
 #undef WRITE_MEM_16
 #undef WRITE_MEM_32
 #undef WRITE_MEM_32PD
-#define READ_MEM_8(A)			cpu_readmem24(A)
-#define READ_MEM_16(A)			cpu_readmem24_word(A)
-#define READ_MEM_32(A)			cpu_readmem24_long(A)
-#define READ_PCREL_8(A)			cpu_readmem24(A)
-#define READ_PCREL_16(A)		cpu_readmem24_word(A)
-#define READ_PCREL_32(A)		cpu_readmem24_long(A)
-#define WRITE_MEM_8(A, D)		cpu_writemem24(A, D)
-#define WRITE_MEM_16(A, D)		cpu_writemem24_word(A, D)
-#define WRITE_MEM_32(A, D)		cpu_writemem24_long(A, D)
-#define WRITE_MEM_32PD(A, D)	cpu_writemem24_long_pd(A, D)
+/*
+ * The main RAM fast paths of mem_wrap.c, inlined: the same tests and the
+ * same stores (MemByteAccess, BusErrFlag) as cpu_readmem24* /
+ * cpu_writemem24*, which do everything else (and test again).  MEM keeps
+ * every 68000 word in host order (bytes at addr ^ 1).  C68K_CALL_OUT /
+ * C68K_CALL_IN bracket the calls (state a device handler may look at).
+ */
+extern UINT8 *MEM;
+extern UINT32 BusErrFlag, MemByteAccess;
+#define C68K_RAM_END	0x00a00000
+#ifndef C68K_CALL_RAM
+#define C68K_LIKELY(x)	__builtin_expect(!!(x), 1)
+#else	/* for comparison: always call mem_wrap.c */
+#define C68K_LIKELY(x)	0
+#endif
+#define C68K_RAM16(a)	(*(UINT16 *)(MEM + (a)))
+
+#define READ_MEM_8(A) ({													\
+	UINT32 ca_ = (A), cv_;													\
+	if (C68K_LIKELY((ca_ & 0xffffff) < C68K_RAM_END && !(BusErrFlag & 1)))			\
+		cv_ = MEM[(ca_ & 0xffffff) ^ 1];									\
+	else {																	\
+		C68K_CALL_OUT														\
+		cv_ = cpu_readmem24(ca_);											\
+		C68K_CALL_IN														\
+	}																		\
+	(UINT8)cv_; })
+#define READ_MEM_16(A) ({													\
+	UINT32 ca_ = (A), cv_;													\
+	if (C68K_LIKELY(!(ca_ & 1) && (ca_ & 0xffffff) < C68K_RAM_END)) {				\
+		BusErrFlag = 0;														\
+		cv_ = C68K_RAM16(ca_ & 0xffffff);									\
+	} else {																\
+		C68K_CALL_OUT														\
+		cv_ = cpu_readmem24_word(ca_);										\
+		C68K_CALL_IN														\
+	}																		\
+	(UINT16)cv_; })
+#define READ_MEM_32(A) ({													\
+	UINT32 ca_ = (A), cv_;													\
+	if (C68K_LIKELY(!(ca_ & 1) && (ca_ & 0xffffff) <= C68K_RAM_END - 4)) {			\
+		BusErrFlag = 0;														\
+		cv_ = (C68K_RAM16(ca_ & 0xffffff) << 16) |							\
+			C68K_RAM16((ca_ & 0xffffff) + 2);								\
+	} else {																\
+		C68K_CALL_OUT														\
+		cv_ = cpu_readmem24_long(ca_);										\
+		C68K_CALL_IN														\
+	}																		\
+	cv_; })
+#define READ_PCREL_8(A)			READ_MEM_8(A)
+#define READ_PCREL_16(A)		READ_MEM_16(A)
+#define READ_PCREL_32(A)		READ_MEM_32(A)
+#define WRITE_MEM_8(A, D) ({												\
+	UINT32 ca_ = (A), cv_ = (D);											\
+	if (C68K_LIKELY((ca_ & 0xffffff) < C68K_RAM_END)) {								\
+		MemByteAccess = 0;													\
+		BusErrFlag = 0;														\
+		MEM[(ca_ & 0xffffff) ^ 1] = cv_;									\
+	} else {																\
+		C68K_CALL_OUT														\
+		cpu_writemem24(ca_, cv_);											\
+		C68K_CALL_IN														\
+	} })
+#define WRITE_MEM_16(A, D) ({												\
+	UINT32 ca_ = (A), cv_ = (D);											\
+	if (C68K_LIKELY(!(ca_ & 1) && (ca_ & 0xffffff) < C68K_RAM_END)) {				\
+		MemByteAccess = 0;													\
+		BusErrFlag = 0;														\
+		C68K_RAM16(ca_ & 0xffffff) = cv_;									\
+	} else {																\
+		C68K_CALL_OUT														\
+		cpu_writemem24_word(ca_, cv_);										\
+		C68K_CALL_IN														\
+	} })
+#define WRITE_MEM_32(A, D) ({												\
+	UINT32 ca_ = (A), cv_ = (D);											\
+	if (C68K_LIKELY(!(ca_ & 1) && (ca_ & 0xffffff) <= C68K_RAM_END - 4)) {			\
+		MemByteAccess = 0;													\
+		BusErrFlag = 0;														\
+		C68K_RAM16(ca_ & 0xffffff) = cv_ >> 16;								\
+		C68K_RAM16((ca_ & 0xffffff) + 2) = cv_;								\
+	} else {																\
+		C68K_CALL_OUT														\
+		cpu_writemem24_long(ca_, cv_);										\
+		C68K_CALL_IN														\
+	} })
+#define WRITE_MEM_32PD(A, D) ({												\
+	UINT32 ca_ = (A), cv_ = (D);											\
+	if (C68K_LIKELY(!(ca_ & 1) && (ca_ & 0xffffff) <= C68K_RAM_END - 4)) {			\
+		MemByteAccess = 0;													\
+		BusErrFlag = 0;														\
+		C68K_RAM16((ca_ & 0xffffff) + 2) = cv_;								\
+		C68K_RAM16(ca_ & 0xffffff) = cv_ >> 16;								\
+	} else {																\
+		C68K_CALL_OUT														\
+		cpu_writemem24_long_pd(ca_, cv_);									\
+		C68K_CALL_IN														\
+	} })
 #endif
 
 #define GET_QUICK()				(((Opcode >> 9) - 1) & 7) + 1
@@ -233,7 +329,9 @@ void   cpu_writemem24_long_pd(UINT32 adr, UINT32 data);
 			CPU->IRQState = CLEAR_LINE;										\
 		CPU->IRQLine = 0;													\
 		SWAP_SP()															\
+		C68K_CALL_OUT														\
 		res = CPU->Interrupt_CallBack(adr);									\
+		C68K_CALL_IN									\
 		if (res < 0) { \
 			res = adr + 24; \
 		} \
@@ -1508,16 +1606,14 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode);
 {																			\
 	if (COND_##cond())														\
 	{																		\
-		/* ICount stored on every path just before the jump, as RET() */	\
-		INT32 c = CPU->ICount - 10;											\
+		icount -= 10;														\
 		PC += MAKE_INT_8(Opcode);											\
-		if ((Opcode & 0xff) == 0xfa && c > 0)								\
+		if ((Opcode & 0xff) == 0xfa && icount > 0)							\
 		{																	\
-			CPU->ICount = c;												\
+			C68K_CALL_OUT													\
 			PC = C68k_Idle_Loop(CPU, PC, Opcode);							\
-			c = CPU->ICount;												\
+			C68K_CALL_IN													\
 		}																	\
-		CPU->ICount = c;													\
 		goto C68k_Exec_Next;												\
 	}																		\
 	RET(8)																	\

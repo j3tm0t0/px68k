@@ -1192,7 +1192,9 @@ OP(reset)
 {
 	if (FLAG_S)
 	{
+		C68K_CALL_OUT
 		CPU->Reset_CallBack();
+		C68K_CALL_IN
 		RET(132)
 	}
 	SWAP_SP_NOCHECK()
