@@ -289,6 +289,19 @@ static int ge_eval(GE_State *s)
 
 	if (s->dotx > 512 && (s->mode == GE_G || s->mode == GE_GM))
 		return GE_R_WIDTH;	/* wider than 512 dots: no graphics (ge_wide) */
+	{
+		/*
+		 * The layer of lines up to 512 dots is ScrBufR (dots 512-767):
+		 * not in a frame whose lines were wider (the CRTC changed in
+		 * the frame), which ScrBufR shows.
+		 */
+		static unsigned wideframe = (unsigned)-1;
+
+		if (s->dotx > 512)
+			wideframe = GE_Stat[GE_ST_FRAMES];
+		else if (wideframe == GE_Stat[GE_ST_FRAMES] && (s->mode == GE_M || s->mode == GE_GM))
+			return GE_R_WIDTH;
+	}
 
 	if (s->mode == GE_G || s->mode == GE_GM) {
 		int p;
