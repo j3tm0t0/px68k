@@ -284,7 +284,7 @@ struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struc
 
 #ifdef PSP
 /*
- * Frame rate overlay ("Show FPS" in the menu): "FPS <emulated>/<shown>",
+ * Frame rate overlay ("Show FPS" in the menu): emulated frames per second,
  * counted in x11/winx68k.cpp, drawn 2x from a tiny 3x5 font texture.
  */
 int WinDraw_FpsEmu10 = -1;	/* emulated frames per second x10; -1: not measured yet */
@@ -325,8 +325,7 @@ static void fps_overlay(void)
 
 	if (WinDraw_FpsEmu10 < 0)
 		return;
-	snprintf(text, sizeof(text), "FPS %d.%d/%d", WinDraw_FpsEmu10 / 10, WinDraw_FpsEmu10 % 10,
-		 WinDraw_FpsShown);
+	snprintf(text, sizeof(text), "%d.%d", WinDraw_FpsEmu10 / 10, WinDraw_FpsEmu10 % 10);
 	if (strcmp(text, fps_text)) {
 		strcpy(fps_text, text);
 		for (i = 0; i < FPS_TEX_W * FPS_TEX_H; i++)
