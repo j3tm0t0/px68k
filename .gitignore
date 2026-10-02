@@ -16,3 +16,4 @@ tools/fonts-cache/
 /EBOOT.PBP
 /PARAM.SFO
 __pycache__/
+.claude/

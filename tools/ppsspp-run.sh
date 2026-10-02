@@ -1,7 +1,7 @@
 #!/bin/sh
 # Copy the current build into PPSSPP's memory stick and start it there.
 #
-#   tools/ppsspp-run.sh            (re)start PPSSPP with ./EBOOT.PBP
+#   tools/ppsspp-run.sh            (re)start PPSSPP with ./EBOOT.PBP (or $EBOOT)
 #
 # Expects PSP/GAME/PX68K in PPSSPP's memory stick to hold debug.key, .keropi/
 # (iplrom.dat, cgrom.dat, config) and disk/. Waits until the debug port
@@ -12,7 +12,7 @@ PPSSPP=/Applications/PPSSPPSDL.app/Contents/MacOS/PPSSPPSDL
 DIR="$HOME/.config/ppsspp/PSP/GAME/PX68K"
 
 pkill -x PPSSPPSDL 2>/dev/null && sleep 1 || true
-cp EBOOT.PBP "$DIR/EBOOT.PBP"
+cp "${EBOOT:-EBOOT.PBP}" "$DIR/EBOOT.PBP"
 rm -f "$DIR/px68k.log"
 "$PPSSPP" --windowed --escape-exit "$DIR/EBOOT.PBP" >/dev/null 2>&1 &
 i=0

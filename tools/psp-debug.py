@@ -16,6 +16,7 @@
                                       reset, then time <frames> frames from
                                       <frame> on flat out without the WLAN, once
                                       per frame skip given; prints the results
+                                      (BENCH_PROF=0: without the profiler)
   psp-debug.py pause | resume         stop / restart the emulation
   psp-debug.py back                   return to pspbrew.dev (ends `psp.py run`)
   psp-debug.py bench [skip...]        with the profiler on, run "bench" at each
@@ -232,7 +233,7 @@ def main():
         for skip in args[2:]:
             s = connect()
             drain(s)
-            s.sendall(f"benchf {start} {frames} {skip}\n".encode())
+            s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '1')}\n".encode())
             s.close()
             deadline = time.time() + float(os.environ.get("BENCH_TIMEOUT", "900"))
             result = None
@@ -254,7 +255,7 @@ def main():
                 except socket.timeout:
                     pass
                 s.close()
-                run = text.decode("utf-8", "replace").split(f"debug: > benchf {start} {frames} {skip}")[-1]
+                run = text.decode("utf-8", "replace").split(f"debug: > benchf {start} {frames} {skip} ")[-1]
                 for line in run.splitlines():
                     if line.startswith("benchf: ") and " us/frame" in line:
                         result = line

@@ -595,7 +595,7 @@ static int psp_paused;
  */
 static unsigned psp_frame_no, psp_bf_start, psp_bf_end;
 static SceUInt64 psp_bf_t0;
-static int psp_bf_skip, psp_bf_saved_skip, psp_bf_saved_prof;
+static int psp_bf_skip, psp_bf_prof, psp_bf_saved_skip, psp_bf_saved_prof;
 /* capf: frame whose composited screen goes to cap.raw (0: none). */
 static unsigned psp_cap_frame;
 static int psp_cap_saved_skip;
@@ -685,7 +685,7 @@ static void psp_debug_frame(unsigned us)
 			psp_bf_saved_prof = prof_on;
 			Config.FrameRate = psp_bf_skip;
 			Config.NoWaitMode = 1;
-			prof_on = 1;
+			prof_on = psp_bf_prof;	/* the timers cost time too */
 			memset(prof_us, 0, sizeof(prof_us));
 			memset(prof_count, 0, sizeof(prof_count));
 			psp_bf_t0 = sceKernelGetSystemTimeWide();
@@ -795,12 +795,13 @@ static void psp_debug_poll(void)
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
 			psp_exec_us = psp_exec_max_us = 0;
-		} else if (sscanf(cmd, "benchf %u %u %d", &bf_start, &bf_frames, &n) == 3 && bf_start > 0 &&
+		} else if ((dx = 1, sscanf(cmd, "benchf %u %u %d %d", &bf_start, &bf_frames, &n, &dx)) >= 3 && bf_start > 0 &&
 			   bf_frames > 0 && n >= 1 && n <= 6 && !psp_bf_end && !psp_bench_end) {
 			/* Deterministic: same frames after a reset, run flat out. */
 			psp_bf_start = bf_start;
 			psp_bf_end = bf_start + bf_frames;
 			psp_bf_skip = n;
+			psp_bf_prof = dx != 0;
 			psp_frame_no = 0;
 			DSound_Stop();	/* deterministic, see capf */
 			WinX68k_Reset();
@@ -830,7 +831,7 @@ static void psp_debug_poll(void)
 			log_printf("no wait %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, bench <sec>, benchf <frame> <frames> <skip>, capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, bench <sec>, benchf <frame> <frames> <skip> [prof 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}

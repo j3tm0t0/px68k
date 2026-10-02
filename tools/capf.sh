@@ -3,7 +3,7 @@
 # reset and print its md5. A fresh start each time: WinX68k_Reset() does not
 # clear everything, so only the first reset of a run is reproducible.
 #
-#   tools/capf.sh <frame> [out.raw]
+#   tools/capf.sh <frame> [out.raw]      (EBOOT=... to use another build)
 set -e
 cd "$(dirname "$0")/.."
 FRAME=$1
