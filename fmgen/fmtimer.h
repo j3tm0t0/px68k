@@ -16,6 +16,7 @@ namespace FM
 	public:
 		void	Reset();
 		bool	Count(int32 us);
+		bool	CountEvent(int32 us);
 		int32	GetNextEvent();
 	
 	protected:
@@ -46,6 +47,22 @@ inline void Timer::Reset()
 {
 	timera_count = 0;
 	timerb_count = 0;
+}
+
+// Called every raster line: inline the common case where neither running
+// timer expires (the same subtractions as CountEvent, nothing else happens).
+inline bool Timer::Count(int32 us)
+{
+	int32 a = timera_count, b = timerb_count;
+	if ((!a || a - (us << 16) > 0) && (!b || b - (us << 12) > 0))
+	{
+		if (a)
+			timera_count = a - (us << 16);
+		if (b)
+			timerb_count = b - (us << 12);
+		return false;
+	}
+	return CountEvent(us);
 }
 
 } // namespace FM
