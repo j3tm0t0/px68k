@@ -39,25 +39,25 @@
 #define HIGH_NIBBLE(A)			((A) & 0xf0)
 
 /*
- * In every build (C68K_NO_DIRECT_MEM / C68K_NO_REG_ICOUNT leave them out):
+ * In every build (C68K_NO_DIRECT_MEM leaves it out):
  *   C68K_DIRECT_MEM	the mem_wrap.c handlers called directly, not through
  *			the Read_xxx/Write_xxx pointers (and a long write is
  *			one call)
- *   C68K_REG_ICOUNT	the cycle counter in a local of C68k_Exec
- * Only in the PSP build, where it gained (none or a loss on an x86 host,
- * tools/bench; C68K_CALL_RAM leaves it out there too):
+ * Only in the PSP build, where they gained (none or a loss on an x86 host,
+ * tools/bench; C68K_CALL_RAM / C68K_NO_REG_ICOUNT leave them out there too):
  *   C68K_INLINE_RAM	with C68K_DIRECT_MEM: the main RAM fast paths inlined
+ *   C68K_REG_ICOUNT	the cycle counter in a local of C68k_Exec
  * The idle loop skips (C68k_Idle_Loop) are in every build unless
  * C68K_NO_IDLE.
  */
 #ifndef C68K_NO_DIRECT_MEM
 #define C68K_DIRECT_MEM
 #endif
-#ifndef C68K_NO_REG_ICOUNT
-#define C68K_REG_ICOUNT
-#endif
 #if defined(PSP) && !defined(C68K_CALL_RAM)
 #define C68K_INLINE_RAM
+#endif
+#if defined(PSP) && !defined(C68K_NO_REG_ICOUNT)
+#define C68K_REG_ICOUNT
 #endif
 
 /*
