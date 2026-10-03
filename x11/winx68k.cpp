@@ -428,10 +428,15 @@ void WinX68k_Exec(void)
 			C68K.ICount = n;
 			C68k_Exec(&C68K, C68K.ICount);
 			m = (n-C68K.ICount-m68000_ICountBk);			// 経過クロック数
-			ClkUsed += m*10;
-			usedclk = ClkUsed/clkdiv;
+			if ( (clkdiv==10)&&(!ClkUsed) ) {
+				/* (0+m*10)/10 == m and leaves ClkUsed 0: no division */
+				usedclk = m;
+			} else {
+				ClkUsed += m*10;
+				usedclk = ClkUsed/clkdiv;
+				ClkUsed -= usedclk*clkdiv;
+			}
 			clk_line += usedclk;
-			ClkUsed -= usedclk*clkdiv;
 			ICount -= m;
 			clk_count += m;
 			C68K.ICount = m68000_ICountBk = 0;
@@ -439,9 +444,10 @@ void WinX68k_Exec(void)
 
 		MFP_Timer(usedclk);
 		RTC_Timer(usedclk);
-		DMA_Exec(0);
-		DMA_Exec(1);
-		DMA_Exec(2);
+		/* DMA_Exec does nothing (no side effect) unless the channel is active */
+		if ( DMA[0].CSR&0x08 ) DMA_Exec(0);
+		if ( DMA[1].CSR&0x08 ) DMA_Exec(1);
+		if ( DMA[2].CSR&0x08 ) DMA_Exec(2);
 
 		if ( clk_count>=clk_next ) {
 			//OPM_RomeoOut(Config.BufferSize*5);
