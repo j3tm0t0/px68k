@@ -832,7 +832,7 @@ static void send_key(int flag)
 
 void Keyboard_skbd(void)
 {
-	static kx = 1, ky = 2;
+	static int kx = 1, ky = 2;
 	BYTE joy;
 
 	joy = get_joy_downstate();
