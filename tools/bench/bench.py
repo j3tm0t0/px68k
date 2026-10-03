@@ -57,6 +57,8 @@ VARIANTS = [
     ('old_gvram', 'gvram.c as on master (no 4-page pass)', {'x68k/gvram.c': BASE_REV}, '', 'multi_shim.c', {'rend'}),
     ('no_multi', 'gvram.c decoders, no 4-page pass (Grp_DrawLine4Multi)', {'x68k/gvram.c': 'cae673e'}, '', 'multi_shim.c', {'rend'}),
     ('old_windraw', 'windraw.c compositing as on master (WD_* macros)', {'x11/windraw.c': 'e590392^'}, '', None, {'rend'}),
+    ('psp_grp4opaq', 'PSP only: an opaque 16-colour page through the pair table (GRP4_OPAQ_TABLE)', {}, '-DGRP4_OPAQ_TABLE',
+     None, {'rend'}),
 ]
 
 # group, variant with it, variant without it, tests that show it
@@ -79,6 +81,7 @@ GROUPS = [
     ('bg.c rewrite', 'head', 'old_bg', ['bg256', 'g16x4']),
     ('gvram.c decoders + 4-page pass', 'head', 'old_gvram', ['g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'bg256']),
     ('4-page pass (Grp_DrawLine4Multi)', 'head', 'no_multi', ['g16x4']),
+    ('PSP only: opaque 16-colour page by pair table', 'psp_grp4opaq', 'head', ['g16x1', 'bg256', 'g16x4']),
     ('windraw.c wd_dst compositing', 'head', 'old_windraw', ['bg256', 'g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'text768']),
     ('all of it (generic build)', 'head', 'base', None),
 ]
@@ -86,6 +89,16 @@ GROUPS = [
 # done in one binary: the new way, the old way (copies of code that cannot be called alone)
 PAIRS = [
     ('PSP only: clk_next without a division per line', 'clknext_step', 'clknext_div'),
+]
+
+# The core is an interpreter in one huge function: how gcc happens to lay
+# out its handlers moved single-flag comparisons by up to 20% either way on
+# x86.  Every core variant is built with these alignments and the gains of
+# a group are taken over all of them (and shown per layout).
+LAYOUTS = [
+    '',
+    '-falign-functions=64 -falign-jumps=32 -falign-loops=32 -falign-labels=16',
+    '-fno-align-functions -fno-align-jumps -fno-align-loops -fno-align-labels',
 ]
 
 DIRS = ['m68000', 'x68k', 'x11', 'win32api', 'fmgen']
@@ -144,17 +157,19 @@ def build(name, src, cflags, shim, which):
     for bn, (cc, files) in bins.items():
         if bn not in which:
             continue
-        h = hashlib.sha256(' '.join(cc + CFLAGS + shlex.split(cflags)).encode())
-        hdrs = []
-        for d in ('x11', 'x68k', 'fmgen', 'win32api', 'm68000'):
-            hdrs += sorted(os.path.join(src, d, f) for f in os.listdir(os.path.join(src, d))
-                           if f.endswith('.h') or f == 'c68k_op.c' or f == 'c68k_ini.c')
-        for f in files + hdrs:
-            h.update(open(f, 'rb').read())
-        exe = os.path.join(OUT, name, bn)
-        sh(cc + CFLAGS + shlex.split(cflags) + ['-w'] + inc + ['-o', exe] +
-           [f for f in files if not f.endswith('.h')] + ['-lm'])
-        out[bn] = (exe, h.hexdigest())
+        for li, lay in enumerate(LAYOUTS if bn == 'core' else ['']):
+            flags = CFLAGS + shlex.split(lay) + shlex.split(cflags)
+            h = hashlib.sha256(' '.join(cc + flags).encode())
+            hdrs = []
+            for d in ('x11', 'x68k', 'fmgen', 'win32api', 'm68000'):
+                hdrs += sorted(os.path.join(src, d, f) for f in os.listdir(os.path.join(src, d))
+                               if f.endswith('.h') or f == 'c68k_op.c' or f == 'c68k_ini.c')
+            for f in files + hdrs:
+                h.update(open(f, 'rb').read())
+            key = bn if bn != 'core' else 'core#%d' % li
+            exe = os.path.join(OUT, name, key.replace('#', '_'))
+            sh(cc + flags + ['-w'] + inc + ['-o', exe] + [f for f in files if not f.endswith('.h')] + ['-lm'])
+            out[key] = (exe, h.hexdigest())
     return out
 
 
@@ -178,8 +193,8 @@ def run(exe, secs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rounds', type=int, default=9)
-    ap.add_argument('--secs', type=float, default=0.3)
+    ap.add_argument('--rounds', type=int, default=7)
+    ap.add_argument('--secs', type=float, default=0.25)
     ap.add_argument('--only', default='')
     ap.add_argument('--json', default='')
     a = ap.parse_args()
@@ -220,9 +235,10 @@ def main():
             for bn in torun[name]:
                 hv = record('head', bn, run(bins['head'][bn][0], a.secs))
                 v = record(name, bn, run(bins[name][bn][0], a.secs))
+                lay = int(bn.split('#')[1]) if '#' in bn else 0
                 for k, x in v.items():
                     if hv.get(k):
-                        rel.setdefault((name, k), []).append(x / hv[k])
+                        rel.setdefault((name, k), {}).setdefault(lay, []).append(x / hv[k])
     tests = []
     for (name, k) in vals:
         if k not in tests:
@@ -231,14 +247,23 @@ def main():
         xs = vals.get((name, k)) or vals.get(('head', k))
         return statistics.median(xs) if xs else None
     def ratios(name, k):
-        """per round: the variant's value / HEAD's (1 for HEAD or HEAD's binary)"""
-        if name == 'head' or (name, k) not in rel:
-            return [1.0] * a.rounds
-        return rel[(name, k)]
+        """{layout: per round, the variant's value / HEAD's}, None for HEAD's binary"""
+        return None if name == 'head' else rel.get((name, k))
     def gain(w, wo, k):
-        """with / without per round -> median gain, lowest and highest"""
-        g = sorted(1 - x / y for x, y in zip(ratios(w, k), ratios(wo, k)))
-        return statistics.median(g) * 100, g[0] * 100, g[-1] * 100
+        """with / without per round and layout -> median gain, lowest, highest, per layout"""
+        rw, ro = ratios(w, k), ratios(wo, k)
+        if rw is None and ro is None:
+            return None
+        lays = sorted((rw or ro).keys())
+        allg, per = [], []
+        for l in lays:
+            xs = rw[l] if rw else [1.0] * len(ro[l])
+            ys = ro[l] if ro else [1.0] * len(rw[l])
+            g = [1 - x / y for x, y in zip(xs, ys)]
+            allg += g
+            per.append(statistics.median(g) * 100)
+        allg.sort()
+        return statistics.median(allg) * 100, allg[0] * 100, allg[-1] * 100, per
     lines = []
     p = lines.append
     p('## px68k optimization groups, x86 (32-bit) host')
@@ -246,11 +271,12 @@ def main():
     p('Lower values are faster.  core: us per 1M 68000 cycles; periph/fm: ns per call or per sample; '
       'rend: ns per screen line.  Each value is the best of 3 windows of a run of %.2f s per test; '
       'every run of a variant follows a run of HEAD, %d rounds.  Gain: how much less time the code takes '
-      'with the optimization, median over the rounds of the paired runs, and the lowest and highest round.'
-      % (a.secs, a.rounds))
+      'with the optimization, median over the rounds of the paired runs, and the lowest and highest round; '
+      'core tests: over the %d code layouts too (gcc alignments: default / large / none), with the median '
+      'per layout.' % (a.secs, a.rounds, len(LAYOUTS)))
     p('')
-    p('| group | test | with | without | gain | lowest .. highest |')
-    p('|---|---|---:|---:|---:|---:|')
+    p('| group | test | with | without | gain | lowest .. highest | per layout |')
+    p('|---|---|---:|---:|---:|---:|---|')
     for g, w, wo, ts in GROUPS:
         if w not in bins or wo not in bins:
             continue
@@ -258,16 +284,18 @@ def main():
             mw, mo = med(w, k), med(wo, k)
             if mw is None or mo is None:
                 continue
-            if (wo, k) not in rel and wo != 'head' and (w, k) not in rel:
-                p('| %s | %s | %.1f | = (same binary) | | |' % (g, k, mw))
+            r = gain(w, wo, k)
+            if r is None:
+                p('| %s | %s | %.1f | = (same binary) | | | |' % (g, k, mw))
                 continue
-            gm, lo, hi = gain(w, wo, k)
-            p('| %s | %s | %.1f | %.1f | **%+.1f%%** | %+.1f%% .. %+.1f%% |' % (g, k, mw, mo, gm, lo, hi))
+            gm, lo, hi, per = r
+            p('| %s | %s | %.1f | %.1f | **%+.1f%%** | %+.1f%% .. %+.1f%% | %s |' % (
+                g, k, mw, mo, gm, lo, hi, ' / '.join('%+.1f%%' % x for x in per) if len(per) > 1 else ''))
     for g, a1, a2 in PAIRS:
         xs, ys = vals.get(('head', a1)), vals.get(('head', a2))
         if xs and ys:
             gg = sorted(1 - x / y for x, y in zip(xs, ys))
-            p('| %s | %s vs %s | %.2f | %.2f | **%+.1f%%** | %+.1f%% .. %+.1f%% |' % (
+            p('| %s | %s vs %s | %.2f | %.2f | **%+.1f%%** | %+.1f%% .. %+.1f%% | |' % (
                 g, a1, a2, statistics.median(xs), statistics.median(ys),
                 statistics.median(gg) * 100, gg[0] * 100, gg[-1] * 100))
     p('')
@@ -303,7 +331,8 @@ def main():
         open(os.environ['GITHUB_STEP_SUMMARY'], 'a').write(text)
     if a.json:
         json.dump({'values': {'%s/%s' % k: v for k, v in vals.items()},
-                   'ratios': {'%s/%s' % k: v for k, v in rel.items()}}, open(a.json, 'w'), indent=1)
+                   'ratios': {'%s/%s' % k: {str(l): x for l, x in v.items()} for k, v in rel.items()}},
+                  open(a.json, 'w'), indent=1)
     return 1 if bad else 0
 
 

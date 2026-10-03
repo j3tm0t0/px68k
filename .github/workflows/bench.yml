@@ -10,7 +10,7 @@ on:
     inputs:
       rounds:
         description: rounds (each variant once per round)
-        default: '9'
+        default: '7'
 
 concurrency:
   group: bench-${{ github.ref }}
@@ -33,7 +33,7 @@ jobs:
         env:
           CC: gcc -m32
           CXX: g++ -m32
-        run: python3 tools/bench/bench.py --rounds "${{ github.event.inputs.rounds || '9' }}" --json bench.json
+        run: python3 tools/bench/bench.py --rounds "${{ github.event.inputs.rounds || '7' }}" --json bench.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
