@@ -10,6 +10,7 @@
 #include "tvram.h"
 #include "crtc.h"
 #include "bg.h"
+#include "../psp/gecomp.h"
 
 #include "m68000.h"
 #include "memory.h"
@@ -89,6 +90,9 @@ void BG_Init(void)
 	ZeroMemory(BGCHR16, 16*16*256);
 #endif
 	ZeroMemory(BG_LineBuf, 1600*2);
+#ifdef PSP
+	GE_BGReset();
+#endif
 	for (i=0; i<0x12; i++)
 		BG_Write(0xeb0800+i, 0);
 	BG_CHREND = 0x8000;
@@ -133,6 +137,7 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		adr ^= 1;
 		if (Sprite_Regs[adr] != data)
 		{
+			GE_GUARD_SPRITE();
 #ifdef USE_ASM
 			_asm
 			{
@@ -362,6 +367,9 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 	{
 		adr -= 0xeb8000;
 		if (BG[adr]==data) return;			// データに変化が無ければ帰る
+#ifdef PSP
+		GE_BGData(adr, data);	/* before BG[] changes */
+#endif
 		BG[adr] = data;
 #ifdef BG_USE_CHRBUF
 		if (adr<0x2000)
