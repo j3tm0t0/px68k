@@ -153,6 +153,24 @@ GRP_INLINE void Grp4_Opaq(const GWORD *src, WORD *dst, DWORD n, const int sh)
 		*dst++ = GrphPal[(*src++ >> sh) & 15];
 }
 
+#if !defined(PSP) && !defined(GRP4_OPAQ_TABLE)
+/*
+ * One dot at a time, as before b3bc8eb: on an x86 host faster than the
+ * pair table of Grp4_Opaq (tools/bench: screens with one opaque 16-colour
+ * page 18-32%); the PSP build (or GRP4_OPAQ_TABLE) uses the table.
+ */
+GRP_INLINE void Grp4_OpaqDots(const GWORD *src, WORD *dst, DWORD n, const int sh)
+{
+	for (; n; n--)
+		*dst++ = GrphPal[(*src++ >> sh) & 15];
+}
+#define GRP4_OPAQ	Grp4_OpaqDots
+#define GRP4_OPAQ_TAB	0
+#else
+#define GRP4_OPAQ	Grp4_Opaq
+#define GRP4_OPAQ_TAB	1
+#endif
+
 GRP_INLINE void Grp4_Trans(const GWORD *src, WORD *dst, DWORD n, const int sh)
 {
 	const GRP4TR *tab = Grp4_TrTab;
@@ -205,12 +223,13 @@ static void Grp_DrawLine4_C(DWORD page, int opaq)
 		n1 = n;
 
 	if (opaq) {
-		Grp4_PalCheck(1);
+		if (GRP4_OPAQ_TAB)
+			Grp4_PalCheck(1);
 		switch (page) {
-		case 0: GRP4_RUNS(Grp4_Opaq, 0); break;
-		case 1: GRP4_RUNS(Grp4_Opaq, 4); break;
-		case 2: GRP4_RUNS(Grp4_Opaq, 8); break;
-		default: GRP4_RUNS(Grp4_Opaq, 12); break;
+		case 0: GRP4_RUNS(GRP4_OPAQ, 0); break;
+		case 1: GRP4_RUNS(GRP4_OPAQ, 4); break;
+		case 2: GRP4_RUNS(GRP4_OPAQ, 8); break;
+		default: GRP4_RUNS(GRP4_OPAQ, 12); break;
 		}
 	} else {
 		Grp4_PalCheck(2);
