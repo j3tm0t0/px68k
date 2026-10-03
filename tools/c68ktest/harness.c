@@ -79,6 +79,8 @@ BYTE TVRAM_Read(DWORD a) { a &= 0x7ffff; a ^= 1; return TVRAM[a]; }
 void TVRAM_Write(DWORD a, BYTE v) { devwrite(19, a, v); TVRAM[(a & 0x7ffff) ^ 1] = v; }
 BYTE GVRAM_Read(DWORD a) { mix(0x300); mix(a); return GVRAM[(a & 0x7ffff) ^ 1]; }
 void GVRAM_Write(DWORD a, BYTE v) { devwrite(20, a, v); GVRAM[(a & 0x7ffff) ^ 1] = v; }
+/* gvram.c: the same as these two byte writes (checked against the real ones by gvword.sh) */
+void GVRAM_WriteWord(DWORD a, WORD v) { GVRAM_Write(a, v >> 8); GVRAM_Write(a + 1, v & 0xff); }
 BYTE OPM_Read(WORD a) { return devread(21, a); }
 void OPM_Write(DWORD r, BYTE v) { devwrite(22, r, v); }
 

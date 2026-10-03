@@ -14,6 +14,7 @@ void FASTCALL GVRAM_FastClear(void);
 
 BYTE FASTCALL GVRAM_Read(DWORD adr);
 void FASTCALL GVRAM_Write(DWORD adr, BYTE data);
+void FASTCALL GVRAM_WriteWord(DWORD adr, WORD data);
 
 void Grp_DrawLine16(void);
 void FASTCALL Grp_DrawLine8(int page, int opaq);
