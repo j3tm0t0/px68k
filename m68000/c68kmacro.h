@@ -39,16 +39,40 @@
 #define HIGH_NIBBLE(A)			((A) & 0xf0)
 
 /*
- * The cycle counter is the local icount of C68k_Exec (kept in a register);
- * CPU->ICount is only up to date across the calls that leave the core
- * (memory handlers, callbacks), where a device may read or clear it.
+ * Optimizations that only gained on the PSP (tools/bench on an x86 host:
+ * none, or a loss), so the PSP build has them by default and other builds
+ * only when asked for:
+ *   C68K_DIRECT_MEM	the mem_wrap.c handlers called directly, not
+ *			through the Read_xxx/Write_xxx pointers
+ *   C68K_INLINE_RAM	with C68K_DIRECT_MEM: their main RAM fast paths
+ *			inlined
+ *   C68K_REG_ICOUNT	the cycle counter in a local of C68k_Exec
+ * C68K_NO_DIRECT_MEM / C68K_CALL_RAM / C68K_NO_REG_ICOUNT leave them out of
+ * the PSP build.  The idle loop skips (C68k_Idle_Loop) are in every build
+ * unless C68K_NO_IDLE.
  */
-#ifndef C68K_NO_REG_ICOUNT
+#if defined(PSP) && !defined(C68K_NO_DIRECT_MEM)
+#define C68K_DIRECT_MEM
+#endif
+#if defined(PSP) && !defined(C68K_CALL_RAM)
+#define C68K_INLINE_RAM
+#endif
+#if defined(PSP) && !defined(C68K_NO_REG_ICOUNT)
+#define C68K_REG_ICOUNT
+#endif
+
+/*
+ * C68K_REG_ICOUNT: the cycle counter is the local icount of C68k_Exec
+ * (kept in a register); CPU->ICount is only up to date across the calls
+ * that leave the core (memory handlers, callbacks), where a device may
+ * read or clear it.
+ */
+#ifdef C68K_REG_ICOUNT
 #define USE_CYCLES(A)			icount -= (A);
 #define RELEASE_CYCLES()		icount = 0;
 #define C68K_CALL_OUT			CPU->ICount = icount;
 #define C68K_CALL_IN			icount = CPU->ICount;
-#else	/* for comparison: the counter in CPU->ICount, as before */
+#else	/* the counter in CPU->ICount */
 #define icount					(CPU->ICount)
 #define USE_CYCLES(A)			icount -= (A);
 #define RELEASE_CYCLES()		icount = 0;
@@ -120,12 +144,12 @@
 #endif
 
 /*
- * px68k: the memory handlers are always the cpu_*mem24* functions of
- * x68k/mem_wrap.c (set in m68000.c), so call them directly instead of
+ * C68K_DIRECT_MEM: the memory handlers are always the cpu_*mem24* functions
+ * of x68k/mem_wrap.c (set in m68000.c), so call them directly instead of
  * through the Read_xxx/Write_xxx pointers.  The 32-bit accesses are single
  * calls doing the same two word accesses in the same order as above.
  */
-#ifndef C68K_NO_DIRECT_MEM
+#ifdef C68K_DIRECT_MEM
 UINT8  cpu_readmem24(UINT32 adr);
 UINT16 cpu_readmem24_word(UINT32 adr);
 UINT32 cpu_readmem24_long(UINT32 adr);
@@ -154,13 +178,13 @@ void   cpu_writemem24_long_pd(UINT32 adr, UINT32 data);
 extern UINT8 *MEM;
 extern UINT32 BusErrFlag, MemByteAccess;
 #define C68K_RAM_END	0x00a00000
-#ifndef C68K_CALL_RAM
+#ifdef C68K_INLINE_RAM
 /* C68K_INL 0: no fast path in the handlers that follow (c68k_op.c sets it per region) */
 #ifndef C68K_INL
 #define C68K_INL	1
 #endif
 #define C68K_LIKELY(x)	__builtin_expect(C68K_INL && (x), 1)
-#else	/* for comparison: always call mem_wrap.c */
+#else	/* always call mem_wrap.c (its RAM paths come first there) */
 #define C68K_LIKELY(x)	0
 #endif
 #define C68K_RAM16(a)	(*(UINT16 *)(MEM + (a)))
@@ -1607,7 +1631,7 @@ extern UINT32 BusErrFlag, MemByteAccess;
  * effect).  Otherwise the flags set here are the ones the TST/CMP, which
  * runs next, sets again (neither touches X), and nothing else changed.
  */
-#if !defined(C68K_NO_DIRECT_MEM) && !defined(C68K_NO_IDLE)	/* C68K_NO_IDLE: for comparison */
+#ifndef C68K_NO_IDLE	/* C68K_NO_IDLE: for comparison */
 int cpu_idle_read_word(UINT32 adr, UINT32 *v);
 int cpu_idle_read_byte(UINT32 adr, UINT32 *v);
 

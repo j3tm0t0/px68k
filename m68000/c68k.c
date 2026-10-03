@@ -106,7 +106,7 @@ void C68k_Reset(c68k_struc *CPU)
 	CPU¼Â¹Ô
 --------------------------------------------------------*/
 
-#ifndef C68K_NO_DIRECT_MEM
+#ifndef C68K_NO_IDLE
 /*--------------------------------------------------------
 	Idle loops
 --------------------------------------------------------*/
@@ -251,7 +251,7 @@ INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
 		UINT32 res;
 		UINT32 src;
 		UINT32 dst;
-#ifndef C68K_NO_REG_ICOUNT
+#ifdef C68K_REG_ICOUNT
 		INT32 icount;
 #endif
 
@@ -286,7 +286,11 @@ C68k_Exec_Next:
 				PC += 2;
 				goto *JumpTable[Opcode];
 
+#ifdef C68K_OP_FILE	/* the handlers in another order (Makefile.psp: c68k_op_psp.c) */
+				#include C68K_OP_FILE
+#else
 				#include "c68k_op.c"
+#endif
 			}
 		}
 

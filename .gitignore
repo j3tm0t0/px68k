@@ -13,3 +13,4 @@ tools/fonts-cache/
 *.o
 __pycache__/
 /build/
+m68000/c68k_op_psp.c
