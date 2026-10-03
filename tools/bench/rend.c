@@ -123,17 +123,23 @@ static double secs = 0.3;
 
 static void measure(const char *name)
 {
-	double t0, t, lines = 0;
+	double t0, t, lines, best = 0;
 	DWORD h;
+	int w;
 
 	draw_frame();			/* warm-up */
 	h = frame_hash;
-	t0 = now();
-	do {
-		lines += draw_frame();
-		t = now() - t0;
-	} while (t < secs);
-	printf("%s %.1f\n", name, t * 1e9 / lines);
+	for (w = 0; w < 3; w++) {	/* the best of 3 windows: interference only slows down */
+		lines = 0;
+		t0 = now();
+		do {
+			lines += draw_frame();
+			t = now() - t0;
+		} while (t < secs / 3);
+		if (!w || t * 1e9 / lines < best)
+			best = t * 1e9 / lines;
+	}
+	printf("%s %.1f\n", name, best);
 	printf("%s_hash %08x\n", name, h);
 	fflush(stdout);
 }

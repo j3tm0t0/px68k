@@ -109,15 +109,23 @@ static void measure(const char *name, DWORD pc)
 	double t0, t;
 	unsigned dev0;
 
+	double best = 0;
+	int w;
+
 	exec_cycles(2000000);		/* warm-up */
 	dev0 = devacc;
-	t0 = now();
-	do {
-		exec_cycles(1000000);
-		total += 1000000;
-		t = now() - t0;
-	} while (t < secs);
-	fprintf(out, "%s %.1f\n", name, t * 1e12 / total);
+	for (w = 0; w < 3; w++) {	/* the best of 3 windows: interference only slows down */
+		total = 0;
+		t0 = now();
+		do {
+			exec_cycles(1000000);
+			total += 1000000;
+			t = now() - t0;
+		} while (t < secs / 3);
+		if (!w || t * 1e12 / total < best)
+			best = t * 1e12 / total;
+	}
+	fprintf(out, "%s %.1f\n", name, best);
 	if (C68k_Get_Reg(&C68K, C68K_PC) == TRAPADR)
 		fprintf(stderr, "%s: ended in an exception\n", name);
 	if (getenv("BENCH_DEBUG"))

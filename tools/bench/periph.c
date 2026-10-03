@@ -144,17 +144,24 @@ static double run_clknext_step(long n)
 
 static void measure(const char *name, double (*fn)(long))
 {
-	long n = 1000;
-	double t0, t, calls = 0;
+	long n;
+	double t0, t, calls, best = 0;
+	int w;
 
 	fn(100000);			/* warm-up */
-	t0 = now();
-	do {
-		calls += fn(n);
-		if (n < 1000000) n *= 2;
-		t = now() - t0;
-	} while (t < secs);
-	printf("%s %.2f\n", name, t * 1e9 / calls);
+	for (w = 0; w < 3; w++) {	/* the best of 3 windows: interference only slows down */
+		n = 1000;
+		calls = 0;
+		t0 = now();
+		do {
+			calls += fn(n);
+			if (n < 1000000) n *= 2;
+			t = now() - t0;
+		} while (t < secs / 3);
+		if (!w || t * 1e9 / calls < best)
+			best = t * 1e9 / calls;
+	}
+	printf("%s %.3f\n", name, best);
 	fflush(stdout);
 }
 

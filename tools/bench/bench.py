@@ -9,8 +9,9 @@ Every variant is the HEAD sources with one group taken back, by a build
 macro or by older revisions of the files the group changed; "base" is the
 tree before any of them.  The drivers are always HEAD's tools/bench.  A
 binary whose inputs are the same as HEAD's is not run again for a variant.
-The variants run round-robin (shuffled per round); each value is the median
-over the rounds, with the spread (min-max) next to it.  Run from the
+The variants run in a shuffled order each round, every run of a variant
+right after a run of HEAD's binary; the gains are the medians over the
+rounds of these pairs.  Run from the
 repository root on a 32-bit x86 target: CC='gcc -m32' CXX='g++ -m32' on
 x86_64 (the 68000 core keeps host pointers in 32 bits).  The table goes to
 stdout and, on GitHub Actions, to the job summary.
@@ -144,7 +145,9 @@ def build(name, src, cflags, shim, which):
 
 
 # the same addresses in every run (heap alignment changed the timing of the mix)
-NORAND = ['setarch', os.uname().machine, '-R'] if shutil.which('setarch') else []
+NORAND = ['setarch', os.uname().machine, '-R']
+if not shutil.which('setarch') or subprocess.run(NORAND + ['true'], capture_output=True).returncode:
+    NORAND = []		# e.g. under qemu-user
 
 
 def run(exe, secs):
@@ -162,7 +165,7 @@ def run(exe, secs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rounds', type=int, default=9)
-    ap.add_argument('--secs', type=float, default=0.4)
+    ap.add_argument('--secs', type=float, default=0.3)
     ap.add_argument('--only', default='')
     ap.add_argument('--json', default='')
     a = ap.parse_args()
@@ -180,23 +183,32 @@ def main():
     for name, *_ in variants:
         torun[name] = [bn for bn, (exe, h) in bins[name].items()
                        if name == 'head' or h != bins['head'][bn][1]]
+    # Every run of a variant's binary comes right after a run of HEAD's: the
+    # gains are worked out per pair (the runner's speed drifts over minutes).
     vals = {}		# (variant, test) -> [values]
+    rel = {}		# (variant, test) -> [value / HEAD's value of the run before]
     hashes = {}		# test -> {hash: [variants]}
     notes = {}
+    def record(name, bn, res):
+        v, h, err = res
+        for k, x in v.items():
+            vals.setdefault((name, k), []).append(x)
+        for k, x in h.items():
+            hashes.setdefault(k, {}).setdefault(x, set()).add(name)
+        if err.strip():
+            notes[(name, bn)] = err.strip()
+        return v
     for rnd in range(a.rounds):
-        order = [v[0] for v in variants]
+        order = [v[0] for v in variants if v[0] != 'head']
         random.Random(rnd).shuffle(order)
         print('round %d/%d' % (rnd + 1, a.rounds), file=sys.stderr)
         for name in order:
             for bn in torun[name]:
-                v, h, err = run(bins[name][bn][0], a.secs)
+                hv = record('head', bn, run(bins['head'][bn][0], a.secs))
+                v = record(name, bn, run(bins[name][bn][0], a.secs))
                 for k, x in v.items():
-                    vals.setdefault((name, k), []).append(x)
-                for k, x in h.items():
-                    hashes.setdefault(k, {}).setdefault(x, set()).add(name)
-                if err.strip():
-                    notes[(name, bn)] = err.strip()
-    # a variant's value of a test it did not run is HEAD's (same binary)
+                    if hv.get(k):
+                        rel.setdefault((name, k), []).append(x / hv[k])
     tests = []
     for (name, k) in vals:
         if k not in tests:
@@ -204,21 +216,26 @@ def main():
     def med(name, k):
         xs = vals.get((name, k)) or vals.get(('head', k))
         return statistics.median(xs) if xs else None
-    def spread(name, k):
-        xs = vals.get((name, k))
-        if not xs:
-            return None
-        m = statistics.median(xs)
-        return (max(xs) - min(xs)) / m * 100 if m else 0
+    def ratios(name, k):
+        """per round: the variant's value / HEAD's (1 for HEAD or HEAD's binary)"""
+        if name == 'head' or (name, k) not in rel:
+            return [1.0] * a.rounds
+        return rel[(name, k)]
+    def gain(w, wo, k):
+        """with / without per round -> median gain, lowest and highest"""
+        g = sorted(1 - x / y for x, y in zip(ratios(w, k), ratios(wo, k)))
+        return statistics.median(g) * 100, g[0] * 100, g[-1] * 100
     lines = []
     p = lines.append
     p('## px68k optimization groups, x86 (32-bit) host')
     p('')
-    p('Lower is better.  core: us per 1M 68000 cycles; periph/fm: ns per call or per sample; '
-      'rend: ns per screen line.  Median of %d rounds of %.2f s per test; spread = (max-min)/median.'
-      % (a.rounds, a.secs))
+    p('Lower values are faster.  core: us per 1M 68000 cycles; periph/fm: ns per call or per sample; '
+      'rend: ns per screen line.  Each value is the best of 3 windows of a run of %.2f s per test; '
+      'every run of a variant follows a run of HEAD, %d rounds.  Gain: how much less time the code takes '
+      'with the optimization, median over the rounds of the paired runs, and the lowest and highest round.'
+      % (a.secs, a.rounds))
     p('')
-    p('| group | test | with | without | gain | spread with / without |')
+    p('| group | test | with | without | gain | lowest .. highest |')
     p('|---|---|---:|---:|---:|---:|')
     for g, w, wo, ts in GROUPS:
         if w not in bins or wo not in bins:
@@ -227,30 +244,27 @@ def main():
             mw, mo = med(w, k), med(wo, k)
             if mw is None or mo is None:
                 continue
-            sw = spread(w, k) if (w, k) in vals else spread('head', k)
-            so = spread(wo, k) if (wo, k) in vals else None
-            same = (wo, k) not in vals and wo != 'head'
-            p('| %s | %s | %.1f | %s | %s | %s |' % (
-                g, k, mw, '%.1f' % mo if not same else '= (same binary)',
-                '%+.1f%%' % ((mo - mw) / mo * 100) if not same else '',
-                '%.1f%% / %s' % (sw or 0, '%.1f%%' % so if so is not None else '-')))
+            if (wo, k) not in rel and wo != 'head' and (w, k) not in rel:
+                p('| %s | %s | %.1f | = (same binary) | | |' % (g, k, mw))
+                continue
+            gm, lo, hi = gain(w, wo, k)
+            p('| %s | %s | %.1f | %.1f | **%+.1f%%** | %+.1f%% .. %+.1f%% |' % (g, k, mw, mo, gm, lo, hi))
     for g, a1, a2 in PAIRS:
-        m1, m2 = med('head', a1), med('head', a2)
-        if m1 is not None and m2 is not None:
-            p('| %s | %s vs %s | %.2f | %.2f | %+.1f%% | %.1f%% / %.1f%% |' % (
-                g, a1, a2, m1, m2, (m2 - m1) / m2 * 100, spread('head', a1), spread('head', a2)))
+        xs, ys = vals.get(('head', a1)), vals.get(('head', a2))
+        if xs and ys:
+            gg = sorted(1 - x / y for x, y in zip(xs, ys))
+            p('| %s | %s vs %s | %.2f | %.2f | **%+.1f%%** | %+.1f%% .. %+.1f%% |' % (
+                g, a1, a2, statistics.median(xs), statistics.median(ys),
+                statistics.median(gg) * 100, gg[0] * 100, gg[-1] * 100))
     p('')
-    p('<details><summary>all values (median, spread)</summary>')
+    p('<details><summary>all values (median over the runs)</summary>')
     p('')
     p('| test | ' + ' | '.join(v[0] for v in variants) + ' |')
     p('|---|' + '---:|' * len(variants))
     for k in tests:
         row = []
         for v in variants:
-            if (v[0], k) in vals:
-                row.append('%.1f (%.0f%%)' % (med(v[0], k), spread(v[0], k)))
-            else:
-                row.append('=')
+            row.append('%.1f' % med(v[0], k) if (v[0], k) in vals else '=')
         p('| %s | %s |' % (k, ' | '.join(row)))
     p('')
     p('Variants:')
@@ -274,7 +288,8 @@ def main():
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         open(os.environ['GITHUB_STEP_SUMMARY'], 'a').write(text)
     if a.json:
-        json.dump({'%s/%s' % k: v for k, v in vals.items()}, open(a.json, 'w'), indent=1)
+        json.dump({'values': {'%s/%s' % k: v for k, v in vals.items()},
+                   'ratios': {'%s/%s' % k: v for k, v in rel.items()}}, open(a.json, 'w'), indent=1)
     return 1 if bad else 0
 
 
