@@ -15,7 +15,7 @@
 #include "memory.h"
 
 	BYTE	BG[0x8000];
-	BYTE	Sprite_Regs[0x800];
+	BYTE	Sprite_Regs[0x800] __attribute__ ((aligned (4)));	/* read as WORDs */
 	BYTE	BG_Regs[0x12];
 	WORD	BG_CHREND = 0;
 	WORD	BG_BG0TOP = 0;
@@ -452,68 +452,86 @@ LABEL void FASTCALL BG_DrawLine(int opaq, int gd) {
 }
 #endif
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
-struct SPRITECTRLTBL {
-	WORD	sprite_posx;
-	WORD	sprite_posy;
-	WORD	sprite_ctrl;
-	BYTE	sprite_ply;
-	BYTE	dummy;
-} __attribute__ ((packed));
-typedef struct SPRITECTRLTBL SPRITECTRLTBL_T;
+/*
+ * Sprites on the current line, per priority (1-3), in drawing order (127
+ * down to 0). One pass over the 128 sprites per line instead of one per
+ * priority; the registers are read as WORDs (Sprite_Regs holds them in host
+ * order: x, y, control, priority in the low byte of the 4th word).
+ */
+static BYTE Sprite_Line[4][128];
+static int Sprite_LineCount[4];
+
+static void
+Sprite_CollectLine(void)
+{
+	const WORD *sr = (const WORD *)Sprite_Regs;
+	int n;
+
+	Sprite_LineCount[1] = Sprite_LineCount[2] = Sprite_LineCount[3] = 0;
+	for (n = 127; n >= 0; --n) {
+		const WORD *s = sr + n * 4;
+		int pri = s[3] & 3;
+		DWORD t, y;
+
+		if (!pri)
+			continue;	/* priority 0: not displayed */
+		t = (s[0] + BG_HAdjust) & 0x3ff;
+		if (t >= TextDotX + 16)
+			continue;
+		y = s[1] & 0x3ff;
+		y -= VLINEBG;
+		y += BG_VLINE;
+		y = -y;
+		y += 16;
+		if (y > 15)
+			continue;
+		Sprite_Line[pri][Sprite_LineCount[pri]++] = n;
+	}
+}
 
 INLINE void
 Sprite_DrawLineMcr(int pri)
 {
-	SPRITECTRLTBL_T *sct = (SPRITECTRLTBL_T *)Sprite_Regs;
-	DWORD y;
-	DWORD t;
-	int n;
+	const WORD *sr = (const WORD *)Sprite_Regs;
+	int k;
 
-	for (n = 127; n >= 0; --n) {
-		if ((sct[n].sprite_ply & 3) == pri) {
-			SPRITECTRLTBL_T *sctp = &sct[n];
+	for (k = 0; k < Sprite_LineCount[pri]; k++) {
+		int n = Sprite_Line[pri][k];
+		const WORD *s = sr + n * 4;
+		WORD ctrl = s[2];
+		DWORD t = (s[0] + BG_HAdjust) & 0x3ff;
+		DWORD y = s[1] & 0x3ff;
+		BYTE *p;
+		DWORD pal;
+		int i, d;
 
-			t = (sctp->sprite_posx + BG_HAdjust) & 0x3ff;
-			if (t >= TextDotX + 16)
-				continue;
+		y -= VLINEBG;
+		y += BG_VLINE;
+		y = -y;
+		y += 16;
 
-			y = sctp->sprite_posy & 0x3ff;
-			y -= VLINEBG;
-			y += BG_VLINE;
-			y = -y;
-			y += 16;
+		if (ctrl < 0x4000) {
+			p = &BGCHR16[((ctrl * 256) & 0xffff)  + (y * 16)];
+			d = 1;
+		} else  if ((ctrl - 0x4000) & 0x8000) {
+			p = &BGCHR16[((ctrl * 256) & 0xffff) + (((y * 16) & 0xff) ^ 0xf0) + 15];
+			d = -1;
+		} else if ((signed short)(ctrl) >= 0x4000) {
+			p = &BGCHR16[((ctrl * 256) & 0xffff) + (y * 16) + 15];
+			d = -1;
+		}  else {
+			p = &BGCHR16[((ctrl << 8) & 0xffff)  + (((y * 16) & 0xff) ^ 0xf0)];
+			d = 1;
+		}
 
-			// add y, 16; jnc .spline_lpcnt
-			if (y <= 15) {
-				BYTE *p;
-				DWORD pal;
-				int i, d;
-				BYTE bh, dat;
-				
-				if (sctp->sprite_ctrl < 0x4000) {
-					p = &BGCHR16[((sctp->sprite_ctrl * 256) & 0xffff)  + (y * 16)];
-					d = 1;
-				} else  if ((sctp->sprite_ctrl - 0x4000) & 0x8000) {
-					p = &BGCHR16[((sctp->sprite_ctrl * 256) & 0xffff) + (((y * 16) & 0xff) ^ 0xf0) + 15];
-					d = -1;
-				} else if ((signed short)(sctp->sprite_ctrl) >= 0x4000) {
-					p = &BGCHR16[((sctp->sprite_ctrl * 256) & 0xffff) + (y * 16) + 15];
-					d = -1;
-				}  else {
-					p = &BGCHR16[((sctp->sprite_ctrl << 8) & 0xffff)  + (((y * 16) & 0xff) ^ 0xf0)];
-					d = 1;
-				}
-
-				for (i = 0; i < 16; i++, t++, p += d) {
-					pal = *p & 0xf;
-					if (pal) {
-						pal |= (sctp->sprite_ctrl >> 4) & 0xf0;
-						if (BG_PriBuf[t] >= n * 8) {
-							BG_LineBuf[t] = TextPal[pal];
-							Text_TrFlag[t] |= 2;
-							BG_PriBuf[t] = n * 8;
-						}
-					}
+		for (i = 0; i < 16; i++, t++, p += d) {
+			pal = *p & 0xf;
+			if (pal) {
+				pal |= (ctrl >> 4) & 0xf0;
+				if (BG_PriBuf[t] >= n * 8) {
+					BG_LineBuf[t] = TextPal[pal];
+					Text_TrFlag[t] |= 2;
+					BG_PriBuf[t] = n * 8;
 				}
 			}
 		}
@@ -671,6 +689,7 @@ BG_DrawLine(int opaq, int gd)
 	func8 = (gd)? BG_DrawLineMcr8 : BG_DrawLineMcr8_ng;
 	func16 = (gd)? BG_DrawLineMcr16 : BG_DrawLineMcr16_ng;
 
+	Sprite_CollectLine();
 	Sprite_DrawLineMcr(1);
 	if ((BG_Regs[9] & 8) && (BG_CHRSIZE == 8)) { // BG1 on
 		(*func8)(BG_BG1TOP, BG1ScrollX, BG1ScrollY);
