@@ -292,6 +292,22 @@ void FASTCALL Joystick_Update(int is_menu, SDL_Keycode key)
 		if (psppad.Buttons & PSP_CTRL_CROSS) {
 			ret0 ^= JOY_TRG2;
 		}
+		/*
+		 * Rapid fire: square = trigger 1, triangle = trigger 2, pressed for
+		 * 2 of every 4 emulated frames (about 14 shots/s at 55.5 Hz).
+		 * Joystick_Update(FALSE) runs once per emulated frame.
+		 */
+		if (!is_menu) {
+			static unsigned rapid;
+
+			rapid++;
+			if (rapid & 2) {
+				if ((psppad.Buttons & PSP_CTRL_SQUARE) && !(psppad.Buttons & PSP_CTRL_CIRCLE))
+					ret0 ^= JOY_TRG1;
+				if ((psppad.Buttons & PSP_CTRL_TRIANGLE) && !(psppad.Buttons & PSP_CTRL_CROSS))
+					ret0 ^= JOY_TRG2;
+			}
+		}
 	} else {
 		if (psppad.Buttons & PSP_CTRL_CIRCLE) {
 			mret0 ^= JOY_TRG1;
