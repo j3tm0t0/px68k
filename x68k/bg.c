@@ -14,7 +14,7 @@
 #include "m68000.h"
 #include "memory.h"
 
-	BYTE	BG[0x8000];
+	BYTE	BG[0x8000] __attribute__ ((aligned (64)));	/* read as DWORDs */
 	BYTE	Sprite_Regs[0x800] __attribute__ ((aligned (4)));	/* read as WORDs */
 	BYTE	BG_Regs[0x12];
 	WORD	BG_CHREND = 0;
@@ -32,11 +32,18 @@
 
 	BYTE	BG_Dirty0[64*64];
 	BYTE	BG_Dirty1[64*64];
+/*
+ * 1 byte per pixel copies of the patterns, only for the x86 assembler
+ * drawing code; the C code reads BG[] directly.
+ */
+#if defined(USE_ASM) || (defined(USE_GAS) && defined(__i386__))
+#define	BG_USE_CHRBUF
 	BYTE	BGCHR8[8*8*256];
 	BYTE	BGCHR16[16*16*256];
+#endif
 
-	WORD	BG_LineBuf[1600];
-	WORD	BG_PriBuf[1600];
+	WORD	BG_LineBuf[1600] __attribute__ ((aligned (64)));
+	WORD	BG_PriBuf[1600] __attribute__ ((aligned (64)));
 
 	DWORD	VLINEBG = 0;
 
@@ -49,8 +56,10 @@ void BG_Init(void)
 	DWORD i;
 	ZeroMemory(Sprite_Regs, 0x800);
 	ZeroMemory(BG, 0x8000);
+#ifdef BG_USE_CHRBUF
 	ZeroMemory(BGCHR8, 8*8*256);
 	ZeroMemory(BGCHR16, 16*16*256);
+#endif
 	ZeroMemory(BG_LineBuf, 1600*2);
 	for (i=0; i<0x12; i++)
 		BG_Write(0xeb0800+i, 0);
@@ -83,7 +92,9 @@ BYTE FASTCALL BG_Read(DWORD adr)
 // -----------------------------------------------------------------------
 void FASTCALL BG_Write(DWORD adr, BYTE data)
 {
+#ifdef BG_USE_CHRBUF
 	DWORD bg16chr;
+#endif
 	int s1, s2, v = 0;
 	s1 = (((BG_Regs[0x11]  &4)?2:1)-((BG_Regs[0x11]  &16)?1:0));
 	s2 = (((CRTC_Regs[0x29]&4)?2:1)-((CRTC_Regs[0x29]&16)?1:0));
@@ -311,6 +322,7 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		adr -= 0xeb8000;
 		if (BG[adr]==data) return;			// データに変化が無ければ帰る
 		BG[adr] = data;
+#ifdef BG_USE_CHRBUF
 		if (adr<0x2000)
 		{
 			BGCHR8[adr*2]   = data>>4;
@@ -319,6 +331,7 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		bg16chr = ((adr&3)*2)+((adr&0x3c)*4)+((adr&0x40)>>3)+((adr&0x7f80)*2);
 		BGCHR16[bg16chr]   = data>>4;
 		BGCHR16[bg16chr+1] = data&15;
+#endif
 
 		if (adr<BG_CHREND)				// パターンエリア
 		{
@@ -453,6 +466,36 @@ LABEL void FASTCALL BG_DrawLine(int opaq, int gd) {
 #endif
 #else /* !USE_ASM && !(USE_GAS && __i386__) */
 /*
+ * The patterns are read straight from BG[] (4 bits per pixel, as the
+ * 68000 sees it) instead of from the 1-byte-per-pixel copies BGCHR8 and
+ * BGCHR16: one aligned 32-bit load fetches 8 pixels, and the working set is
+ * half the size.  BG[] is stored in 68000 byte order, so a little-endian load
+ * L of a pattern row holds pixel 2k in the high nibble and pixel 2k+1 in the
+ * low nibble of byte k.  A row is turned into a "stream" S whose lowest
+ * nibble is the next pixel to draw:
+ *   left to right: swap the nibbles of each byte of L
+ *   right to left: byte-swap L
+ *
+ * 8x8 pattern p, row r:   BG[p * 32 + r * 4], 4 bytes
+ * 16x16 pattern p, row r: BG[p * 128 + r * 4] (left 8 pixels),
+ *                         BG[p * 128 + 64 + r * 4] (right 8 pixels)
+ */
+typedef DWORD __attribute__((__may_alias__)) DWORD_A;	/* 32-bit access to BYTE/WORD arrays */
+#define BG_ROW(off)	(*(const DWORD_A *)(BG + (off)))
+
+static inline DWORD
+bg_nibswap(DWORD l)
+{
+	return ((l >> 4) & 0x0f0f0f0f) | ((l & 0x0f0f0f0f) << 4);
+}
+
+static inline DWORD
+bg_bswap(DWORD l)
+{
+	return __builtin_bswap32(l);
+}
+
+/*
  * Sprites on the current line, per priority (1-3), in drawing order (127
  * down to 0). One pass over the 128 sprites per line instead of one per
  * priority; the registers are read as WORDs (Sprite_Regs holds them in host
@@ -464,242 +507,240 @@ static int Sprite_LineCount[4];
 static void
 Sprite_CollectLine(void)
 {
-	const WORD *sr = (const WORD *)Sprite_Regs;
+	const WORD *s = (const WORD *)Sprite_Regs + 127 * 4;
+	/* the sprite is on the line if 16 - (y - VLINEBG + BG_VLINE) <= 15 */
+	const DWORD ybase = (DWORD)BG_VLINE - VLINEBG - 1;
+	const DWORD hadj = (DWORD)BG_HAdjust;
+	const DWORD xmax = TextDotX + 16;
+	int c1 = 0, c2 = 0, c3 = 0;
 	int n;
 
-	Sprite_LineCount[1] = Sprite_LineCount[2] = Sprite_LineCount[3] = 0;
-	for (n = 127; n >= 0; --n) {
-		const WORD *s = sr + n * 4;
-		int pri = s[3] & 3;
-		DWORD t, y;
+	for (n = 127; n >= 0; --n, s -= 4) {
+		int pri;
 
+		if ((DWORD)((s[1] & 0x3ff) + ybase) > 15)
+			continue;
+		pri = s[3] & 3;
 		if (!pri)
 			continue;	/* priority 0: not displayed */
-		t = (s[0] + BG_HAdjust) & 0x3ff;
-		if (t >= TextDotX + 16)
+		if (((s[0] + hadj) & 0x3ff) >= xmax)
 			continue;
-		y = s[1] & 0x3ff;
-		y -= VLINEBG;
-		y += BG_VLINE;
-		y = -y;
-		y += 16;
-		if (y > 15)
-			continue;
-		Sprite_Line[pri][Sprite_LineCount[pri]++] = n;
+		switch (pri) {
+		case 1: Sprite_Line[1][c1++] = n; break;
+		case 2: Sprite_Line[2][c2++] = n; break;
+		default: Sprite_Line[3][c3++] = n; break;
+		}
 	}
+	Sprite_LineCount[1] = c1;
+	Sprite_LineCount[2] = c2;
+	Sprite_LineCount[3] = c3;
 }
 
-INLINE void
-Sprite_DrawLineMcr(int pri)
+/* 8 sprite pixels of stream S at lb/tf/pb; pri is the sprite number * 8 */
+#define SPRITE_PIX8(S)							\
+	do {								\
+		DWORD s_ = (S);						\
+		int k_ = 0;						\
+		for (; s_; s_ >>= 4, k_++) {				\
+			DWORD c_ = s_ & 15;				\
+			if (c_ && pb[k_] >= pri) {			\
+				lb[k_] = pp[c_];			\
+				tf[k_] |= 2;				\
+				pb[k_] = pri;				\
+			}						\
+		}							\
+	} while (0)
+
+static void
+Sprite_DrawLineMcr(int pri_level)
 {
 	const WORD *sr = (const WORD *)Sprite_Regs;
+	const BYTE *list = Sprite_Line[pri_level];
+	const int cnt = Sprite_LineCount[pri_level];
+	const DWORD ybase = (DWORD)BG_VLINE - VLINEBG;
+	const DWORD hadj = (DWORD)BG_HAdjust;
 	int k;
 
-	for (k = 0; k < Sprite_LineCount[pri]; k++) {
-		int n = Sprite_Line[pri][k];
+	for (k = 0; k < cnt; k++) {
+		const int n = list[k];
 		const WORD *s = sr + n * 4;
-		WORD ctrl = s[2];
-		DWORD t = (s[0] + BG_HAdjust) & 0x3ff;
-		DWORD y = s[1] & 0x3ff;
-		BYTE *p;
-		DWORD pal;
-		int i, d;
+		const DWORD ctrl = s[2];
+		const DWORD t = (s[0] + hadj) & 0x3ff;
+		/* row of the sprite on this line, 0-15 (checked when collected) */
+		DWORD y = (16 - ((s[1] & 0x3ff) + ybase)) & 15;
+		const WORD *pp = TextPal + ((ctrl >> 4) & 0xf0);
+		WORD *lb = BG_LineBuf + t;
+		BYTE *tf = Text_TrFlag + t;
+		WORD *pb = BG_PriBuf + t;
+		const int pri = n * 8;
+		DWORD off, s0, s1;
 
-		y -= VLINEBG;
-		y += BG_VLINE;
-		y = -y;
-		y += 16;
-
-		if (ctrl < 0x4000) {
-			p = &BGCHR16[((ctrl * 256) & 0xffff)  + (y * 16)];
-			d = 1;
-		} else  if ((ctrl - 0x4000) & 0x8000) {
-			p = &BGCHR16[((ctrl * 256) & 0xffff) + (((y * 16) & 0xff) ^ 0xf0) + 15];
-			d = -1;
-		} else if ((signed short)(ctrl) >= 0x4000) {
-			p = &BGCHR16[((ctrl * 256) & 0xffff) + (y * 16) + 15];
-			d = -1;
-		}  else {
-			p = &BGCHR16[((ctrl << 8) & 0xffff)  + (((y * 16) & 0xff) ^ 0xf0)];
-			d = 1;
+		if (ctrl & 0x8000)		/* V flip */
+			y ^= 15;
+		off = (ctrl & 0xff) * 128 + y * 4;
+		if (ctrl & 0x4000) {		/* H flip */
+			s0 = bg_bswap(BG_ROW(off + 64));
+			s1 = bg_bswap(BG_ROW(off));
+		} else {
+			s0 = bg_nibswap(BG_ROW(off));
+			s1 = bg_nibswap(BG_ROW(off + 64));
 		}
-
-		for (i = 0; i < 16; i++, t++, p += d) {
-			pal = *p & 0xf;
-			if (pal) {
-				pal |= (ctrl >> 4) & 0xf0;
-				if (BG_PriBuf[t] >= n * 8) {
-					BG_LineBuf[t] = TextPal[pal];
-					Text_TrFlag[t] |= 2;
-					BG_PriBuf[t] = n * 8;
-				}
-			}
-		}
+		SPRITE_PIX8(s0);
+		lb += 8; tf += 8; pb += 8;
+		SPRITE_PIX8(s1);
 	}
 }
 
-#define BG_DRAWLINE_LOOPY(cnt) \
-{ \
-	bl = bl << 4;							\
-	for (j = 0; j < cnt; j++, esi += d, edi++) {			\
-		dat = *esi | bl;					\
-		if (dat == 0)						\
-			continue;					\
-		if ((dat & 0xf) || !(Text_TrFlag[edi + 1] & 2)) {	\
-			BG_LineBuf[1 + edi] = TextPal[dat];		\
-			Text_TrFlag[edi + 1] |= 2;			\
+/* 8 BG pixels of stream S, only the opaque ones */
+#define BG_PIX8_SPARSE(S)						\
+	do {								\
+		DWORD s_ = (S);						\
+		int k_ = 0;						\
+		for (; s_; s_ >>= 4, k_++) {				\
+			DWORD c_ = s_ & 15;				\
+			if (c_) {					\
+				lb[k_] = pp[c_];			\
+				tf[k_] |= 2;				\
+			}						\
 		}							\
-	}								\
-}
+	} while (0)
 
-#define BG_DRAWLINE_LOOPY_NG(cnt) \
-{  \
-	bl = bl << 4;					    \
-        for (j = 0; j < cnt; j++, esi += d, edi++) {	    \
-                dat = *esi & 0xf;			    \
-		if (dat) {				    \
-			dat |= bl;			    \
-                        BG_LineBuf[1 + edi] = TextPal[dat]; \
-			Text_TrFlag[edi + 1] |= 2;	    \
-                }					    \
-        }						    \
-}
+/*
+ * 8 BG pixels of stream S, palette block != 0 and graphics on: a
+ * transparent pixel still draws colour pp[0] where no sprite/BG has been
+ * drawn yet.
+ */
+#define BG_PIX8_FULL(S)							\
+	do {								\
+		DWORD s_ = (S);						\
+		int k_;							\
+		for (k_ = 0; k_ < 8; s_ >>= 4, k_++) {			\
+			DWORD c_ = s_ & 15;				\
+			if (c_ || !(tf[k_] & 2)) {			\
+				lb[k_] = pp[c_];			\
+				tf[k_] |= 2;				\
+			}						\
+		}							\
+	} while (0)
 
-void bg_drawline_loopx8(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY, long adjust, int ng)
+/*
+ * One line of an 8x8 BG plane.  Same pixels as the original
+ * bg_drawline_loopx8: (TextDotX >> 3) + 1 tiles starting at
+ * BG_LineBuf[16 - (scroll & 7)].
+ */
+static void
+bg_drawline_loopx8(DWORD BGTOP, DWORD BGScrollX, DWORD BGScrollY, long adjust, int gd)
 {
-       unsigned char dat, bl;
-       int i, j, d;
-       DWORD ebp, edx, edi, ecx;
-       WORD si;
-       BYTE *esi;
+	const DWORD sy = BGScrollY + VLINEBG - BG_VLINE;
+	const DWORD sx = BGScrollX - adjust;
+	const BYTE *map = BG + BGTOP + ((sy & 0x1f8) << 4);
+	const DWORD r = sy & 7;
+	DWORD col = (sx >> 3) & 63;
+	WORD *lb = BG_LineBuf + 16 - (sx & 7);
+	BYTE *tf = Text_TrFlag + 16 - (sx & 7);
+	int i;
 
-       ebp = ((BGScrollY + VLINEBG - BG_VLINE) & 7) << 3;
-       edx = BGTOP + (((BGScrollY + VLINEBG - BG_VLINE) & 0x1f8) << 4);
-       edi = ((BGScrollX - adjust) & 7) ^ 15;
-       ecx = ((BGScrollX - adjust) & 0x1f8) >> 2;
+	for (i = TextDotX >> 3; i >= 0; i--) {
+		const DWORD bl = map[col * 2];
+		const DWORD pat = map[col * 2 + 1];
+		const WORD *pp = TextPal + ((bl & 15) << 4);
+		const DWORD off = pat * 32 + ((bl & 0x80) ? (7 - r) : r) * 4;
+		const DWORD l = BG_ROW(off);
+		const DWORD s = (bl & 0x40) ? bg_bswap(l) : bg_nibswap(l);
 
-       for (i = TextDotX >> 3; i >= 0; i--) {
-               bl = BG[ecx + edx];
-               si = (WORD)BG[ecx + edx + 1] << 6;
-
-               if (bl < 0x40) {
-                       esi = &BGCHR8[si + ebp];
-                       d = +1;
-               } else if ((bl - 0x40) & 0x80) {
-                       esi = &BGCHR8[si + 0x3f - ebp];
-                       d = -1;
-               } else if ((signed char)bl >= 0x40) {
-                       esi = &BGCHR8[si + ebp + 7];
-                       d = -1;
-               } else {
-                       esi = &BGCHR8[si + 0x38 - ebp];
-                       d = +1;
-               }
-	       if (ng) {
-		       BG_DRAWLINE_LOOPY_NG(8);
-	       } else {
-		       BG_DRAWLINE_LOOPY(8);
-	       }
-               ecx += 2;
-               ecx &= 0x7f;
-       }
-}
-
-void bg_drawline_loopx16(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY, long adjust, int ng)
-{
-       unsigned char dat, bl;
-       int i, j, d;
-       DWORD ebp, edx, edi, ecx;
-       WORD si;
-       BYTE *esi;
-
-       ebp = ((BGScrollY + VLINEBG - BG_VLINE) & 15) << 4;
-       edx = BGTOP + (((BGScrollY + VLINEBG - BG_VLINE) & 0x3f0) << 3);
-       edi = ((BGScrollX - adjust) & 15) ^ 15;
-       ecx = ((BGScrollX - adjust) & 0x3f0) >> 3;
-
-       for (i = TextDotX >> 4; i >= 0; i--) {
-		bl = BG[ecx + edx];
-		si = BG[ecx + edx + 1] << 8;
-
-		if (bl < 0x40) {
-			esi = &BGCHR16[si + ebp];
-			d = +1;
-		} else if ((bl - 0x40) & 0x80) {
-			esi = &BGCHR16[si + 0xff - ebp];
-			d = -1;
-		} else if ((signed char)bl >= 0x40) {
-			esi = &BGCHR16[si + ebp + 15];
-			d = -1;
-		} else {
-			esi = &BGCHR16[si + 0xf0 - ebp];
-			d = +1;
-		}
-		if (ng) {
-			BG_DRAWLINE_LOOPY_NG(16);
-		} else {
-			BG_DRAWLINE_LOOPY(16);
-		}
-		ecx += 2;
-		ecx &= 0x7f;
+		if (gd && (bl & 15))
+			BG_PIX8_FULL(s);
+		else
+			BG_PIX8_SPARSE(s);
+		lb += 8; tf += 8;
+		col = (col + 1) & 63;
 	}
 }
 
-INLINE void
-BG_DrawLineMcr8(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY)
+/*
+ * One line of a 16x16 BG plane.  Same pixels as the original
+ * bg_drawline_loopx16: (TextDotX >> 4) + 1 tiles starting at
+ * BG_LineBuf[16 - (scroll & 15)].
+ */
+static void
+bg_drawline_loopx16(DWORD BGTOP, DWORD BGScrollX, DWORD BGScrollY, long adjust, int gd)
 {
-       bg_drawline_loopx8(BGTOP, BGScrollX, BGScrollY, BG_HAdjust, 0);
-}
+	const DWORD sy = BGScrollY + VLINEBG - BG_VLINE;
+	const DWORD sx = BGScrollX - adjust;
+	const BYTE *map = BG + BGTOP + ((sy & 0x3f0) << 3);
+	const DWORD r = sy & 15;
+	DWORD col = (sx >> 4) & 63;
+	WORD *lb = BG_LineBuf + 16 - (sx & 15);
+	BYTE *tf = Text_TrFlag + 16 - (sx & 15);
+	int i;
 
-INLINE void
-BG_DrawLineMcr16(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY)
-{
-	bg_drawline_loopx16(BGTOP, BGScrollX, BGScrollY, BG_HAdjust, 0);
-}
+	for (i = TextDotX >> 4; i >= 0; i--) {
+		const DWORD bl = map[col * 2];
+		const DWORD pat = map[col * 2 + 1];
+		const WORD *pp = TextPal + ((bl & 15) << 4);
+		const DWORD off = pat * 128 + ((bl & 0x80) ? (15 - r) : r) * 4;
+		DWORD s0, s1;
 
-INLINE void
-BG_DrawLineMcr8_ng(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY)
-{
-       bg_drawline_loopx8(BGTOP, BGScrollX, BGScrollY, BG_HAdjust, 1);
-}
-
-INLINE void
-BG_DrawLineMcr16_ng(WORD BGTOP, DWORD BGScrollX, DWORD BGScrollY)
-{
-       bg_drawline_loopx16(BGTOP, BGScrollX, BGScrollY, 0, 1);
+		if (bl & 0x40) {
+			s0 = bg_bswap(BG_ROW(off + 64));
+			s1 = bg_bswap(BG_ROW(off));
+		} else {
+			s0 = bg_nibswap(BG_ROW(off));
+			s1 = bg_nibswap(BG_ROW(off + 64));
+		}
+		if (gd && (bl & 15)) {
+			BG_PIX8_FULL(s0);
+			lb += 8; tf += 8;
+			BG_PIX8_FULL(s1);
+		} else {
+			BG_PIX8_SPARSE(s0);
+			lb += 8; tf += 8;
+			BG_PIX8_SPARSE(s1);
+		}
+		lb += 8; tf += 8;
+		col = (col + 1) & 63;
+	}
 }
 
 LABEL void FASTCALL
 BG_DrawLine(int opaq, int gd)
 {
+	const int cnt = TextDotX;
+	DWORD_A *pb = (DWORD_A *)(BG_PriBuf + 16);
 	int i;
-	void (*func8)(WORD, DWORD, DWORD), (*func16)(WORD, DWORD, DWORD);
 
 	if (opaq) {
-		for (i = 16; i < TextDotX + 16; ++i) {
-			BG_LineBuf[i] = TextPal[0];
-			BG_PriBuf[i] = 0xffff;
+		const DWORD c = TextPal[0];
+		const DWORD c2 = c | (c << 16);
+		DWORD_A *lb = (DWORD_A *)(BG_LineBuf + 16);
+
+		for (i = 0; i < (cnt >> 1); i++) {
+			lb[i] = c2;
+			pb[i] = 0xffffffff;
+		}
+		if (cnt & 1) {
+			BG_LineBuf[16 + cnt - 1] = c;
+			BG_PriBuf[16 + cnt - 1] = 0xffff;
 		}
 	} else {
-		for (i = 16; i < TextDotX + 16; ++i) {
-			BG_PriBuf[i] = 0xffff;
-		}
+		for (i = 0; i < (cnt >> 1); i++)
+			pb[i] = 0xffffffff;
+		if (cnt & 1)
+			BG_PriBuf[16 + cnt - 1] = 0xffff;
 	}
-
-	func8 = (gd)? BG_DrawLineMcr8 : BG_DrawLineMcr8_ng;
-	func16 = (gd)? BG_DrawLineMcr16 : BG_DrawLineMcr16_ng;
 
 	Sprite_CollectLine();
 	Sprite_DrawLineMcr(1);
 	if ((BG_Regs[9] & 8) && (BG_CHRSIZE == 8)) { // BG1 on
-		(*func8)(BG_BG1TOP, BG1ScrollX, BG1ScrollY);
+		bg_drawline_loopx8(BG_BG1TOP, BG1ScrollX, BG1ScrollY, BG_HAdjust, gd);
 	}
 	Sprite_DrawLineMcr(2);
 	if (BG_Regs[9] & 1) { // BG0 on
 		if (BG_CHRSIZE == 8) {
-			(*func8)(BG_BG0TOP, BG0ScrollX, BG0ScrollY);
+			bg_drawline_loopx8(BG_BG0TOP, BG0ScrollX, BG0ScrollY, BG_HAdjust, gd);
 		} else {
-			(*func16)(BG_BG0TOP, BG0ScrollX, BG0ScrollY);
+			/* the original passed no H adjust for 16x16 without graphics */
+			bg_drawline_loopx16(BG_BG0TOP, BG0ScrollX, BG0ScrollY, gd ? BG_HAdjust : 0, gd);
 		}
 	}
 	Sprite_DrawLineMcr(3);
