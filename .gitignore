@@ -12,3 +12,4 @@ roms/
 tools/fonts-cache/
 *.o
 __pycache__/
+/build/
