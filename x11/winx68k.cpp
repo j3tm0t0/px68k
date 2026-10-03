@@ -324,7 +324,9 @@ void WinX68k_Exec(void)
 {
 	//char *test = NULL;
 	int clk_total, clkdiv, usedclk, hsync, clk_next, clk_count, clk_line=0;
+#ifdef PSP
 	DWORD cn_num, cn_vt, cn_q, cn_r, cn_sq, cn_sr;	/* clk_next as quotient/remainder */
+#endif
 	int KeyIntCnt = 0, MouseIntCnt = 0;
 	DWORD t_start = timeGetTime(), t_end;
 
@@ -361,12 +363,14 @@ void WinX68k_Exec(void)
 	}
 	ICount += clk_total;
 	clk_next = (clk_total/VLINE_TOTAL);
+#ifdef PSP
 	cn_num = (DWORD)clk_total;
 	cn_vt = (DWORD)VLINE_TOTAL;
 	cn_q  = cn_num/cn_vt;
 	cn_r  = cn_num%cn_vt;
 	cn_sq = cn_q;
 	cn_sr = cn_r;
+#endif
 	hsync = 1;
 
 	do {
@@ -495,7 +499,11 @@ void WinX68k_Exec(void)
 			DSound_Send0(clk_line);
 
 			vline++;
-			/* clk_next = (clk_total*(vline+1))/VLINE_TOTAL, without a division per line */
+#ifdef PSP
+			/*
+			 * clk_next = (clk_total*(vline+1))/VLINE_TOTAL, without a
+			 * division per line: a gain on the PSP only (tools/bench)
+			 */
 			cn_num += (DWORD)clk_total;			/* DWORD, wraps like the old product */
 			if ( (cn_vt==(DWORD)VLINE_TOTAL)&&(cn_num>=(DWORD)clk_total) ) {
 				cn_q += cn_sq;
@@ -512,6 +520,9 @@ void WinX68k_Exec(void)
 				cn_sr = (DWORD)clk_total%cn_vt;
 			}
 			clk_next  = (int)cn_q;
+#else
+			clk_next  = (clk_total*(vline+1))/VLINE_TOTAL;
+#endif
 			hsync = 1;
 		}
 	} while ( vline<VLINE_TOTAL );
