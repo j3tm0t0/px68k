@@ -1,7 +1,11 @@
 /*
- * periph.c: speed of the MFP (x68k/mfp.c) on its per-slice and polling
- * paths, with the timers set up as MFP_Init leaves them (B: /10, data 13;
- * C, D: /500, data 200, 20) and their interrupts enabled.
+ * periph.c: speed of the per-slice and per-line peripheral work of
+ * WinX68k_Exec: the MFP (x68k/mfp.c) with the timers set up as MFP_Init
+ * leaves them (B: /10, data 13; C, D: /500, data 200, 20) and their
+ * interrupts enabled, its GPIP reads, RTC_Timer (x68k/rtc.c) per slice and
+ * ADPCM_PreUpdate (x68k/adpcm.c, idle) per line.  clknext_*: the two ways
+ * WinX68k_Exec works out the next line boundary (copies of its code: it
+ * cannot be called alone).
  *
  *   periph [seconds per test]	prints "<test> <ns per call>"
  */
@@ -13,6 +17,10 @@
 #include "winx68k.h"
 #include "crtc.h"
 #include "mfp.h"
+#include "rtc.h"
+#include "adpcm.h"
+#include "dmac.h"
+#include "prop.h"
 
 /* what mfp.c uses from the rest of the emulator */
 int ICount;
@@ -26,6 +34,9 @@ BYTE KeyBufRP, KeyBufWP, KeyIntFlag;
 static unsigned nint;
 void IRQH_Int(BYTE irq, void *handler) { nint++; }
 void IRQH_IRQCallBack(BYTE irq) { }
+Win68Conf Config;
+dmac_ch DMA[4];
+int FASTCALL DMA_Exec(int ch) { return 0; }
 
 static double now(void)
 {
@@ -67,6 +78,70 @@ static double run_gpip(long n)
 	return (double)n * reads_per_slice;
 }
 
+/* RTC_Timer after every slice */
+static double run_rtc(long n)
+{
+	long i;
+	for (i = 0; i < n; i++)
+		RTC_Timer(200);
+	return n;
+}
+
+/* ADPCM_PreUpdate every raster line (clk_line ~316 at 31 kHz) */
+static double run_adpcm(long n)
+{
+	long i;
+	for (i = 0; i < n; i++)
+		ADPCM_PreUpdate(316);
+	return n;
+}
+
+/*
+ * clk_next per raster line, as WinX68k_Exec before and after a76ec99: a
+ * division per line, or quotient/remainder steps (with the redo when
+ * VLINE_TOTAL changes or the numerator wraps).
+ */
+static volatile int clk_total_v = 180000, vt_v = 568;
+static double run_clknext_div(long n)
+{
+	long i;
+	int clk_total = clk_total_v, vlt = vt_v, vline = 0, clk_next;
+	for (i = 0; i < n; i++) {
+		vline++;
+		clk_next = (clk_total*(vline+1))/vlt;
+		sink += clk_next;
+		if (vline >= vlt) vline = 0;
+	}
+	return n;
+}
+static double run_clknext_step(long n)
+{
+	long i;
+	int clk_total = clk_total_v, vline = 0;
+	DWORD cn_num = clk_total, cn_vt = vt_v, cn_q = cn_num/cn_vt, cn_r = cn_num%cn_vt, cn_sq = cn_q, cn_sr = cn_r;
+	for (i = 0; i < n; i++) {
+		vline++;
+		cn_num += (DWORD)clk_total;
+		if ( (cn_vt==(DWORD)vt_v)&&(cn_num>=(DWORD)clk_total) ) {
+			cn_q += cn_sq;
+			cn_r += cn_sr;
+			if ( cn_r>=cn_vt ) {
+				cn_r -= cn_vt;
+				cn_q++;
+			}
+		} else {
+			cn_vt = (DWORD)vt_v;
+			cn_q  = cn_num/cn_vt;
+			cn_r  = cn_num%cn_vt;
+			cn_sq = (DWORD)clk_total/cn_vt;
+			cn_sr = (DWORD)clk_total%cn_vt;
+		}
+		sink += cn_q;
+		if (vline >= (int)cn_vt) { vline = 0; cn_num = clk_total; cn_q = cn_sq; cn_r = cn_sr; }
+	}
+	return n;
+}
+
 static void measure(const char *name, double (*fn)(long))
 {
 	long n = 1000;
@@ -99,5 +174,11 @@ int main(int argc, char **argv)
 	measure("gpip_read1", run_gpip);
 	reads_per_slice = 10;
 	measure("gpip_read10", run_gpip);
+	RTC_Init();
+	measure("rtc_timer", run_rtc);
+	ADPCM_Init(44100);
+	measure("adpcm_pre", run_adpcm);
+	measure("clknext_div", run_clknext_div);
+	measure("clknext_step", run_clknext_step);
 	return 0;
 }

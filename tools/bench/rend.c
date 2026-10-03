@@ -168,7 +168,11 @@ int main(int argc, char **argv)
 	vctl(0xe82600, 0x006f);
 	measure("g16x4");
 
-	/* the same, graphic page 0 translucent over the others (half colour) */
+	/* one 16-colour page and text, no sprites */
+	vctl(0xe82600, 0x0021);
+	measure("g16x1");
+
+	/* the 4 pages again, graphic page 0 translucent over the others (half colour) */
 	vctl(0xe82600, 0x1d6f);
 	measure("g16x4_tr");
 

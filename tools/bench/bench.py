@@ -15,7 +15,7 @@ repository root on a 32-bit x86 target: CC='gcc -m32' CXX='g++ -m32' on
 x86_64 (the 68000 core keeps host pointers in 32 bits).  The table goes to
 stdout and, on GitHub Actions, to the job summary.
 """
-import argparse, concurrent.futures, hashlib, json, os, random, shlex, statistics, subprocess, sys
+import argparse, concurrent.futures, hashlib, json, os, random, shlex, shutil, statistics, subprocess, sys
 
 ROOT = os.getcwd()
 BENCH = os.path.join(ROOT, 'tools', 'bench')
@@ -38,6 +38,9 @@ VARIANTS = [
     ('no_gvword', 'mem_wrap.c without GVRAM_WriteWord', {'x68k/mem_wrap.c': '59c56ec^'}, '', None, {'core'}),
     ('no_gpipmemo', 'MFP: GPIP reads without the memo', {'x68k/mfp.c': '244de43^'}, '', None, {'periph'}),
     ('old_mfptimer', 'MFP: timers per prescaler tick (and no GPIP memo)', {'x68k/mfp.c': 'b2fc9d4^'}, '', None, {'periph'}),
+    ('old_rtc', 'RTC_Timer out of line', {'x68k/rtc.c': '8323f7f^', 'x68k/rtc.h': '8323f7f^'}, '', None, {'periph'}),
+    ('old_adpcm', 'ADPCM_PreUpdate out of line, with its divisions', {'x68k/adpcm.c': '3be6581^', 'x68k/adpcm.h': '3be6581^'},
+     '', None, {'periph'}),
     ('old_fmtables', 'fmgen: 32-bit sine/level tables', {'fmgen/fmgen.cpp': 'a82ba45^', 'fmgen/fmgen.h': 'a82ba45^'}, '', None, {'fm'}),
     ('old_fmtimer', 'fmgen: Timer::Count without the inline fast path',
      {'fmgen/fmtimer.cpp': '3be6581^', 'fmgen/fmtimer.h': '3be6581^'}, '', None, {'fm'}),
@@ -58,13 +61,20 @@ GROUPS = [
     ('GVRAM_WriteWord', 'head', 'no_gvword', ['gvram_long64k', 'gvram_movem64k', 'gvram_word64k', 'gvram_word16']),
     ('GPIP read memo', 'head', 'no_gpipmemo', ['gpip_read1', 'gpip_read10']),
     ('MFP timers per underflow', 'no_gpipmemo', 'old_mfptimer', ['mfp_timer']),
+    ('RTC_Timer inline', 'head', 'old_rtc', ['rtc_timer']),
+    ('ADPCM_PreUpdate inline', 'head', 'old_adpcm', ['adpcm_pre']),
     ('fmgen 16-bit tables', 'head', 'old_fmtables', ['opm_mix1', 'opm_mix64']),
     ('fmgen Timer::Count fast path', 'head', 'old_fmtimer', ['opm_count']),
     ('bg.c rewrite', 'head', 'old_bg', ['bg256', 'g16x4']),
-    ('gvram.c decoders + 4-page pass', 'head', 'old_gvram', ['g16x4', 'g16x4_tr', 'g256x2', 'g64k']),
+    ('gvram.c decoders + 4-page pass', 'head', 'old_gvram', ['g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'bg256']),
     ('4-page pass (Grp_DrawLine4Multi)', 'head', 'no_multi', ['g16x4']),
-    ('windraw.c wd_dst compositing', 'head', 'old_windraw', ['bg256', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'text768']),
+    ('windraw.c wd_dst compositing', 'head', 'old_windraw', ['bg256', 'g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'text768']),
     ('all of it', 'head', 'base', None),
+]
+
+# done in one binary: the new way, the old way (copies of code that cannot be called alone)
+PAIRS = [
+    ('clk_next without a division per line', 'clknext_step', 'clknext_div'),
 ]
 
 DIRS = ['m68000', 'x68k', 'x11', 'win32api', 'fmgen']
@@ -109,7 +119,7 @@ def build(name, src, cflags, shim, which):
     bins = {
         'core': (CC, b('core.c') + s('m68000/c68k.c', 'm68000/m68000.c', 'x68k/mem_wrap.c', 'x68k/gvram.c') +
                  [os.path.join(gen, 'mixops.h')]),
-        'periph': (CC, b('periph.c') + s('x68k/mfp.c')),
+        'periph': (CC, b('periph.c') + s('x68k/mfp.c', 'x68k/rtc.c', 'x68k/adpcm.c')),
         'fm': (CXX, b('fm.cpp') + s('fmgen/opm.cpp', 'fmgen/fmgen.cpp', 'fmgen/fmtimer.cpp')),
         'rend': (CC, b('rend.c') + [os.path.join(gen, 'wdline.c')] +
                  s('x68k/bg.c', 'x68k/gvram.c', 'x68k/tvram.c', 'x68k/palette.c', 'x68k/crtc.c') +
@@ -128,13 +138,17 @@ def build(name, src, cflags, shim, which):
             h.update(open(f, 'rb').read())
         exe = os.path.join(OUT, name, bn)
         sh(cc + CFLAGS + shlex.split(cflags) + ['-w'] + inc + ['-o', exe] +
-           [f for f in files if not f.endswith('.h')])
+           [f for f in files if not f.endswith('.h')] + ['-lm'])
         out[bn] = (exe, h.hexdigest())
     return out
 
 
+# the same addresses in every run (heap alignment changed the timing of the mix)
+NORAND = ['setarch', os.uname().machine, '-R'] if shutil.which('setarch') else []
+
+
 def run(exe, secs):
-    r = subprocess.run([exe, str(secs)], check=True, capture_output=True, text=True)
+    r = subprocess.run(NORAND + [exe, str(secs)], check=True, capture_output=True, text=True)
     vals, hashes = {}, {}
     for line in r.stdout.splitlines():
         k, v = line.split()
@@ -147,8 +161,8 @@ def run(exe, secs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rounds', type=int, default=7)
-    ap.add_argument('--secs', type=float, default=0.25)
+    ap.add_argument('--rounds', type=int, default=9)
+    ap.add_argument('--secs', type=float, default=0.4)
     ap.add_argument('--only', default='')
     ap.add_argument('--json', default='')
     a = ap.parse_args()
@@ -220,6 +234,11 @@ def main():
                 g, k, mw, '%.1f' % mo if not same else '= (same binary)',
                 '%+.1f%%' % ((mo - mw) / mo * 100) if not same else '',
                 '%.1f%% / %s' % (sw or 0, '%.1f%%' % so if so is not None else '-')))
+    for g, a1, a2 in PAIRS:
+        m1, m2 = med('head', a1), med('head', a2)
+        if m1 is not None and m2 is not None:
+            p('| %s | %s vs %s | %.2f | %.2f | %+.1f%% | %.1f%% / %.1f%% |' % (
+                g, a1, a2, m1, m2, (m2 - m1) / m2 * 100, spread('head', a1), spread('head', a2)))
     p('')
     p('<details><summary>all values (median, spread)</summary>')
     p('')

@@ -120,6 +120,8 @@ static void measure(const char *name, DWORD pc)
 	fprintf(out, "%s %.1f\n", name, t * 1e12 / total);
 	if (C68k_Get_Reg(&C68K, C68K_PC) == TRAPADR)
 		fprintf(stderr, "%s: ended in an exception\n", name);
+	if (getenv("BENCH_DEBUG"))
+		fprintf(stderr, "%s: %u device accesses, %ld bytes of AdrError lines\n", name, devacc - dev0, ftell(stdout));
 	fflush(out);
 	(void)pc; (void)dev0;
 }
