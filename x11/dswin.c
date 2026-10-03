@@ -30,6 +30,7 @@
 #include	"adpcm.h"
 #include	"mercury.h"
 #include	"fmg_wrap.h"
+#include	"../psp/prof.h"
 
 short	playing = FALSE;
 
@@ -85,7 +86,7 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 	fmt.samples = samples;
 	fmt.callback = sdlaudio_callback;
 #ifdef PSP
-	fmt.userdata = rate;
+	fmt.userdata = (void *)rate;
 #else
 	fmt.userdata = NULL;
 #endif
@@ -125,6 +126,8 @@ DSound_Cleanup(void)
 	return TRUE;
 }
 
+static int DSound_Pending;	/* samples due, not synthesized yet */
+
 static void sound_send(int length)
 {
 	int rate;
@@ -135,6 +138,7 @@ static void sound_send(int length)
 	rate = 0;
 #endif
 	SDL_LockAudio();
+	PROF_BEGIN(snd);
 	ADPCM_Update((short *)pbwp, length, rate, pbsp, pbep);
 	OPM_Update((short *)pbwp, length, rate, pbsp, pbep);
 #ifndef	NO_MERCURY
@@ -151,7 +155,9 @@ static void sound_send(int length)
 		pbwp = pbsp + (pbwp - pbep);
 	}
 #endif
+	PROF_END(snd, PROF_SOUND);
 	SDL_UnlockAudio();
+	PROF_COUNT(PROF_SOUND_SAMPLES, length);
 }
 
 void FASTCALL DSound_Send0(long clock)
@@ -171,7 +177,28 @@ void FASTCALL DSound_Send0(long clock)
 	if (length == 0) {
 		return;
 	}
+#ifdef PSP
+	/*
+	 * About one sample per raster line: synthesizing them one by one cost a
+	 * lock/unlock and the OPM/ADPCM call overhead each time. Batch them (32
+	 * samples, ~3 ms); WinX68k_Exec flushes the rest at the end of each frame.
+	 */
+	DSound_Pending += length;
+	if (DSound_Pending < 32)
+		return;
+	length = DSound_Pending;
+	DSound_Pending = 0;
+#endif
 	sound_send(length);
+}
+
+void DSound_Flush(void)
+{
+	if (audio_fd >= 0 && DSound_Pending) {
+		int length = DSound_Pending;
+		DSound_Pending = 0;
+		sound_send(length);
+	}
 }
 
 static void FASTCALL DSound_Send(int length)
