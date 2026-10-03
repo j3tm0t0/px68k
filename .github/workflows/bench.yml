@@ -3,9 +3,8 @@
 # images.  The table goes to the job summary.
 name: bench
 
+# Run by hand (Actions > bench > Run workflow): about 30 minutes.
 on:
-  push:
-    branches: [portable]
   workflow_dispatch:
     inputs:
       rounds:
