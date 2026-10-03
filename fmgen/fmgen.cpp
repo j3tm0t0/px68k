@@ -275,8 +275,8 @@ void Chip::MakeTable()
 //	Operator
 //
 bool FM::Operator::tablehasmade = false;
-uint16 FM::Operator::sinetable[1024];
-int16 FM::Operator::cltable[FM_CLENTS];
+FM::Operator::SineEntry FM::Operator::sinetable[1024];
+FM::Operator::ClEntry FM::Operator::cltable[FM_CLENTS];
 
 //	構築
 FM::Operator::Operator()
@@ -329,7 +329,7 @@ void Operator::MakeTable()
 	// 対数テーブルの作成
 	assert(FM_CLENTS >= 256);
 
-	int16* p = cltable;
+	ClEntry* p = cltable;
 	int i;
 	for (i=0; i<256; i++)
 	{
