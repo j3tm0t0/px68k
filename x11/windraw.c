@@ -1007,6 +1007,17 @@ void WinDraw_DrawLine(void)
 {
 	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
 
+	/*
+	 * VLINE is (DWORD)-1 when the line was outside CRTC_VSTART..VEND at the
+	 * start of the scan line and a CRTC write moved the display start before
+	 * it was drawn.  TextDirtyLine[-1] is the last byte of TextDrawPattern
+	 * (plane 3, pattern 0xff, dot 7): clearing it lost that bit of every
+	 * text byte decoded afterwards (e.g. Gradius' power-up gauge).  Such a
+	 * line is not shown; the SDL builds composited it into the row before
+	 * ScrBuf, the PSP drops it (psp_flush_line).
+	 */
+	if (VLINE >= 1024)
+		return;
 	if (!TextDirtyLine[VLINE]) return;
 	TextDirtyLine[VLINE] = 0;
 	Draw_DrawFlag = 1;
