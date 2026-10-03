@@ -8,6 +8,10 @@
 # hashes of random instruction runs, generated idle loops and an IPL ROM run
 # (roms/IPLROM.DAT if present).  Any difference in registers, flags, cycles,
 # device accesses (order included), BusErrFlag/MemByteAccess or RAM shows.
+#
+# FUZZ_CFLAGS (default -DPSP) is passed to both builds, FUZZ_CFLAGS_A /
+# FUZZ_CFLAGS_B to one each, e.g. to compare a build macro on one tree:
+#   FUZZ_CFLAGS_B=-DC68K_NO_IDLE tools/c68ktest/fuzz.sh HEAD HEAD
 set -e
 cd "$(dirname "$0")/../.."
 TOP=$(pwd)
@@ -28,7 +32,8 @@ fi
 cp tools/c68ktest/harness.c "$W/"
 [ -f roms/IPLROM.DAT ] && cp roms/IPLROM.DAT "$W/"
 for t in a b; do
-	docker run --rm --platform linux/386 -v "$W":/w $IMG sh -c "gcc -O2 -w -DPSP \
+	if [ $t = a ]; then x=$FUZZ_CFLAGS_A; else x=$FUZZ_CFLAGS_B; fi
+	docker run --rm --platform linux/386 -v "$W":/w $IMG sh -c "gcc -O2 -w ${FUZZ_CFLAGS--DPSP} $x \
 		-I/w/$t/x11 -I/w/$t/x68k -I/w/$t/fmgen -I/w/$t/win32api -I/w/$t/m68000 -o /w/h_$t \
 		/w/harness.c /w/$t/m68000/c68k.c /w/$t/m68000/m68000.c /w/$t/x68k/mem_wrap.c"
 done

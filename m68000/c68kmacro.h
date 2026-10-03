@@ -43,10 +43,18 @@
  * CPU->ICount is only up to date across the calls that leave the core
  * (memory handlers, callbacks), where a device may read or clear it.
  */
+#ifndef C68K_NO_REG_ICOUNT
 #define USE_CYCLES(A)			icount -= (A);
 #define RELEASE_CYCLES()		icount = 0;
 #define C68K_CALL_OUT			CPU->ICount = icount;
 #define C68K_CALL_IN			icount = CPU->ICount;
+#else	/* for comparison: the counter in CPU->ICount, as before */
+#define icount					(CPU->ICount)
+#define USE_CYCLES(A)			icount -= (A);
+#define RELEASE_CYCLES()		icount = 0;
+#define C68K_CALL_OUT
+#define C68K_CALL_IN
+#endif
 
 #define READ_REG_8(A)			MAKE_UINT_8(A)
 #define READ_REG_16(A)			MAKE_UINT_16(A)
@@ -1599,7 +1607,7 @@ extern UINT32 BusErrFlag, MemByteAccess;
  * effect).  Otherwise the flags set here are the ones the TST/CMP, which
  * runs next, sets again (neither touches X), and nothing else changed.
  */
-#ifndef C68K_NO_DIRECT_MEM
+#if !defined(C68K_NO_DIRECT_MEM) && !defined(C68K_NO_IDLE)	/* C68K_NO_IDLE: for comparison */
 int cpu_idle_read_word(UINT32 adr, UINT32 *v);
 int cpu_idle_read_byte(UINT32 adr, UINT32 *v);
 

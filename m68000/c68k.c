@@ -251,7 +251,9 @@ INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
 		UINT32 res;
 		UINT32 src;
 		UINT32 dst;
+#ifndef C68K_NO_REG_ICOUNT
 		INT32 icount;
+#endif
 
 		PC = CPU->PC;
 		CPU->ICount = icount = cycles;
