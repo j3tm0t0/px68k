@@ -79,15 +79,32 @@ int Mcry_IsReady(void)
 static int Mcry_Touched;
 static DWORD Mcry_IdleClock;
 
+/*
+ * Apply the kept clock in steps: Mcry_ClockRate*clock must not overflow
+ * Mcry_PreCounter (a 32-bit long on 32-bit hosts) for the counts to come
+ * out as they would have line by line.
+ */
+static void Mcry_IdleFlush(void)
+{
+	while (Mcry_IdleClock) {
+		DWORD clock = (Mcry_IdleClock > 16384) ? 16384 : Mcry_IdleClock;
+
+		Mcry_IdleClock -= clock;
+		Mcry_PreCounter += (Mcry_ClockRate*clock);
+		while(Mcry_PreCounter>=10000000L)
+		{
+			Mcry_SampleCnt++;
+			Mcry_PreCounter -= 10000000L;
+		}
+		M288_Timer(clock);
+	}
+}
+
 static void Mcry_Touch(void)
 {
 	if (!Mcry_Touched) {
 		Mcry_Touched = 1;
-		if (Mcry_IdleClock) {
-			DWORD clock = Mcry_IdleClock;
-			Mcry_IdleClock = 0;
-			Mcry_PreUpdate(clock);
-		}
+		Mcry_IdleFlush();
 	}
 }
 
@@ -95,6 +112,8 @@ void FASTCALL Mcry_PreUpdate(DWORD clock)
 {
 	if (!Mcry_Touched) {
 		Mcry_IdleClock += clock;
+		if (Mcry_IdleClock >= 0x40000000)	/* ~100 s: don't let it wrap */
+			Mcry_IdleFlush();
 		return;
 	}
 	Mcry_PreCounter += (Mcry_ClockRate*clock);
