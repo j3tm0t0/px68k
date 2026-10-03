@@ -177,6 +177,9 @@ void C68k_Set_WriteW(c68k_struc *cpu, void (*Func)(UINT32 address, UINT16 data))
 void C68k_Set_IRQ_Callback(c68k_struc *cpu, INT32 (*Func)(INT32 irqline));
 void C68k_Set_Reset_Callback(c68k_struc *cpu, void (*Func)(void));
 
+/* c68kbench.c: us per million 68000 cycles of test loop prog (0-2) */
+unsigned C68k_Bench(int prog, int mcycles, int slice, unsigned (*now_us)(void));
+
 #ifdef __cplusplus
 }
 #endif
