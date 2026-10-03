@@ -22,29 +22,37 @@ ROOT = os.getcwd()
 BENCH = os.path.join(ROOT, 'tools', 'bench')
 OUT = os.path.join(ROOT, 'build', 'bench')
 BASE_REV = '7b29341'	# master + the build fixes, before any optimization
+ORDER = 'c68korder'	# the file made by tools/c68ktest/c68korder.py hot995.txt 1 1
 
 # name, description, {path: rev}, extra cflags, extra source (shim), binaries it changes
 ALL = {'core', 'periph', 'fm', 'rend'}
 VARIANTS = [
     ('base', 'master + build fixes (7b29341)', {'*': BASE_REV}, '', None, ALL),
-    ('head', 'this branch', {}, '', None, ALL),
-    ('no_idle', 'C68K: no idle loop skips (tst/cmp, GPIP polls)', {}, '-DC68K_NO_IDLE', None, {'core'}),
-    ('no_inline', 'C68K: RAM fast paths not inlined (C68K_CALL_RAM)', {}, '-DC68K_CALL_RAM', None, {'core'}),
-    ('no_regicount', 'C68K: cycle counter in CPU->ICount', {}, '-DC68K_NO_REG_ICOUNT', None, {'core'}),
-    ('master_order', 'C68K: master\'s handler order in c68k_op.c', {'m68000/c68k_op.c': 'f013ce9'}, '', None, {'core'}),
-    ('no_direct', 'C68K: memory through the handler pointers (C68K_NO_DIRECT_MEM; no idle skips, no inlining)',
-     {}, '-DC68K_NO_DIRECT_MEM', None, {'core'}),
-    ('core_master', 'C68K as on master (no direct calls, ICount, master order), mem_wrap.c without GVRAM_WriteWord',
-     {'m68000/c68k_op.c': 'f013ce9', 'x68k/mem_wrap.c': '59c56ec^'}, '-DC68K_NO_DIRECT_MEM -DC68K_NO_REG_ICOUNT', None, {'core'}),
+    ('head', 'this branch (generic build)', {}, '', None, ALL),
+    # C68K
+    ('no_idle', 'no idle loop skips (tst/cmp, GPIP polls)', {}, '-DC68K_NO_IDLE', None, {'core'}),
+    ('core_master', 'C68K as on master (no idle loop skips), mem_wrap.c without GVRAM_WriteWord',
+     {'x68k/mem_wrap.c': '59c56ec^'}, '-DC68K_NO_IDLE', None, {'core'}),
     ('no_gvword', 'mem_wrap.c without GVRAM_WriteWord', {'x68k/mem_wrap.c': '59c56ec^'}, '', None, {'core'}),
-    ('no_gpipmemo', 'MFP: GPIP reads without the memo', {'x68k/mfp.c': '244de43^'}, '', None, {'periph'}),
-    ('old_mfptimer', 'MFP: timers per prescaler tick (and no GPIP memo)', {'x68k/mfp.c': 'b2fc9d4^'}, '', None, {'periph'}),
+    ('psp_direct', 'PSP only: mem_wrap.c called directly (C68K_DIRECT_MEM)', {}, '-DC68K_DIRECT_MEM', None, {'core'}),
+    ('psp_inline', 'PSP only: direct calls with the RAM fast paths inlined (+C68K_INLINE_RAM)', {},
+     '-DC68K_DIRECT_MEM -DC68K_INLINE_RAM', None, {'core'}),
+    ('psp_regicount', 'PSP only: cycle counter in a register (C68K_REG_ICOUNT)', {}, '-DC68K_REG_ICOUNT', None, {'core'}),
+    ('psp_order', 'PSP only: hot handlers first (c68korder.py hot995.txt 1 1)', {'m68000/c68k_op.c': ORDER}, '',
+     None, {'core'}),
+    ('psp_core', 'the PSP\'s core: the four above', {'m68000/c68k_op.c': ORDER},
+     '-DC68K_DIRECT_MEM -DC68K_INLINE_RAM -DC68K_REG_ICOUNT', None, {'core'}),
+    # peripherals
+    ('psp_gpipmemo', 'PSP only: GPIP reads remember their divisions (MFP_GPIP_MEMO)', {}, '-DMFP_GPIP_MEMO', None,
+     {'periph'}),
+    ('old_mfptimer', 'MFP timers per prescaler tick', {'x68k/mfp.c': 'b2fc9d4^'}, '', None, {'periph'}),
     ('old_rtc', 'RTC_Timer out of line', {'x68k/rtc.c': '8323f7f^', 'x68k/rtc.h': '8323f7f^'}, '', None, {'periph'}),
     ('old_adpcm', 'ADPCM_PreUpdate out of line, with its divisions', {'x68k/adpcm.c': '3be6581^', 'x68k/adpcm.h': '3be6581^'},
      '', None, {'periph'}),
-    ('old_fmtables', 'fmgen: 32-bit sine/level tables', {'fmgen/fmgen.cpp': 'a82ba45^', 'fmgen/fmgen.h': 'a82ba45^'}, '', None, {'fm'}),
+    ('psp_fmtables', 'PSP only: fmgen 16-bit sine/level tables (FMGEN_TABLE16)', {}, '-DFMGEN_TABLE16', None, {'fm'}),
     ('old_fmtimer', 'fmgen: Timer::Count without the inline fast path',
      {'fmgen/fmtimer.cpp': '3be6581^', 'fmgen/fmtimer.h': '3be6581^'}, '', None, {'fm'}),
+    # rendering
     ('old_bg', 'bg.c as on master', {'x68k/bg.c': BASE_REV}, '', None, {'rend'}),
     ('old_gvram', 'gvram.c as on master (no 4-page pass)', {'x68k/gvram.c': BASE_REV}, '', 'multi_shim.c', {'rend'}),
     ('no_multi', 'gvram.c decoders, no 4-page pass (Grp_DrawLine4Multi)', {'x68k/gvram.c': 'cae673e'}, '', 'multi_shim.c', {'rend'}),
@@ -52,30 +60,32 @@ VARIANTS = [
 ]
 
 # group, variant with it, variant without it, tests that show it
+CORE = ['reg', 'ram', 'gpip_read', 'mix', 'gvram_long64k']
 GROUPS = [
     ('idle loop skips', 'head', 'no_idle', ['idle_gpip_abs', 'idle_gpip_dn', 'idle_tst']),
-    ('RAM fast paths inlined in the core', 'head', 'no_inline', ['reg', 'ram', 'mix', 'gvram_long64k']),
-    ('cycle counter in a register', 'head', 'no_regicount', ['reg', 'ram', 'mix', 'gpip_read']),
-    ('hot handlers first', 'head', 'master_order', ['reg', 'ram', 'mix']),
-    ('direct mem_wrap calls (+inline, +idle)', 'head', 'no_direct', ['reg', 'ram', 'mix', 'gpip_read', 'gvram_long64k']),
-    ('mem_wrap.c RAM fast paths', 'core_master', 'base', ['reg', 'ram', 'mix', 'gpip_read']),
+    ('mem_wrap.c RAM fast paths', 'core_master', 'base', CORE),
     ('GVRAM_WriteWord', 'head', 'no_gvword', ['gvram_long64k', 'gvram_movem64k', 'gvram_word64k', 'gvram_word16']),
-    ('GPIP read memo', 'head', 'no_gpipmemo', ['gpip_read1', 'gpip_read10']),
-    ('MFP timers per underflow', 'no_gpipmemo', 'old_mfptimer', ['mfp_timer']),
+    ('PSP only: direct mem_wrap calls', 'psp_direct', 'head', CORE),
+    ('PSP only: RAM fast paths inlined', 'psp_inline', 'psp_direct', CORE),
+    ('PSP only: cycle counter in a register', 'psp_regicount', 'head', CORE),
+    ('PSP only: hot handlers first', 'psp_order', 'head', CORE),
+    ('PSP only: all four (the PSP\'s core)', 'psp_core', 'head', CORE + ['idle_gpip_abs', 'gvram_movem64k']),
+    ('MFP timers per underflow', 'head', 'old_mfptimer', ['mfp_timer']),
+    ('PSP only: GPIP read memo', 'psp_gpipmemo', 'head', ['gpip_read1', 'gpip_read10']),
     ('RTC_Timer inline', 'head', 'old_rtc', ['rtc_timer']),
     ('ADPCM_PreUpdate inline', 'head', 'old_adpcm', ['adpcm_pre']),
-    ('fmgen 16-bit tables', 'head', 'old_fmtables', ['opm_mix1', 'opm_mix64']),
+    ('PSP only: fmgen 16-bit tables', 'psp_fmtables', 'head', ['opm_mix1', 'opm_mix64']),
     ('fmgen Timer::Count fast path', 'head', 'old_fmtimer', ['opm_count']),
     ('bg.c rewrite', 'head', 'old_bg', ['bg256', 'g16x4']),
     ('gvram.c decoders + 4-page pass', 'head', 'old_gvram', ['g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'bg256']),
     ('4-page pass (Grp_DrawLine4Multi)', 'head', 'no_multi', ['g16x4']),
     ('windraw.c wd_dst compositing', 'head', 'old_windraw', ['bg256', 'g16x1', 'g16x4', 'g16x4_tr', 'g256x2', 'g64k', 'text768']),
-    ('all of it', 'head', 'base', None),
+    ('all of it (generic build)', 'head', 'base', None),
 ]
 
 # done in one binary: the new way, the old way (copies of code that cannot be called alone)
 PAIRS = [
-    ('clk_next without a division per line', 'clknext_step', 'clknext_div'),
+    ('PSP only: clk_next without a division per line', 'clknext_step', 'clknext_div'),
 ]
 
 DIRS = ['m68000', 'x68k', 'x11', 'win32api', 'fmgen']
@@ -101,7 +111,11 @@ def prepare(name, files):
     tar = subprocess.run(['git', 'archive', rev] + DIRS, check=True, capture_output=True).stdout
     sh(['tar', 'xf', '-', '-C', src], input=tar)
     for path, r in files.items():
-        if path != '*':
+        if r == ORDER:
+            f = os.path.join(src, path)
+            sh([sys.executable, os.path.join(ROOT, 'tools', 'c68ktest', 'c68korder.py'),
+                os.path.join(ROOT, 'tools', 'c68ktest', 'hot995.txt'), '1', '1', f, f], stdout=subprocess.DEVNULL)
+        elif path != '*':
             open(os.path.join(src, path), 'wb').write(git_show(r, path))
     return src
 
