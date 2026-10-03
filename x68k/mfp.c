@@ -169,13 +169,15 @@ BYTE FASTCALL MFP_Read(DWORD adr)
 				ret = 0x13;
 			else
 				ret = 0x03;
+#if defined(PSP) || defined(MFP_GPIP_MEMO)
 			{
 				/*
-				 * The same divisions as before, remembered for the
+				 * The same divisions as below, remembered for the
 				 * values they were made with: polling loops read GPIP
 				 * thousands of times per frame with ICount (changed
 				 * only between two CPU slices) and the CRTC registers
-				 * the same.
+				 * the same.  A gain on the PSP only (tools/bench: x86
+				 * divides fast enough).
 				 */
 				static int memo_ok, m_ic, m_hs, m_hpos, m_lo, m_hi;
 				static BYTE m_r1, m_r5, m_r7;
@@ -198,6 +200,13 @@ BYTE FASTCALL MFP_Read(DWORD adr)
 				else
 					ret |= 0x80;
 			}
+#else
+			hpos = (int)(ICount%HSYNC_CLK);
+			if ( (hpos>=((int)CRTC_Regs[5]*HSYNC_CLK/CRTC_Regs[1]))&&(hpos<((int)CRTC_Regs[7]*HSYNC_CLK/CRTC_Regs[1])) )
+				ret &= 0x7f;
+			else
+				ret |= 0x80;
+#endif
 			if (vline!=CRTC_IntLine)
 				ret |= 0x40;
 			break;
