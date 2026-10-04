@@ -100,15 +100,15 @@ struct menu_flist mfl;
 
 /***** menu items *****/
 
-#define MENU_NUM 14
+#define MENU_NUM 15
 #define MENU_WINDOW 7
 
-int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1, 0};
+int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1, 0, 0};
 
-enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK, M_FPS};
+enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK, M_FPS, M_CLK};
 
 // Max # of characters is 15.
-char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "Show FPS", "uhyo", ""};
+char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "Show FPS", "MPU Clock", "uhyo", ""};
 
 // Max # of characters is 30.
 // Max # of items including terminater `""' in each line is 15.
@@ -126,7 +126,8 @@ char menu_items[][15][30] = {
 	{"Axis0: xx", "Axis1: xx", "Hat: xx", "Button0: xx", "Button1: xx",  ""},
 	{"Off", "On", ""},
 	{"Off", "On", ""},
-	{"Off", "On", ""}
+	{"Off", "On", ""},
+	{"10MHz (X68000)", "16MHz (XVI)", "24MHz", ""}
 };
 
 static void menu_system(int v);
@@ -140,6 +141,7 @@ static void menu_hwjoy_setting(int v);
 static void menu_nowait(int v);
 static void menu_joykey(int v);
 static void menu_showfps(int v);
+static void menu_mpu_clock(int v);
 
 struct _menu_func {
 	void (*func)(int v);
@@ -160,7 +162,8 @@ struct _menu_func menu_func[] = {
 	{menu_hwjoy_setting, 0},
 	{menu_nowait, 1},
 	{menu_joykey, 1},
-	{menu_showfps, 1}
+	{menu_showfps, 1},
+	{menu_mpu_clock, 1}
 };
 
 int WinUI_get_drv_num(int key)
@@ -239,6 +242,7 @@ WinUI_Init(void)
 	mval_y[M_NW] = Config.NoWaitMode;
 	mval_y[M_JK] = Config.JoyKey;
 	mval_y[M_FPS] = Config.ShowFPS;
+	mval_y[M_CLK] = (Config.XVIMode >= 0 && Config.XVIMode <= 2) ? Config.XVIMode : 0;
 
 #if defined(ANDROID)
 #define CUR_DIR_STR winx68k_dir
@@ -518,6 +522,11 @@ static void menu_joykey(int v)
 static void menu_showfps(int v)
 {
 	Config.ShowFPS = v;
+}
+
+static void menu_mpu_clock(int v)
+{
+	Config.XVIMode = v;	/* 0: 10 MHz, 1: 16 MHz, 2: 24 MHz */
 }
 
 // ex. ./hoge/.. -> ./
