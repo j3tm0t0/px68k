@@ -11,6 +11,7 @@
 #include	"gvram.h"
 #include	"m68000.h"
 #include	"memory.h"
+#include	"../psp/gecomp.h"
 
 #if defined(__GNUC__)
 #define GRP_ALIGN	__attribute__((__aligned__(4)))
@@ -18,7 +19,7 @@
 #define GRP_ALIGN
 #endif
 
-	BYTE	GVRAM[0x80000] GRP_ALIGN;
+	BYTE	GVRAM[0x80000] __attribute__((__aligned__(64)));	/* a GE texture (psp/gecomp.c) */
 	WORD	Grp_LineBuf[1024] GRP_ALIGN;
 	WORD	Grp_LineBufSP[1024] GRP_ALIGN;		// 特殊プライオリティ／半透明用バッファ
 	WORD	Grp_LineBufSP2[1024] GRP_ALIGN;		// 半透明ベースプレーン用バッファ（非半透明ビット格納）
@@ -57,6 +58,49 @@ typedef DWORD GDWORD;
 #endif
 
 #define GRP_ODD(p)	(((size_t)(p)) & 2)
+
+// Build with -DGRP_STATS to log (every 65536 decoder calls) which decoders
+// run with which page/opaq, and the video controller registers.
+#if defined(GRP_STATS) && defined(PSP)
+#include "psp/log.h"
+static const char *grp_stat_name[11] = {
+	"16", "8", "4", "4h", "16SP", "8SP", "4SP", "4hSP", "8TR", "4TR", "4multi"
+};
+static unsigned grp_stat[11][4][2], grp_stat_calls;
+
+static void Grp_StatDump(void)
+{
+	char buf[512];
+	int v, p, o, len;
+
+	log_note("grp: VC0 %02x VC1 %02x VC2 %02x %02x dotx %u r29 %02x "
+		 "scr %x,%x %x,%x %x,%x %x,%x\n",
+		 VCReg0[1], VCReg1[1], VCReg2[0], VCReg2[1], (unsigned)TextDotX,
+		 CRTC_Regs[0x29],
+		 (unsigned)GrphScrollX[0], (unsigned)GrphScrollY[0],
+		 (unsigned)GrphScrollX[1], (unsigned)GrphScrollY[1],
+		 (unsigned)GrphScrollX[2], (unsigned)GrphScrollY[2],
+		 (unsigned)GrphScrollX[3], (unsigned)GrphScrollY[3]);
+	len = 0;
+	buf[0] = 0;
+	for (v = 0; v < 11; v++)
+		for (p = 0; p < 4; p++)
+			for (o = 0; o < 2; o++)
+				if (grp_stat[v][p][o] && len < (int)sizeof(buf) - 40)
+					len += sprintf(buf + len, " %s/p%d/o%d:%u",
+						       grp_stat_name[v], p, o, grp_stat[v][p][o]);
+	log_note("grp: calls%s\n", buf);
+	memset(grp_stat, 0, sizeof(grp_stat));
+	grp_stat_calls = 0;
+}
+#define GRP_STAT(v, p, o) do {						\
+		grp_stat[v][(p) & 3][(o) ? 1 : 0]++;			\
+		if (++grp_stat_calls >= 65536)				\
+			Grp_StatDump();					\
+	} while (0)
+#else
+#define GRP_STAT(v, p, o) do { } while (0)
+#endif
 
 // GVRAM offset of the first byte of the line shown at VLINE
 GRP_INLINE DWORD Grp_LineOfs(DWORD scry)
@@ -212,6 +256,7 @@ static void Grp_DrawLine4_C(DWORD page, int opaq)
 	DWORD x, n1, n = TextDotX;
 	const GWORD *src;
 
+	GRP_STAT(2, page, opaq);
 	page &= 3;
 	x = GrphScrollX[page] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]) + x * 2);
@@ -466,6 +511,7 @@ void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
 			if (pg[k] >= pg[k - 1])
 				break;
 		if (k == n) {			// strictly descending: any scroll
+			GRP_STAT(10, n - 1, 0);
 			Grp4_Desc(pg, n);
 			return;
 		}
@@ -489,6 +535,7 @@ void FASTCALL Grp_DrawLine4Multi(DWORD pages, int n)
 		Grp4_MKey = pages | (n << 8);
 	}
 
+	GRP_STAT(10, n - 1, 1);
 	Grp4_PalCheck(1);
 	src = (const GWORD *)(GVRAM + y + x * 2);
 	n1 = x ^ 0x1ff;				// as Grp_DrawLine4_C
@@ -507,6 +554,7 @@ static void Grp_DrawLine4h_C(void)
 	DWORD x, y, run, n = TextDotX;
 	int bits;
 
+	GRP_STAT(3, 0, 1);
 	y = GrphScrollY[0] + VLINE;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
 		y += VLINE;
@@ -586,6 +634,7 @@ static void Grp_DrawLine4SP_C(DWORD page, DWORD scrx, DWORD scry)
 	DWORD x, n1, n = TextDotX;
 	const GWORD *src;
 
+	GRP_STAT(6, page, 1);
 	x = scrx & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(scry) + x * 2);
 	n1 = 512 - x;
@@ -608,6 +657,7 @@ static void Grp_DrawLine4hSP_C(void)
 	DWORD v, c, m;
 	int bits;
 
+	GRP_STAT(7, 0, 1);
 	y = GrphScrollY[0] + VLINE;
 	if ((CRTC_Regs[0x29] & 0x1c) == 0x1c)
 		y += VLINE;
@@ -689,6 +739,7 @@ static void Grp_DrawLine4TR_C(DWORD page, int opaq)
 	const GWORD *line;
 	DWORD x, i, end, n = TextDotX;
 
+	GRP_STAT(9, page, opaq);
 	page &= 3;
 	line = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[page]));
 	x = GrphScrollX[page] & 0x1ff;
@@ -732,6 +783,7 @@ static void Grp_DrawLine8_C(int page, int opaq)
 	const BYTE *a, *b;
 	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
 
+	GRP_STAT(1, page, opaq);
 	page &= 1;
 	x = GrphScrollX[page * 2] & 0x1ff;
 	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
@@ -785,6 +837,7 @@ static void Grp_DrawLine8SP_C(int page)
 	const BYTE *a, *b;
 	DWORD x, x0, i, end, awrap, bwrap, n = TextDotX;
 
+	GRP_STAT(5, page, 1);
 	page &= 1;
 	x = GrphScrollX[page * 2] & 0x1ff;
 	x0 = GrphScrollX[page * 2 + 1] & 0x1ff;
@@ -817,6 +870,7 @@ static void Grp_DrawLine8TR_C(int page, int opaq)
 	const BYTE *line, *src;
 	DWORD x, i, end, v, v0, c, n = TextDotX;
 
+	GRP_STAT(8, page, opaq);
 	if (!opaq)
 		return;
 
@@ -857,6 +911,7 @@ static void Grp_DrawLine16_C(void)
 	WORD *dst = Grp_LineBuf;
 	DWORD x, n1, n = TextDotX;
 
+	GRP_STAT(0, 0, 1);
 	x = GrphScrollX[0] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
 	n1 = 512 - x;
@@ -890,6 +945,7 @@ static void Grp_DrawLine16SP_C(void)
 	const GWORD *src;
 	DWORD x, i, n1, n = TextDotX;
 
+	GRP_STAT(4, 0, 1);
 	x = GrphScrollX[0] & 0x1ff;
 	src = (const GWORD *)(GVRAM + Grp_LineOfs(GrphScrollY[0]) + x * 2);
 	n1 = 512 - x;
@@ -922,6 +978,9 @@ void GVRAM_Init(void)
 	int i;
 
 	ZeroMemory(GVRAM, 0x80000);
+#ifdef PSP
+	GE_GGenAll++;	/* the GE's copies (psp/gecomp.c) */
+#endif
 	for (i=0; i<128; i++)			// 16bit color パレットアドレス計算用
 	{
 		Pal16Adr[i*2] = i*4;
@@ -937,6 +996,8 @@ void GVRAM_Init(void)
 void FASTCALL GVRAM_FastClear(void)
 {
 	DWORD v, h;
+
+	GE_GUARD_FULL(GE_ST_FASTCLR);
 	v = ((CRTC_Regs[0x29]&4)?512:256);
 	h = ((CRTC_Regs[0x29]&3)?512:256);
 	// やっぱちゃんと範囲指定しないと変になるものもある（ダイナマイトデュークとか）
@@ -1019,6 +1080,10 @@ void FASTCALL GVRAM_FastClear(void)
 			*p++ &= CRTC_FastClrMask;
 			offx = (offx + 1) & 0x1ff;
 		}
+#ifdef PSP
+		/* the words written (p does not wrap at the line end) */
+		GE_GvramSpan(offy + (GrphScrollX[0] & 0x1ff) * 2, h * 2);
+#endif
 
 		offy = (offy + 0x400) & 0x7fc00;
 	}
@@ -1095,6 +1160,7 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	WORD *ram = (WORD*)(&GVRAM[adr&0x7fffe]);
 	WORD temp;
 
+	GE_GUARD_GVRAM(adr);
 	adr ^= 1;
 	adr -= 0xc00000;
 
@@ -1103,7 +1169,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 	{
 		if ( adr<0x80000 )
 		{
+#ifdef PSP
+			if (GVRAM[adr] != data) {
+				GVRAM[adr] = data;
+				GE_GVRAM_ROW(adr);
+			}
+#else
 			GVRAM[adr] = data;
+#endif
 			line = (((adr&0x7ffff)/1024)-GrphScrollY[0])&511;
 		}
 	}
@@ -1120,13 +1193,22 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 				page += (BYTE)((adr>>8)&4);
 				temp = ((WORD)data&15)<<page;
 				*ram = ((*ram)&(~(0xf<<page)))|temp;
+				GE_GVRAM_ROW(((adr&0xff800)>>1)+(adr&0x3fe));
 				line = ((adr/2048)-GrphScrollY[0])&1023;
 			}
 			else
 			{
 				page = (BYTE)((adr>>17)&0x0c);
 				temp = ((WORD)data&15)<<page;
+#ifdef PSP
+				temp |= (*ram)&(~(0xf<<page));
+				if (*ram != temp) {
+					*ram = temp;
+					GE_GVRAM_ROW(adr);	/* the GE's copy of the row is old */
+				}
+#else
 				*ram = ((*ram)&(~(0xf<<page)))|temp;
+#endif
 				switch(adr/0x80000)
 				{
 					case 0:	scr = GrphScrollY[0]; break;
@@ -1150,7 +1232,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 					line = (((adr&0x7ffff)>>10)-scr)&511;		//
 					if (adr&0x80000) adr+=1;
 					adr &= 0x7ffff;
+#ifdef PSP
+					if (GVRAM[adr] != data) {
+						GVRAM[adr] = data;
+						GE_GVRAM_ROW(adr);	/* the GE's copy of the row is old */
+					}
+#else
 					GVRAM[adr] = data;
+#endif
 				}
 			}
 //			else
@@ -1162,7 +1251,14 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 		case 3:					// 65536 colors
 			if ( adr<0x80000 )
 			{
+#ifdef PSP
+				if (GVRAM[adr] != data) {
+					GVRAM[adr] = data;
+					GE_GVRAM_ROW(adr);	/* the GE's copies, its 65536 colour dots */
+				}
+#else
 				GVRAM[adr] = data;
+#endif
 				line = (((adr&0x7ffff)>>10)-GrphScrollY[0])&511;
 			}
 //			else
@@ -1179,7 +1275,9 @@ void FASTCALL GVRAM_Write(DWORD adr, BYTE data)
 /*
  * A CPU word write (adr even, $c00000-$dfffff): the same as
  * GVRAM_Write(adr, data >> 8) then GVRAM_Write(adr + 1, data & 0xff), as
- * mem_wrap.c did, in one go (3D games fill GVRAM a word at a time).
+ * mem_wrap.c did, in one go (3D games fill GVRAM a word at a time).  The
+ * GE hooks once per word (gecomp.h): both bytes are in the same word, row
+ * and column.
  */
 typedef WORD __attribute__((may_alias)) GVRAM_WORD;
 
@@ -1189,8 +1287,16 @@ void FASTCALL GVRAM_WriteWord(DWORD adr, WORD data)
 	const BYTE r28 = CRTC_Regs[0x28];
 
 	if ( (r28&8) || (r28&3)==3 ) {		/* 65536 colours: both bytes stored */
+		GE_GUARD_GVRAM(adr);
 		if ( a<0x80000 ) {
+#ifdef PSP
+			if ( *(GVRAM_WORD *)&GVRAM[a]!=data ) {
+				*(GVRAM_WORD *)&GVRAM[a] = data;
+				GE_GVRAM_ROW(a);
+			}
+#else
 			*(GVRAM_WORD *)&GVRAM[a] = data;
+#endif
 			if ( !(r28&8) )
 				TextDirtyLine[((a>>10)-GrphScrollY[0])&511] = 1;
 		} else if ( !(r28&8) )
@@ -1200,7 +1306,8 @@ void FASTCALL GVRAM_WriteWord(DWORD adr, WORD data)
 	if ( !(r28&4) ) {
 		/*
 		 * 16 / 256 colours, 512 dots: the high byte (odd offset in
-		 * GVRAM_Write) is not stored, only line 1023 is marked.
+		 * GVRAM_Write) is not stored, only line 1023 is marked; its
+		 * guard does nothing (odd offset).
 		 */
 		TextDirtyLine[1023] = 1;
 		GVRAM_Write(adr + 1, (BYTE)data);

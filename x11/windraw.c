@@ -45,6 +45,11 @@
 #include "prop.h"
 #include "status.h"
 #include "tvram.h"
+#include "../psp/prof.h"
+#ifdef PSP
+#include "../psp/gecomp.h"
+#include "../psp/log.h"
+#endif
 #include "joystick.h"
 #include "keyboard.h"
 
@@ -241,13 +246,17 @@ void WinDraw_HideSplash(void)
           |仮想キーボード用    || 512*256*2byte
           |    に使うかも領域  |V
 0x041cc000+--------------------+
-          |                    |
           | Virtexes           |
-          |                    |
-          +--------------------+
+0x041d0000+--------------------+
+          | GE compositing: BG patterns (psp/gecomp.c)
+0x041da000+--------------------+
+
+GE compositing (psp/gecomp.c) also uses the ScrBufR area as its text/BG
+layer (512 x 256) when the screen is at most 512 dots wide, and the z buffer.
 */
 
-static unsigned int __attribute__((aligned(16))) list[262144];
+/* direct lists; the GE compositing lists have memory of their own (psp/gecomp.c) */
+static unsigned int __attribute__((aligned(16))) list[16384];
 
 void *fbp0, *fbp1, *zbp;
 struct Vertexes {
@@ -259,14 +268,226 @@ struct Vertexes {
 	short x2, y2, z2;      // Screen (ex, ey, ez)
 };
 
-struct Vertexes *vtxl = (struct Vertexes *)0x41cc000;
-struct Vertexes *vtxr = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes));
-struct Vertexes *vtxm = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes) * 2);
-struct Vertexes *vtxk = (struct Vertexes *)(0x41cc000 + sizeof(struct Vertexes) * 3);
+/*
+ * The CPU reaches VRAM through the D-cache at 0x04000000 and around it at
+ * 0x44000000.  Everything the CPU writes for the GE to read (vertices, the
+ * screen and keyboard textures) goes through the uncached alias, so the GE
+ * never reads stale data and no cache writeback is needed.  The GE commands
+ * keep only the low 24 bits of an address, so the alias can be passed as is.
+ */
+#define PSP_UNCACHED(a) ((a) | 0x40000000)
+
+struct Vertexes *vtxl = (struct Vertexes *)PSP_UNCACHED(0x41cc000);
+struct Vertexes *vtxr = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes));
+struct Vertexes *vtxm = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 2);
+struct Vertexes *vtxk = (struct Vertexes *)PSP_UNCACHED(0x41cc000 + sizeof(struct Vertexes) * 3);
+
+#ifdef PSP
+/*
+ * Frame rate overlay ("Show FPS" in the menu): emulated frames per second,
+ * counted in x11/winx68k.cpp, drawn 2x from a tiny 3x5 font texture.
+ */
+int WinDraw_FpsEmu10 = -1;	/* emulated frames per second x10; -1: not measured yet */
+int WinDraw_FpsShown;		/* frames presented per second */
+
+#define FPS_TEX_W 64
+#define FPS_TEX_H 8
+static unsigned short __attribute__((aligned(16))) fps_tex[FPS_TEX_W * FPS_TEX_H];
+static char fps_text[16];
+
+static const unsigned char *fps_glyph(char c)
+{
+	static const unsigned char digits[10][5] = {
+		{7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
+		{7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
+	};
+	static const unsigned char dot[5] = {0,0,0,0,2}, slash[5] = {1,1,2,4,4};
+	static const unsigned char F[5] = {7,4,6,4,4}, P[5] = {7,5,7,4,4}, S[5] = {7,4,7,1,7};
+	static const unsigned char blank[5] = {0,0,0,0,0};
+
+	if (c >= '0' && c <= '9')
+		return digits[c - '0'];
+	switch (c) {
+	case '.': return dot;
+	case '/': return slash;
+	case 'F': return F;
+	case 'P': return P;
+	case 'S': return S;
+	default: return blank;
+	}
+}
+
+static void fps_overlay(void)
+{
+	char text[16];
+	struct Vertexes *v;
+	int i, x, y;
+
+	if (WinDraw_FpsEmu10 < 0)
+		return;
+	snprintf(text, sizeof(text), "%d.%d", WinDraw_FpsEmu10 / 10, WinDraw_FpsEmu10 % 10);
+	if (strcmp(text, fps_text)) {
+		strcpy(fps_text, text);
+		for (i = 0; i < FPS_TEX_W * FPS_TEX_H; i++)
+			fps_tex[i] = 0;
+		for (i = 0; text[i] && (i + 1) * 4 <= FPS_TEX_W; i++) {
+			const unsigned char *g = fps_glyph(text[i]);
+			for (y = 0; y < 5; y++)
+				for (x = 0; x < 3; x++)
+					if (g[y] & (4 >> x))
+						fps_tex[(y + 1) * FPS_TEX_W + i * 4 + x + 1] = 0xffff;
+		}
+		sceKernelDcacheWritebackRange(fps_tex, sizeof(fps_tex));
+	}
+	v = (struct Vertexes *)sceGuGetMemory(sizeof(struct Vertexes));
+	memset(v, 0, sizeof(*v));
+	v->u2 = FPS_TEX_W;
+	v->v2 = FPS_TEX_H;
+	v->x = 2;
+	v->y = 2;
+	v->x2 = 2 + FPS_TEX_W * 2;
+	v->y2 = 2 + FPS_TEX_H * 2;
+	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+	sceGuTexImage(0, FPS_TEX_W, FPS_TEX_H, FPS_TEX_W, fps_tex);
+	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
+	sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+	sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, v);
+}
+#endif
+
 
 #define PSP_BUF_WIDTH (512)
 #define PSP_SCR_WIDTH (480)
 #define PSP_SCR_HEIGHT (272)
+
+/* Composited X68000 screen: 512 x 512 left half, 256 x 512 right half. */
+#define PSP_SCRBUF_L 0x040cc000
+#define PSP_SCRBUF_R 0x0414c000
+#define PSP_SCRBUF_ROWS 512
+#define PSP_LINE_MAX (512 + 256)
+
+/*
+ * WinDraw_Draw() does not wait for the GE: it finishes the display list and
+ * leaves psp_ge_pending set.  psp_ge_wait() waits for the GE and shows the
+ * frame; it runs before anything the GE may still be reading is written (a
+ * screen line, the keyboard texture, the vertices) and before the display
+ * list is reused.  The first visible line of the next frame comes after the
+ * vertical blanking has been emulated, so the GE is normally done by then.
+ */
+static int psp_ge_pending;	/* a frame was queued: show it once the GE is done */
+static int psp_ge_busy;		/* lists were queued since the last sceGuSync() */
+static void *psp_drawbuf;	/* the draw buffer (sceGuSwapBuffers) */
+
+/* returns the time waited, us */
+static unsigned psp_ge_wait(void)
+{
+	unsigned t = 0;
+
+	if (psp_ge_busy) {
+		unsigned t0 = sceKernelGetSystemTimeLow();
+
+		psp_ge_busy = 0;
+		sceGuSync(0, 0);
+		t = sceKernelGetSystemTimeLow() - t0;
+	}
+	if (psp_ge_pending) {
+		psp_ge_pending = 0;
+		psp_drawbuf = sceGuSwapBuffers();
+	}
+	GE_Done();	/* the GE no longer reads the X68000 memory */
+	return t;
+}
+
+/*
+ * The waiting bands as a call list (GE_Build), with the D-cache written back
+ * (its vertices, GVRAM, TextDrawWork): the GE may run it from now on.
+ */
+static void *psp_ge_build(int passes)
+{
+	SceKernelThreadInfo ti0, ti1;
+	unsigned t0, t1;
+	void *l;
+
+	/* the thread's own run time too: other threads (sound) may run meanwhile */
+	ti0.size = sizeof(ti0);
+	ti1.size = sizeof(ti1);
+	sceKernelReferThreadStatus(0, &ti0);
+	t0 = sceKernelGetSystemTimeLow();
+	l = GE_Build(psp_drawbuf, passes);
+	t1 = sceKernelGetSystemTimeLow();
+	sceKernelDcacheWritebackAll();
+	GE_Stat[GE_ST_BUILD_US + 4] += sceKernelGetSystemTimeLow() - t1;
+	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
+	if (sceKernelReferThreadStatus(0, &ti1) >= 0)
+		GE_Stat[GE_ST_BUILD_US + 5] += ti1.runClocks.low - ti0.runClocks.low;
+	return l;
+}
+
+/* run call list l in a direct list of its own (list[]: the GE is idle) and wait */
+static unsigned psp_ge_run(void *l)
+{
+	unsigned t0 = sceKernelGetSystemTimeLow();
+
+	sceGuStart(GU_DIRECT, list);
+	sceGuCallList(l);
+	sceGuFinish();
+	sceGuSync(0, 0);
+	return sceKernelGetSystemTimeLow() - t0;
+}
+
+/*
+ * GE compositing (psp/gecomp.c): draw the lines waiting for the GE now and
+ * wait until it is done, so that what it reads (GVRAM, the text screen, the
+ * BG patterns and maps, the sprites) can be written again.  Called by the
+ * guards (GE_GUARD_*) of whatever writes them when the write hits.
+ */
+void WinDraw_GESync(void)
+{
+	GE_Stat[GE_ST_WAIT_US] += psp_ge_wait();
+	if (GE_Pending()) {
+		GE_Stat[GE_ST_WAIT_US] += psp_ge_run(psp_ge_build(GE_P_ALL));
+		GE_Done();
+		GE_StatFlushes++;
+	}
+}
+
+/* wait until the GE is done with the lists it was given (not the waiting lines) */
+void WinDraw_GEWait(void)
+{
+	GE_Stat[GE_ST_WAIT_US] += psp_ge_wait();
+}
+
+/* if the GE is done with its lists, finish them (GE_Done) without waiting */
+void WinDraw_GEPoll(void)
+{
+	if (!psp_ge_busy || sceGuSync(0, 1) == 0)
+		psp_ge_wait();
+}
+
+/*
+ * Hand the lines waiting for the GE to it now, without waiting: their list
+ * is queued behind the GE's others, from a direct list of its own in the
+ * GE's list memory.  If that cannot be (GE_CanKick), as WinDraw_GESync.
+ */
+void WinDraw_GEKick(void)
+{
+	void *l, *d;
+
+	WinDraw_GEPoll();
+	if (!GE_Pending())
+		return;
+	if (!GE_CanKick()) {
+		WinDraw_GESync();
+		return;
+	}
+	l = psp_ge_build(GE_P_ALL);
+	d = GE_ListMem(64);
+	sceGuStart(GU_DIRECT, d);
+	sceGuCallList(l);
+	sceGuFinish();
+	psp_ge_busy = 1;
+	GE_StatFlushes++;
+}
 
 #endif // PSP
 
@@ -395,9 +616,10 @@ int WinDraw_Init(void)
 	sceDisplayWaitVblankStart();
 	sceGuDisplay(GU_TRUE);
 
-	ScrBufL = (WORD *)0x040cc000;
-	ScrBufR = (WORD *)0x0414c000;
-	kbd_buffer = (WORD *)0x418c000;
+	/* uncached: see PSP_UNCACHED; psp_capture() reads these too */
+	ScrBufL = (WORD *)PSP_UNCACHED(PSP_SCRBUF_L);
+	ScrBufR = (WORD *)PSP_UNCACHED(PSP_SCRBUF_R);
+	kbd_buffer = (WORD *)PSP_UNCACHED(0x418c000);
 
 	draw_kbd_to_tex();
 #else
@@ -423,6 +645,22 @@ int WinDraw_Init(void)
 void
 WinDraw_Cleanup(void)
 {
+#ifdef PSP
+	psp_ge_wait();
+#endif
+}
+
+/*
+ * Show the last frame WinDraw_Draw() queued.  Without this it is shown when
+ * the next frame starts compositing; call it when frames are skipped or the
+ * emulation stops so that the frame does not wait for the next drawn one.
+ */
+void
+WinDraw_Flush(void)
+{
+#ifdef PSP
+	WinDraw_GESync();
+#endif
 }
 
 void
@@ -482,6 +720,9 @@ WinDraw_Draw(void)
 {
 	SDL_Surface *sdl_surface;
 	static int oldtextx = -1, oldtexty = -1;
+#ifdef PSP
+	void *ge_list;
+#endif
 
 	if (oldtextx != TextDotX) {
 		oldtextx = TextDotX;
@@ -572,11 +813,29 @@ WinDraw_Draw(void)
 	SDL_GL_SwapWindow(sdl_window);
 
 #elif defined(PSP)
+	PROF_BEGIN(draw);
+	PROF_COUNT(PROF_FRAMES, 1);
+	/* normally done already, by the first line of this frame */
+	GE_Stat[GE_ST_FRAME_WAIT_US] += psp_ge_wait();
+	ge_list = NULL;
+	if (GE_Pending() && GE_TimeSync) {
+		/* "ge time": each pass in a list of its own, timed */
+		int k;
+
+		for (k = 0; k < GE_NPASS; k++) {
+			GE_Stat[GE_ST_PASS_US + k] +=
+				psp_ge_run(psp_ge_build((1 << k) | (k == GE_NPASS - 1 ? GE_P_END : 0)));
+			GE_Done();
+		}
+	} else if (GE_Pending())
+		ge_list = psp_ge_build(GE_P_ALL);	/* the lines left to the GE, into ScrBufL */
 	sceGuStart(GU_DIRECT, list);
+	if (ge_list)
+		sceGuCallList(ge_list);
+	GE_Stat[GE_ST_FRAMES]++;
 
 	sceGuClearColor(0);
-	sceGuClearDepth(0);
-	sceGuClear(GU_COLOR_BUFFER_BIT|GU_DEPTH_BUFFER_BIT);
+	sceGuClear(GU_COLOR_BUFFER_BIT);	/* no depth test, so no depth clear */
 
 	// 左半分
 	vtxl->u = 0;
@@ -595,7 +854,7 @@ WinDraw_Draw(void)
 	vtxl->z2 = 0;
 
 	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-	sceGuTexImage(0, 512, 512, 512, ScrBufL);
+	sceGuTexImage(0, 512, 512, 512, (void *)PSP_SCRBUF_L);
 	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
 	sceGuTexFilter(GU_LINEAR, GU_LINEAR);
 
@@ -617,7 +876,7 @@ WinDraw_Draw(void)
 		vtxr->z2 = 0;
 
 		sceGuTexMode(GU_PSM_5650, 0, 0, 0);
-		sceGuTexImage(0, 256, 512, 256, ScrBufR);
+		sceGuTexImage(0, 256, 512, 256, (void *)PSP_SCRBUF_R);
 		sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
 		sceGuTexFilter(GU_LINEAR, GU_LINEAR);
 
@@ -645,10 +904,21 @@ WinDraw_Draw(void)
 		sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, vtxk);
 	}
 
-	sceGuFinish();
-	sceGuSync(0, 0);
+	if (Config.ShowFPS)
+		fps_overlay();
 
-	sceGuSwapBuffers();
+	sceGuFinish();
+	if (GE_TimeSync) {	/* "ge time": how long the GE takes for the frame */
+		unsigned t0 = sceKernelGetSystemTimeLow();
+
+		sceGuSync(0, 0);
+		GE_Stat[GE_ST_GE_US] += sceKernelGetSystemTimeLow() - t0;
+	}
+	/* sceGuSync() and sceGuSwapBuffers() are left to psp_ge_wait() */
+	psp_ge_pending = 1;
+	psp_ge_busy = 1;
+	/* GE_Render() set GE_Guard: the GE reads the X68000 memory until psp_ge_wait() */
+	PROF_END(draw, PROF_DRAW);
 
 #else // OpenGL ES 未使用
 
@@ -769,10 +1039,10 @@ WinDraw_Draw(void)
  * Compositing.  The helpers below draw one line of wd_n pixels into wd_dst,
  * x = 0 .. wd_n - 1 (BG_LineBuf and Text_TrFlag are read from x + 16).
  *
- * Elsewhere than on the PSP wd_dst is the ScrBuf row itself.  PSP: wd_dst is
- * psp_line, a line buffer; WinDraw_DrawLine() then copies the finished line
- * once into the textures (psp_flush_line()), where the left/right (512 + 256)
- * split is handled.
+ * PSP: wd_dst is psp_line, a line buffer in cached RAM that stays in the
+ * D-cache over all the passes of a line; DrawLine() then copies the finished
+ * line once into the VRAM textures (psp_flush_line()), where the left/right
+ * (512 + 256) split is handled.  Elsewhere wd_dst is the ScrBuf row itself.
  *
  * Where the buffers are word aligned, the source pixels are looked at two at
  * a time: two transparent (0) pixels are skipped with one test, two opaque
@@ -786,19 +1056,69 @@ static WORD *wd_dst;	/* the line being composited */
 static int wd_n;	/* its width in pixels */
 
 #ifdef PSP
-#define PSP_LINE_MAX (512 + 256)
 static WORD psp_line[PSP_LINE_MAX] __attribute__((aligned(64)));
 
-/* Store the composited line VLINE in the textures: 512 left + 256 right. */
+/*
+ * Copy n pixels of a line to VRAM (uncached).  dst and src are 16-byte
+ * aligned (rows of 1024/512 bytes, psp_line).
+ *
+ * PSP_VFPU_COPY (off by default) moves 16 bytes per instruction with the
+ * VFPU instead; it needs the thread that runs the emulation to have the
+ * VFPU attribute, e.g. PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER |
+ * PSP_THREAD_ATTR_VFPU) in winx68k.cpp, or it raises an exception.
+ */
+static void psp_copy_line(WORD *dst, const WORD *src, int n)
+{
+	WD_PAIR *d = (WD_PAIR *)dst;
+	const WD_PAIR *s = (const WD_PAIR *)src;
+	int k;
+
+#ifdef PSP_VFPU_COPY
+	for (k = n >> 5; k > 0; k--, d += 16, s += 16) {	/* 64 bytes */
+		__asm__ volatile(
+			"lv.q C000, 0(%1)\n\t"
+			"lv.q C010, 16(%1)\n\t"
+			"lv.q C020, 32(%1)\n\t"
+			"lv.q C030, 48(%1)\n\t"
+			"sv.q C000, 0(%0)\n\t"
+			"sv.q C010, 16(%0)\n\t"
+			"sv.q C020, 32(%0)\n\t"
+			"sv.q C030, 48(%0)\n\t"
+			: : "r"(d), "r"(s) : "memory");
+	}
+	dst += n & ~31;
+	src += n & ~31;
+	n &= 31;
+#endif
+	for (k = n >> 1; k >= 4; k -= 4, d += 4, s += 4) {
+		UINT32 a = s[0], b = s[1], c = s[2], e = s[3];
+		d[0] = a;
+		d[1] = b;
+		d[2] = c;
+		d[3] = e;
+	}
+	for (; k > 0; k--)
+		*d++ = *s++;
+	if (n & 1)
+		dst[n - 1] = src[n - 1];
+}
+
+/* Store the composited line VLINE (uncached writes to the VRAM textures). */
 static void psp_flush_line(void)
 {
 	int n = wd_n;
+	unsigned t;
 
-	if (VLINE >= 512)
+	if ((t = psp_ge_wait()) != 0) {
+		GE_Stat[GE_ST_LINE_WAITS]++;
+		GE_Stat[GE_ST_LINE_WAIT_US] += t;
+	}
+	if (VLINE >= PSP_SCRBUF_ROWS)
 		return;		/* below the textures */
-	memcpy(ScrBufL + VLINE * 512, psp_line, ((n > 512) ? 512 : n) * 2);
+	GE_ScrRowWritten(VLINE);	/* the GE's GVRAM copy may use the row */
+	psp_copy_line(ScrBufL + VLINE * 512, psp_line, (n > 512) ? 512 : n);
 	if (n > 512)
-		memcpy(ScrBufR + VLINE * 256, psp_line + 512, (n - 512) * 2);
+		psp_copy_line(ScrBufR + VLINE * 256, psp_line + 512, n - 512);
 }
 #endif
 
@@ -1003,24 +1323,47 @@ INLINE void WinDraw_DrawHalfLine(void)
 	}
 }
 
+static void DrawLine(void);
+
 void WinDraw_DrawLine(void)
 {
-	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
-
 	/*
 	 * VLINE is (DWORD)-1 when the line was outside CRTC_VSTART..VEND at the
 	 * start of the scan line and a CRTC write moved the display start before
 	 * it was drawn.  TextDirtyLine[-1] is the last byte of TextDrawPattern
 	 * (plane 3, pattern 0xff, dot 7): clearing it lost that bit of every
-	 * text byte decoded afterwards (e.g. Gradius' power-up gauge).  Such a
-	 * line is not shown; the SDL builds composited it into the row before
-	 * ScrBuf, the PSP drops it (psp_flush_line).
+	 * text byte decoded afterwards (e.g. Gradius' power-up gauge).  Nothing
+	 * of such a line is shown (psp_flush_line drops VLINE >= 512).
 	 */
-	if (VLINE >= 1024)
+	if (VLINE >= 1024) {
+#ifdef PSP
+		static int logged;
+		if (logged < 4) {
+			logged++;
+			log_printf("WinDraw_DrawLine: VLINE %d out of range, not drawn\n", (int)VLINE);
+		}
+#endif
 		return;
+	}
 	if (!TextDirtyLine[VLINE]) return;
 	TextDirtyLine[VLINE] = 0;
 	Draw_DrawFlag = 1;
+	PROF_COUNT(PROF_LINES, 1);
+#ifdef PSP
+	if (GE_Enabled && GE_Line())
+		return;		/* drawn by the GE with the frame */
+#endif
+	{
+		PROF_BEGIN(line);
+		DrawLine();
+		PROF_END(line, PROF_MIX);	/* the decoders are subtracted when reported */
+	}
+}
+
+static void DrawLine(void)
+{
+	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
+	PROF_BEGIN(grp);
 
 
 	if (Debug_Grp)
@@ -1175,6 +1518,7 @@ void WinDraw_DrawLine(void)
 		break;
 	}
 	}
+	PROF_END(grp, PROF_GRP);
 
 
 //	if ( ( ((VCReg1[0]&0x30)>>4) < (VCReg1[0]&0x03) ) && (gon) )
@@ -1184,7 +1528,7 @@ void WinDraw_DrawLine(void)
 	{						// BGの方が上
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			Text_DrawLine(1);
+			{ PROF_BEGIN(t); Text_DrawLine(1); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 		else
@@ -1199,7 +1543,7 @@ void WinDraw_DrawLine(void)
 			VLINEBG <<= s1;
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
-			BG_DrawLine(!ton, 0);
+			{ PROF_BEGIN(b); BG_DrawLine(!ton, 0); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 	}
@@ -1215,7 +1559,7 @@ void WinDraw_DrawLine(void)
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
 			ZeroMemory(Text_TrFlag, TextDotX+16);
-			BG_DrawLine(1, 1);
+			{ PROF_BEGIN(b); BG_DrawLine(1, 1); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 		else
@@ -1234,7 +1578,7 @@ void WinDraw_DrawLine(void)
 
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			Text_DrawLine(!bgon);
+			{ PROF_BEGIN(t); Text_DrawLine(!bgon); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 	}
@@ -1704,6 +2048,7 @@ int WinDraw_MenuInit(void)
 #ifdef PSP
 static void psp_draw_menu(void)
 {
+	psp_ge_wait();
 	sceKernelDcacheWritebackAll();
 
 	sceGuStart(GU_DIRECT, list);
@@ -2028,6 +2373,9 @@ void WinDraw_reverse_key(int x, int y)
 	
 	kp = Keyboard_get_key_ptr(kbd_kx, kbd_ky);
 
+#ifdef PSP
+	psp_ge_wait();	/* the GE may still be reading kbd_buffer */
+#endif
 	p = kbd_buffer + KBDBUF_WIDTH * kbd_key[kp].y + kbd_key[kp].x;
 
 	for (i = 0; i < kbd_key[kp].h; i++) {

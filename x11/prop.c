@@ -229,7 +229,8 @@ void LoadConfig(void)
 	winy = GetPrivateProfileInt(ini_title, "WinPosY", 0, winx68k_ini);
 
 #ifdef PSP
-	Config.FrameRate = (BYTE)GetPrivateProfileInt(ini_title, "FrameRate", 5, winx68k_ini);
+	/* 7 = auto: with GE compositing every frame can be drawn at full speed */
+	Config.FrameRate = (BYTE)GetPrivateProfileInt(ini_title, "FrameRate", 7, winx68k_ini);
 #else
 	Config.FrameRate = (BYTE)GetPrivateProfileInt(ini_title, "FrameRate", 7, winx68k_ini);
 #endif
@@ -334,6 +335,7 @@ void LoadConfig(void)
 	}
 
 	Config.NoWaitMode = GetPrivateProfileInt(ini_title, "NoWaitMode", 0, winx68k_ini);
+	Config.ShowFPS = GetPrivateProfileInt(ini_title, "ShowFPS", 0, winx68k_ini);
 
 	for (i=0; i<2; i++)
 	{
@@ -469,6 +471,8 @@ void SaveConfig(void)
 
 	wsprintf(buf, "%d", Config.NoWaitMode);
 	WritePrivateProfileString(ini_title, "NoWaitMode", buf, winx68k_ini);
+	wsprintf(buf, "%d", Config.ShowFPS);
+	WritePrivateProfileString(ini_title, "ShowFPS", buf, winx68k_ini);
 
 	for (i=0; i<2; i++)
 	{

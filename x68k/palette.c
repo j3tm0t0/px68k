@@ -10,6 +10,7 @@
 #include	"memory.h"
 #include	"m68000.h"
 #include	"palette.h"
+#include	"../psp/gecomp.h"
 
 	BYTE	Pal_Regs[1024];
 	WORD	TextPal[256];
@@ -31,6 +32,10 @@ void Pal_SetColor(void)
 	WORD B[5] = {0, 0, 0, 0, 0};
 	int r, g, b, i;
 
+#ifdef PSP
+	GE_GUARD_FULL(GE_ST_PALS);	/* the GE's waiting 65536 colour lines use Pal16 */
+	GE_Pal16Gen++;
+#endif
 	r = g = b = 5;
 	Pal_R = Pal_G = Pal_B = 0;
 	TempMask = 0;				// 使われているビットをチェック（Iビット用）
@@ -178,6 +183,10 @@ void Pal_ChangeContrast(int num)
 	int palr, palg, palb;
 	WORD pal;
 
+#ifdef PSP
+	GE_GUARD_FULL(GE_ST_PALS);	/* the GE's waiting 65536 colour lines use Pal16 */
+	GE_Pal16Gen++;
+#endif
 	TVRAM_SetAllDirty();
 
 	r = g = b = 5;

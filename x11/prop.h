@@ -53,6 +53,7 @@ typedef struct
 	int HwJoyBtn[8];
 	int NoWaitMode;
 	BYTE FrameRate;
+	int ShowFPS;		/* frame rate overlay */
 } Win68Conf;
 
 extern Win68Conf Config;

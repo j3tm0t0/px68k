@@ -20,7 +20,7 @@ LOCAL_LIBRARIES= $(XLIB) $(GTK_LIB) $(SDL_LIB)
 #define	PassCDebugFlags
 
 
-CPUOBJS= x68k/d68k.o m68000/c68k.o m68000/m68000.o
+CPUOBJS= x68k/d68k.o m68000/c68k.o m68000/m68000.o m68000/c68kbench.o
 
 X68KOBJS= \
 	x68k/adpcm.o x68k/bg.o x68k/crtc.o x68k/dmac.o x68k/fdc.o \
@@ -43,32 +43,42 @@ X11CXXOBJS= x11/winx68k.o
 
 WIN32APIOBJS= win32api/dosio.o win32api/fake.o win32api/peace.o
 
-COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS)
+PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o
+
+COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS) $(PSPOBJS)
 CXXOBJS=	$(FMGENOBJS) $(X11CXXOBJS)
 OBJS=		$(COBJS) $(CXXOBJS)
 
 TARGET = px68k
 #OBJS = cube.o logo.o ../common/callbacks.o ../common/vram.o
 
-# for psplink
-#BUILD_PRX = 1
+# PRX so that the net modules loaded at run time get linked (debug port)
+BUILD_PRX = 1
 
 PSPDEV = $(shell psp-config -d)
 PSPBIN = $(PSPDEV)/psp/bin
 SDL_CONFIG = $(PSPBIN)/sdl-config
 
-SDL_INCLUDE=	`$(SDL_CONFIG) --cflags`
-SDL_LIB=	`$(SDL_CONFIG) --libs`
+# sdl-config of recent pspdev has a wrong prefix (/psp), so fix it up
+SDL_INCLUDE=	$(shell $(SDL_CONFIG) --cflags | sed "s|-I/psp/|-I$(PSPDEV)/psp/|g")
+SDL_LIB=	$(shell $(SDL_CONFIG) --libs | sed "s|-L/psp/|-L$(PSPDEV)/psp/|g")
 
 INCDIR = ./x11 ./x68k ./fmgen ./win32api
 CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION)
 # for debugging
 #CFLAGS = -g -G0 -Wall $(SDL_INCLUDE)
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
+# c68kmacro.h writes the low word/byte of the 32-bit registers through
+# UINT16/UINT8 pointers (WRITE_REG_16/8): type punning
+m68000/c68k.o: CFLAGS += -fno-strict-aliasing
 
 LIBDIR =
 LDFLAGS =
-LIBS= -lpspgum -lpspgu -lm -lstdc++ $(SDL_LIB)
+# Only libraries that build.mak / the psp-gcc specs do not add themselves
+# (sdl-config --libs repeats those, which splits a module's import stubs:
+# "stubs out of order", and the calls stay unresolved on real hardware).
+LIBS= -lSDLmain -lSDL -lpspgum -lpspgu -lstdc++ -lm -lpsphprm -lpspaudio \
+	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PX68K for PSP ver.$(PX68K_VERSION)
@@ -76,6 +86,9 @@ PSP_EBOOT_ICON = psp_logo.png
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
+
+# objects that use psp/gecomp.h: rebuilt when it changes (its GE_ST_* indices must agree)
+x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o: psp/gecomp.h
 
 # The 68000 handlers in the order of tools/c68ktest/hot995.txt, hottest
 # first (I-cache): a gain on the PSP only (tools/bench), so c68k_op.c keeps
