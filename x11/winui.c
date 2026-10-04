@@ -100,15 +100,15 @@ struct menu_flist mfl;
 
 /***** menu items *****/
 
-#define MENU_NUM 13
+#define MENU_NUM 14
 #define MENU_WINDOW 7
 
-int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1};
+int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1, 0};
 
-enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK};
+enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK, M_FPS};
 
 // Max # of characters is 15.
-char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "uhyo", ""};
+char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "Show FPS", "uhyo", ""};
 
 // Max # of characters is 30.
 // Max # of items including terminater `""' in each line is 15.
@@ -125,6 +125,7 @@ char menu_items[][15][30] = {
 	{"TRIG1 TRIG2", "TRIG2 TRIG1", ""},
 	{"Axis0: xx", "Axis1: xx", "Hat: xx", "Button0: xx", "Button1: xx",  ""},
 	{"Off", "On", ""},
+	{"Off", "On", ""},
 	{"Off", "On", ""}
 };
 
@@ -138,6 +139,7 @@ static void menu_vbtn_swap(int v);
 static void menu_hwjoy_setting(int v);
 static void menu_nowait(int v);
 static void menu_joykey(int v);
+static void menu_showfps(int v);
 
 struct _menu_func {
 	void (*func)(int v);
@@ -157,7 +159,8 @@ struct _menu_func menu_func[] = {
 	{menu_vbtn_swap, 1},
 	{menu_hwjoy_setting, 0},
 	{menu_nowait, 1},
-	{menu_joykey, 1}
+	{menu_joykey, 1},
+	{menu_showfps, 1}
 };
 
 int WinUI_get_drv_num(int key)
@@ -235,6 +238,7 @@ WinUI_Init(void)
 
 	mval_y[M_NW] = Config.NoWaitMode;
 	mval_y[M_JK] = Config.JoyKey;
+	mval_y[M_FPS] = Config.ShowFPS;
 
 #if defined(ANDROID)
 #define CUR_DIR_STR winx68k_dir
@@ -509,6 +513,11 @@ static void menu_nowait(int v)
 static void menu_joykey(int v)
 {
 	Config.JoyKey = v;
+}
+
+static void menu_showfps(int v)
+{
+	Config.ShowFPS = v;
 }
 
 // ex. ./hoge/.. -> ./

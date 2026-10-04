@@ -28,6 +28,8 @@ extern "C" {
 #include "crtc.h"
 #include "mfp.h"
 #include "fdc.h"
+#include "../psp/prof.h"
+#include "../psp/gecomp.h"
 #include "fdd.h"
 #include "dmac.h"
 #include "irqh.h"
@@ -437,7 +439,11 @@ void WinX68k_Exec(void)
 #endif
 		{
 			C68K.ICount = n;
-			C68k_Exec(&C68K, C68K.ICount);
+			{
+				PROF_BEGIN(cpu);
+				C68k_Exec(&C68K, C68K.ICount);
+				PROF_END(cpu, PROF_CPU);
+			}
 			m = (n-C68K.ICount-m68000_ICountBk);			// 経過クロック数
 			if ( (clkdiv==10)&&(!ClkUsed) ) {
 				/* (0+m*10)/10 == m and leaves ClkUsed 0: no division */
@@ -453,12 +459,16 @@ void WinX68k_Exec(void)
 			C68K.ICount = m68000_ICountBk = 0;
 		}
 
-		MFP_Timer(usedclk);
-		RTC_Timer(usedclk);
-		/* DMA_Exec does nothing (no side effect) unless the channel is active */
-		if ( DMA[0].CSR&0x08 ) DMA_Exec(0);
-		if ( DMA[1].CSR&0x08 ) DMA_Exec(1);
-		if ( DMA[2].CSR&0x08 ) DMA_Exec(2);
+		{
+			PROF_BEGIN(slice);
+			MFP_Timer(usedclk);
+			RTC_Timer(usedclk);
+			/* DMA_Exec does nothing (no side effect) unless the channel is active */
+			if ( DMA[0].CSR&0x08 ) DMA_Exec(0);
+			if ( DMA[1].CSR&0x08 ) DMA_Exec(1);
+			if ( DMA[2].CSR&0x08 ) DMA_Exec(2);
+			PROF_END(slice, PROF_SLICE);
+		}
 
 		if ( clk_count>=clk_next ) {
 			//OPM_RomeoOut(Config.BufferSize*5);
@@ -479,11 +489,12 @@ void WinX68k_Exec(void)
 				}
 			}
 
-			ADPCM_PreUpdate(clk_line);
-			OPM_Timer(clk_line);
+			PROF_BEGIN(pline);
+			{ PROF_BEGIN(a); ADPCM_PreUpdate(clk_line); PROF_END(a, PROF_ADPCMPRE); }
+			{ PROF_BEGIN(o); OPM_Timer(clk_line); PROF_END(o, PROF_OPMTIMER); }
 			if ( Config.MIDI_SW ) MIDI_Timer(clk_line);	/* it returns at once when MIDI is off */
 #ifndef	NO_MERCURY
-			Mcry_PreUpdate(clk_line);
+			{ PROF_BEGIN(m); Mcry_PreUpdate(clk_line); PROF_END(m, PROF_MCRY); }
 #endif
 
 			KeyIntCnt++;
@@ -497,6 +508,7 @@ void WinX68k_Exec(void)
 				SCC_IntCheck();
 			}
 			DSound_Send0(clk_line);
+			PROF_END(pline, PROF_LINE);
 
 			vline++;
 #ifdef PSP
@@ -547,9 +559,14 @@ void WinX68k_Exec(void)
 #else
 	Joystick_Update(FALSE, SDLK_UNKNOWN);
 #endif
+	DSound_Flush();
 	FDD_SetFDInt();
 	if ( !DispFrame )
 		WinDraw_Draw();
+#ifdef PSP
+	else
+		WinDraw_Flush();	/* show the last drawn frame; its swap waits for the GE */
+#endif
 	TimerICount += clk_total;
 
 	t_end = timeGetTime();
@@ -605,6 +622,365 @@ int SetupCallbacks(void)
 	return thid;
 }
 
+/*
+ * Remote debugging on real hardware (psp/debug.h). Only active when
+ * debug.key sits next to EBOOT.PBP: joins the saved network setting, serves
+ * the debug port and logs the frame rate once a second.
+ */
+#include "../psp/debug.h"
+#include "../psp/log.h"
+#include "../psp/net.h"
+
+int prof_on;
+unsigned prof_us[PROF_N];
+unsigned prof_count[PROF_COUNT_N];
+
+static int psp_debug_on;
+static int psp_fps_log;
+static int psp_emu_frames, psp_drawn_frames;
+static unsigned psp_exec_us, psp_exec_max_us;
+static unsigned psp_fps_start;
+static int psp_paused;
+/*
+ * benchf: frames since the reset it does, the window it measures (as fast as
+ * possible, without the WLAN) and what it restores afterwards.
+ */
+static unsigned psp_frame_no, psp_bf_start, psp_bf_end;
+static SceUInt64 psp_bf_t0;
+static int psp_bf_skip, psp_bf_prof, psp_bf_saved_skip, psp_bf_saved_prof;
+static int psp_bf_rt;	/* benchf in real time: paced, with the sound callback, as in play */
+static unsigned psp_bf_exec_us;
+/* capf: frame whose composited screen goes to cap.raw (0: none). */
+static unsigned psp_cap_frame;
+static int psp_cap_saved_skip;
+static char psp_cap_path[272];
+
+/* capf/benchf: the RTC follows emulated time from a fixed date, not the host clock. */
+extern "C" time_t (*RTC_TimeHook)(void);
+static time_t psp_fixed_time(void)
+{
+	return 946684800 + psp_frame_no * 10 / 555;	/* 2000-01-01, ~55.5 frames/s */
+}
+
+/* Write the composited X68000 screen (ScrBuf, RGB565) for pixel comparisons. */
+static void psp_capture(void)
+{
+	extern WORD *ScrBufL, *ScrBufR;
+	SceUID fd;
+	int y;
+
+	WinDraw_Flush();	/* the GE may still be drawing ScrBufL */
+	fd = sceIoOpen(psp_cap_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+
+	if (fd < 0) {
+		log_printf("capf: cannot write %s\n", psp_cap_path);
+		return;
+	}
+	for (y = 0; y < TextDotY; y++) {
+		sceIoWrite(fd, ScrBufL + y * 512,	/* PSP: 512 + 256 wide halves */ (TextDotX > 512 ? 512 : TextDotX) * 2);
+		if (TextDotX > 512)
+			sceIoWrite(fd, ScrBufR + y * 256, (TextDotX - 512) * 2);
+	}
+	sceIoClose(fd);
+	/* The state behind it, for checking which rendering is right (tools/capstate.py). */
+	{
+		char path[280];
+		snprintf(path, sizeof(path), "%.*s.state", (int)strlen(psp_cap_path) - 4, psp_cap_path);
+		fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+		if (fd >= 0) {
+			sceIoWrite(fd, TVRAM, 0x80000);
+			sceIoWrite(fd, TextPal, 512);
+			sceIoWrite(fd, GrphPal, 512);
+			sceIoWrite(fd, CRTC_Regs, 0x30);
+			sceIoWrite(fd, BG_Regs, 0x12);
+			sceIoWrite(fd, VCReg0, 2);
+			sceIoWrite(fd, VCReg1, 2);
+			sceIoWrite(fd, VCReg2, 2);
+			sceIoWrite(fd, &TextScrollX, 4);
+			sceIoWrite(fd, &TextScrollY, 4);
+			sceIoClose(fd);
+		}
+	}
+	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
+}
+static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static char psp_dev[8];	/* "ms0:" or "ef0:" */
+
+static void psp_debug_init(const char *eboot)
+{
+	char dir[256], logpath[272], keypath[272], cfg[272], devcfg[272];
+	const char *profiles[2];
+	SceIoStat st;
+	char *slash;
+
+	snprintf(dir, sizeof(dir), "%s", eboot);
+	snprintf(psp_dev, sizeof(psp_dev), "%.4s", eboot);
+	slash = strrchr(dir, '/');
+	if (!slash)
+		return;
+	*slash = '\0';
+	snprintf(keypath, sizeof(keypath), "%s/debug.key", dir);
+	if (sceIoGetstat(keypath, &st) < 0)
+		return;	/* no key: no Wi-Fi, no debug server */
+
+	snprintf(logpath, sizeof(logpath), "%s/px68k.log", dir);
+	log_open(logpath);
+	log_printf("PX68K %s, eboot %s\n", PX68KVERSTR, eboot);
+
+	snprintf(psp_cap_path, sizeof(psp_cap_path), "%s/cap.raw", dir);
+	snprintf(cfg, sizeof(cfg), "%s/net.cfg", dir);
+	snprintf(devcfg, sizeof(devcfg), "%.4s/PSP/GAME/pspbrew.dev/net.cfg", eboot);
+	profiles[0] = cfg;
+	profiles[1] = devcfg;
+	if (net_start(profiles, 2) != 0 || debug_start(eboot, keypath) != 0)
+		return;
+	/*
+	 * The net stack runs at priorities 42-48; above them the emulator, which
+	 * never sleeps while it is behind, starved it (ping took seconds).
+	 */
+	sceKernelChangeThreadPriority(sceKernelGetThreadId(), 0x38);
+	psp_debug_on = psp_fps_log = 1;
+	psp_fps_start = timeGetTime();
+	log_printf("cpu %d MHz, bus %d MHz, free %d KB (max block %d KB)\n", scePowerGetCpuClockFrequency(),
+		   scePowerGetBusClockFrequency(), (int)(sceKernelTotalFreeMemSize() / 1024),
+		   (int)(sceKernelMaxFreeMemSize() / 1024));
+}
+
+/* Time one WinX68k_Exec() and log the rates once a second. */
+static void psp_debug_frame(unsigned us)
+{
+	unsigned now;
+
+	if (!psp_debug_on)
+		return;
+	psp_frame_no++;
+	if (psp_cap_frame && psp_frame_no == psp_cap_frame) {
+		psp_capture();
+		psp_cap_frame = 0;
+		Config.FrameRate = psp_cap_saved_skip;
+		RTC_TimeHook = NULL;
+		DSound_Play();
+	}
+	if (psp_bf_end) {
+		if (psp_frame_no == psp_bf_start) {
+			net_pause();
+			log_printf("benchf: frames %u-%u, skip %d, cpu %d/%d MHz\n", psp_bf_start, psp_bf_end, psp_bf_skip,
+				   scePowerGetCpuClockFrequency(), scePowerGetBusClockFrequency());
+			psp_bf_saved_skip = Config.FrameRate;
+			psp_bf_saved_prof = prof_on;
+			Config.FrameRate = psp_bf_skip;
+			Config.NoWaitMode = !psp_bf_rt;
+			if (psp_bf_rt)
+				DSound_Play();
+			psp_bf_exec_us = 0;
+			prof_on = psp_bf_prof;	/* the timers cost time too */
+			memset(prof_us, 0, sizeof(prof_us));
+			memset(prof_count, 0, sizeof(prof_count));
+			psp_bf_t0 = sceKernelGetSystemTimeWide();
+			return;
+		}
+		if (psp_frame_no > psp_bf_start) {
+			unsigned n = psp_frame_no - psp_bf_start;
+			unsigned total, decode, mix;
+
+			psp_bf_exec_us += us;
+			if (psp_frame_no < psp_bf_end)
+				return;	/* no per-second log while measuring */
+			total = (unsigned)(sceKernelGetSystemTimeWide() - psp_bf_t0);
+			Config.NoWaitMode = 0;
+			Config.FrameRate = psp_bf_saved_skip;
+			prof_on = psp_bf_saved_prof;
+			psp_bf_end = 0;
+			decode = prof_us[PROF_GRP] + prof_us[PROF_TEXT] + prof_us[PROF_BG];
+			mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
+			/* us per emulated frame */
+			log_printf("benchf: %u frames %u us/frame (%u.%u fps) cpu %u grp %u text %u bg %u mix %u "
+				   "draw %u snd %u slice %u line %u (adpcmpre %u opmtimer %u mcry %u) lines %u shown %u cpu %d/%d%s exec %u\n", n, total / n,
+				   n * 1000000u / total, n * 10000000u / total % 10,
+				   prof_us[PROF_CPU] / n, prof_us[PROF_GRP] / n, prof_us[PROF_TEXT] / n,
+				   prof_us[PROF_BG] / n, mix / n, prof_us[PROF_DRAW] / n, prof_us[PROF_SOUND] / n,
+				   prof_us[PROF_SLICE] / n,
+				   (prof_us[PROF_LINE] > prof_us[PROF_SOUND] ? prof_us[PROF_LINE] - prof_us[PROF_SOUND] : 0) / n,
+				   prof_us[PROF_ADPCMPRE] / n, prof_us[PROF_OPMTIMER] / n, prof_us[PROF_MCRY] / n,
+				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency(),
+				   scePowerGetBusClockFrequency(), psp_bf_rt ? " rt" : "", psp_bf_exec_us / (n - 1 ? n - 1 : 1));
+			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+			RTC_TimeHook = NULL;
+			DSound_Play();
+			memset(prof_us, 0, sizeof(prof_us));
+			memset(prof_count, 0, sizeof(prof_count));
+			psp_emu_frames = psp_drawn_frames = 0;
+			psp_exec_us = psp_exec_max_us = 0;
+			psp_fps_start = timeGetTime();
+			return;
+		}
+	}
+	psp_emu_frames++;
+	if (!DispFrame)
+		psp_drawn_frames++;
+	psp_exec_us += us;
+	if (us > psp_exec_max_us)
+		psp_exec_max_us = us;
+	now = timeGetTime();
+	if (now - psp_fps_start < 1000)
+		return;
+	if (psp_fps_log)
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d\n",
+			   psp_emu_frames, psp_drawn_frames,
+			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
+			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
+			   scePowerGetCpuClockFrequency());
+	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
+		psp_bench_end = 0;
+		log_printf("bench: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+		now = timeGetTime();
+	}
+	if (prof_on) {
+		unsigned decode = prof_us[PROF_GRP] + prof_us[PROF_TEXT] + prof_us[PROF_BG];
+		unsigned mix = prof_us[PROF_MIX] > decode ? prof_us[PROF_MIX] - decode : 0;
+		int f = psp_emu_frames ? psp_emu_frames : 1;
+		/* per emulated frame, in units of 0.1 ms */
+		log_note("prof: cpu %u grp %u text %u bg %u mix %u draw %u snd %u (0.1ms/frame) lines %u/f shown %u snd %u/s\n",
+			 prof_us[PROF_CPU] / f / 100, prof_us[PROF_GRP] / f / 100, prof_us[PROF_TEXT] / f / 100,
+			 prof_us[PROF_BG] / f / 100, mix / f / 100, prof_us[PROF_DRAW] / f / 100,
+			 prof_us[PROF_SOUND] / f / 100, prof_count[PROF_LINES] / f,
+			 prof_count[PROF_FRAMES], prof_count[PROF_SOUND_SAMPLES]);
+	}
+	memset(prof_us, 0, sizeof(prof_us));
+	memset(prof_count, 0, sizeof(prof_count));
+	psp_emu_frames = psp_drawn_frames = 0;
+	psp_exec_us = psp_exec_max_us = 0;
+	psp_fps_start = now;
+}
+
+static unsigned psp_now_us(void)
+{
+	return sceKernelGetSystemTimeLow();
+}
+
+/* Commands from the debug client that must run on the emulator thread. */
+static void psp_debug_poll(void)
+{
+	char cmd[128], arg[128], btn;
+	int n, dx, dy;
+	unsigned bf_start, bf_frames;
+
+	if (!psp_debug_on)
+		return;
+	/* One per emulated frame, so that a button press and release don't cancel out. */
+	if (debug_poll(cmd, sizeof(cmd))) {
+		if (sscanf(cmd, "fdd %d %127[^\n]", &n, arg) == 2 && (n == 0 || n == 1)) {
+			/* "/PSP/..." is on the device px68k runs from */
+			snprintf(Config.FDDImage[n], sizeof(Config.FDDImage[n]), "%s%s",
+				 arg[0] == '/' ? psp_dev : "", arg);
+			FDD_SetFD(n, Config.FDDImage[n], 0);
+			SaveConfig();	/* keep the disk across push/exec */
+			log_printf("fdd%d: %s\n", n, Config.FDDImage[n]);
+		} else if (sscanf(cmd, "eject %d", &n) == 1 && (n == 0 || n == 1)) {
+			FDD_EjectFD(n);
+			Config.FDDImage[n][0] = '\0';
+			log_printf("fdd%d: ejected\n", n);
+		} else if (sscanf(cmd, "mouse %d %d", &dx, &dy) == 2) {
+			Mouse_StartCapture(1);	/* off unless Config.JoyOrMouse */
+			Mouse_Event(0, (float)dx, (float)dy);
+		} else if (sscanf(cmd, "mbtn %c %d", &btn, &n) == 2 && (btn == 'l' || btn == 'r')) {
+			Mouse_StartCapture(1);
+			Mouse_Event(btn == 'l' ? 1 : 2, (float)n, 0);
+		} else if ((dx = 200, sscanf(cmd, "cpubench %d %d %d", &n, &dy, &dx)) >= 2 && n >= 0 && n <= 2 &&
+			   dy > 0 && dy <= 100 && dx > 0) {
+			/* the 68000 core alone: a loop (0 registers, 1 RAM, 2 GPIP poll) for dy M cycles */
+			unsigned us;
+			int mhz, ok;
+			net_pause();	/* the firmware caps the clock while the WLAN is up */
+			mhz = scePowerGetCpuClockFrequency();
+			us = C68k_Bench(n, dy, dx, psp_now_us);
+			ok = net_resume() == 0;
+			log_printf("cpubench: prog %d, slice %d: %u us per 1M 68000 cycles (%u.%02ux real time at 10 MHz), cpu %d MHz%s\n",
+				   n, dx, us, 100000 / (us ? us : 1), 100000 * 100 / (us ? us : 1) % 100,
+				   mhz, ok ? "" : ", WLAN rejoin failed");
+		} else if (sscanf(cmd, "bench %d", &n) == 1 && n > 0 && !psp_bench_end) {
+			/* Leave the WLAN for n seconds: the firmware caps the clock while it is up. */
+			net_pause();
+			log_printf("bench: %d s without WLAN, cpu %d MHz\n", n, scePowerGetCpuClockFrequency());
+			psp_bench_end = timeGetTime() + n * 1000;
+			psp_fps_start = timeGetTime();
+			psp_emu_frames = psp_drawn_frames = 0;
+			psp_exec_us = psp_exec_max_us = 0;
+		} else if ((dx = 1, dy = 0, sscanf(cmd, "benchf %u %u %d %d %d", &bf_start, &bf_frames, &n, &dx, &dy)) >= 3 && bf_start > 0 &&
+			   bf_frames > 0 && n >= 1 && n <= 6 && !psp_bf_end && !psp_bench_end) {
+			/* Deterministic: same frames after a reset, run flat out. */
+			psp_bf_start = bf_start;
+			psp_bf_end = bf_start + bf_frames;
+			psp_bf_skip = n;
+			psp_bf_prof = dx != 0;
+			psp_bf_rt = dy != 0;
+			psp_frame_no = 0;
+			DSound_Stop();	/* deterministic, see capf */
+			RTC_TimeHook = psp_fixed_time;
+			WinX68k_Reset();
+			log_printf("benchf: reset, measuring from frame %u\n", bf_start);
+		} else if (sscanf(cmd, "capf %u", &bf_start) == 1 && bf_start > 0 && !psp_bf_end && !psp_cap_frame) {
+			/* Every frame drawn, so frame N's screen is the same in each run. */
+			psp_cap_frame = bf_start;
+			psp_cap_saved_skip = Config.FrameRate;
+			Config.FrameRate = 1;
+			psp_frame_no = 0;
+			/* The sound callback pulls ADPCM data in real time; synthesize on this thread only. */
+			DSound_Stop();
+			RTC_TimeHook = psp_fixed_time;
+			WinX68k_Reset();
+			log_printf("capf: reset, capturing frame %u\n", bf_start);
+		} else if (strcmp(cmd, "ge on") == 0 || strcmp(cmd, "ge off") == 0) {
+			WinDraw_Flush();
+			GE_Enabled = cmd[4] == 'n';
+			TVRAM_SetAllDirty();
+			log_printf("ge %s\n", GE_Enabled ? "on" : "off");
+		} else if (strcmp(cmd, "ge time on") == 0 || strcmp(cmd, "ge time off") == 0) {
+			GE_TimeSync = cmd[9] == 'n';
+			log_printf("ge time %s\n", GE_TimeSync ? "on" : "off");
+		} else if (strcmp(cmd, "ge") == 0) {
+			GE_LogStats();	/* since the last "ge" */
+		} else if (strcmp(cmd, "reset") == 0) {
+			WinX68k_Reset();
+			log_printf("reset\n");
+		} else if (strcmp(cmd, "prof on") == 0 || strcmp(cmd, "prof off") == 0) {
+			prof_on = cmd[6] == 'n';
+		} else if (strcmp(cmd, "fps on") == 0 || strcmp(cmd, "fps off") == 0) {
+			psp_fps_log = cmd[5] == 'n';
+		} else if (sscanf(cmd, "skip %d", &n) == 1 && n >= 1 && n <= 7) {
+			Config.FrameRate = n;	/* draw 1 frame in n; 7 = auto */
+			log_printf("frame skip %d\n", n);
+		} else if (sscanf(cmd, "nowait %d", &n) == 1) {
+			Config.NoWaitMode = n;
+			log_printf("no wait %d\n", n);
+		} else {
+			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
+				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "pad, shot, get, push, exec, launch, quit\n");
+		}
+	}
+}
+
+/* For the "Show FPS" overlay (x11/windraw.c). */
+extern "C" int WinDraw_FpsEmu10, WinDraw_FpsShown;
+static void psp_count_fps(void)
+{
+	static unsigned start, emu, shown;
+	unsigned now = timeGetTime();
+
+	emu++;
+	if (!DispFrame)
+		shown++;
+	if (!start)
+		start = now;
+	if (now - start >= 1000) {
+		WinDraw_FpsEmu10 = emu * 10000 / (now - start);
+		WinDraw_FpsShown = shown * 1000 / (now - start);
+		start = now;
+		emu = shown = 0;
+	}
+}
+
 PSP_HEAP_SIZE_KB(-1024);
 
 extern "C" int
@@ -632,6 +1008,7 @@ int main(int argc, char *argv[])
 
 	sceCtrlSetSamplingCycle(0);
 	sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+	psp_debug_init(argv[0]);
 #endif
 
 	p6logd("PX68K Ver.%s\n", PX68KVERSTR);
@@ -734,6 +1111,10 @@ int main(int argc, char *argv[])
 
 	SplashFlag = 20;
 	SoundSampleRate = Config.SampleRate;
+#ifdef PSP
+	if (psp_debug_on)
+		log_printf("sound: rate %d, buffer %d\n", Config.SampleRate, Config.BufferSize);
+#endif
 
 	StatBar_Show(Config.WindowFDDStat);
 	WinDraw_ChangeSize();
@@ -816,9 +1197,34 @@ int main(int argc, char *argv[])
 
 	while (1) {
 		// OPM_RomeoOut(Config.BufferSize * 5);
+#ifdef PSP
+		if (psp_debug_on && debug_paused()) {
+			/* Idle (sound too, its callback would synthesize) so the WLAN gets the CPU. */
+			if (!psp_paused) {
+				psp_paused = 1;
+				DSound_Stop();
+				WinDraw_Flush();
+			}
+			sceKernelDelayThread(20 * 1000);
+			psp_debug_poll();
+			continue;
+		}
+		if (psp_paused) {
+			psp_paused = 0;
+			if (menu_mode == menu_out)
+				DSound_Play();
+		}
+#endif
 		if (menu_mode == menu_out
 		    && (Config.NoWaitMode || Timer_GetCount())) {
+#ifdef PSP
+			unsigned t0 = sceKernelGetSystemTimeLow();
 			WinX68k_Exec();
+			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
+			psp_count_fps();
+#else
+			WinX68k_Exec();
+#endif
 #if defined(ANDROID) || TARGET_OS_IPHONE
 			if (vk_cnt > 0) {
 				vk_cnt--;
@@ -940,6 +1346,9 @@ int main(int argc, char *argv[])
 		}
 #endif //PSP
 
+#ifdef PSP
+		psp_debug_poll();
+#endif
 #ifdef PSP
 		if (Joystick_get_downstate_psp(PSP_CTRL_START)) {
 			if (menu_mode == menu_out) { 

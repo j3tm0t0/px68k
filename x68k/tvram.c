@@ -11,9 +11,10 @@
 #include	"palette.h"
 #include	"m68000.h"
 #include	"tvram.h"
+#include	"../psp/gecomp.h"
 
 	BYTE	TVRAM[0x80000];
-	BYTE	TextDrawWork[1024*1024];
+	BYTE	TextDrawWork[1024*1024] __attribute__ ((aligned (64)));	/* a GE texture (psp/gecomp.c) */
 	BYTE	TextDirtyLine[1024];
 
 	BYTE	TextDrawPattern[2048*4];
@@ -28,6 +29,9 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data);
 // -----------------------------------------------------------------------
 void TVRAM_SetAllDirty(void)
 {
+#ifdef PSP
+	GE_PalDirty = 1;	/* palette/register writes come here (psp/gecomp.c) */
+#endif
 	memset(TextDirtyLine, 1, 1024);
 }
 
@@ -40,6 +44,9 @@ void TVRAM_Init(void)
 	int i, j, bit;
 	ZeroMemory(TVRAM, 0x80000);
 	ZeroMemory(TextDrawWork, 1024*1024);
+#ifdef PSP
+	GE_TGenAll++;	/* the GE's copies (psp/gecomp.c) */
+#endif
 	TVRAM_SetAllDirty();
 
 	ZeroMemory(TextDrawPattern, 2048*4);		// パターンテーブル初期化
@@ -109,6 +116,7 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
+	GE_GUARD_TVRAM(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
 	if (CRTC_Regs[0x2a]&1)			// 同時アクセス
@@ -232,8 +240,15 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		t0 |= ptr[(pat * 2)];
 		t1 |= ptr[(pat * 2 + 1)];
 
-		*((DWORD *)&TextDrawWork[workadr]) = t0;
-		*(((DWORD *)(&TextDrawWork[workadr])) + 1) = t1;
+		{
+			DWORD *const w = (DWORD *)&TextDrawWork[workadr];
+
+			if (w[0] != t0 || w[1] != t1) {
+				w[0] = t0;
+				w[1] = t1;
+				GE_TVRAM_TOUCH(workadr >> 3);	/* row workadr >> 10 */
+			}
+		}
 	}
 #endif	/* USE_ASM */
 }
@@ -245,6 +260,11 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 void FASTCALL TVRAM_RCUpdate(void)
 {
 	DWORD adr = ((DWORD)CRTC_Regs[0x2d]<<9);
+
+	GE_GUARD_FULL(GE_ST_RCUPD);
+#ifdef PSP
+	GE_TGenAll++;
+#endif
 
 #ifdef USE_ASM
 	_asm
