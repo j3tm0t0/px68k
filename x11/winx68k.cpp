@@ -953,9 +953,12 @@ static void psp_debug_poll(void)
 		} else if (sscanf(cmd, "nowait %d", &n) == 1) {
 			Config.NoWaitMode = n;
 			log_printf("no wait %d\n", n);
+		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
+			Config.XVIMode = n;	/* MPU clock: 0 = 10, 1 = 16, 2 = 24 MHz */
+			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
