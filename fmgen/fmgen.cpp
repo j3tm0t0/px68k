@@ -275,8 +275,8 @@ void Chip::MakeTable()
 //	Operator
 //
 bool FM::Operator::tablehasmade = false;
-uint FM::Operator::sinetable[1024];
-int32 FM::Operator::cltable[FM_CLENTS];
+FM::Operator::SineEntry FM::Operator::sinetable[1024];
+FM::Operator::ClEntry FM::Operator::cltable[FM_CLENTS];
 
 //	構築
 FM::Operator::Operator()
@@ -329,7 +329,7 @@ void Operator::MakeTable()
 	// 対数テーブルの作成
 	assert(FM_CLENTS >= 256);
 
-	int* p = cltable;
+	ClEntry* p = cltable;
 	int i;
 	for (i=0; i<256; i++)
 	{
@@ -511,8 +511,8 @@ void Operator::SetFNum(uint f)
 
 
 // 入力: s = 20+FM_PGBITS = 29
-#define Sine(s)	sinetable[((s) >> (20+FM_PGBITS-FM_OPSINBITS))&(FM_OPSINENTS-1)]
-#define SINE(s) sinetable[(s) & (FM_OPSINENTS-1)]
+#define Sine(s)	((uint)sinetable[((s) >> (20+FM_PGBITS-FM_OPSINBITS))&(FM_OPSINENTS-1)])
+#define SINE(s) ((uint)sinetable[(s) & (FM_OPSINENTS-1)])
 
 inline FM::ISample Operator::LogToLin(uint a)
 {

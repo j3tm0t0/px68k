@@ -76,3 +76,11 @@ PSP_EBOOT_ICON = psp_logo.png
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
+
+# The 68000 handlers in the order of tools/c68ktest/hot995.txt, hottest
+# first (I-cache): a gain on the PSP only (tools/bench), so c68k_op.c keeps
+# the original order and this copy is made for the PSP build.
+m68000/c68k_op_psp.c: m68000/c68k_op.c tools/c68ktest/hot995.txt tools/c68ktest/c68korder.py
+	python3 tools/c68ktest/c68korder.py tools/c68ktest/hot995.txt 1 1 m68000/c68k_op.c $@
+m68000/c68k.o: m68000/c68k_op_psp.c
+m68000/c68k.o: CFLAGS += -DC68K_OP_FILE='"c68k_op_psp.c"'

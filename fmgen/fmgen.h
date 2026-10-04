@@ -171,8 +171,18 @@ namespace FM
 		static const int8 attacktable[64][8];
 		static const int ssgenvtable[8][2][3][2];
 
-		static uint	sinetable[1024];
-		static int32 cltable[FM_CLENTS];
+		// PSP: 16-bit entries (|cltable| <= 8192, sinetable < 4300), half
+		// the data-cache footprint of the per-sample lookups, same values.
+		// No gain elsewhere (tools/bench): 32-bit unless FMGEN_TABLE16.
+#if defined(PSP) || defined(FMGEN_TABLE16)
+		typedef uint16 SineEntry;
+		typedef int16 ClEntry;
+#else
+		typedef uint SineEntry;
+		typedef int32 ClEntry;
+#endif
+		static SineEntry	sinetable[1024];
+		static ClEntry cltable[FM_CLENTS];
 
 		static bool tablehasmade;
 		static void MakeTable();
@@ -186,8 +196,8 @@ namespace FM
 	public:
 		int		dbgopout_;
 		int		dbgpgout_;
-		static const int32* dbgGetClTable() { return cltable; }
-		static const uint* dbgGetSineTable() { return sinetable; }
+		static const ClEntry* dbgGetClTable() { return cltable; }
+		static const SineEntry* dbgGetSineTable() { return sinetable; }
 	};
 	
 	//	4-op Channel ---------------------------------------------------------

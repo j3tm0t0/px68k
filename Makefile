@@ -85,6 +85,10 @@ CXXDEBUGFLAGS= $(CDEBUGFLAGS)
 CFLAGS= $(MOPT) $(CDEBUGFLAGS) $(EXTRA_INCLUDES)
 CXXFLAGS= $(MOPT) $(CXXDEBUGFLAGS) $(EXTRA_INCLUDES)
 CXXLDOPTIONS= $(CXXDEBUGFLAGS)
+# c68kmacro.h writes the low word/byte of the 32-bit registers through
+# UINT16/UINT8 pointers (WRITE_REG_16/8): type punning.  Kept when
+# CDEBUGFLAGS is overridden without -fno-strict-aliasing.
+m68000/c68k.o: CFLAGS += -fno-strict-aliasing
 
 CPUOBJS= x68k/d68k.o m68000/c68k.o m68000/m68000.o
 

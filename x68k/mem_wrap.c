@@ -45,6 +45,24 @@ static BYTE FASTCALL rm_opm(DWORD addr);
 static BYTE FASTCALL rm_e82(DWORD addr);
 static BYTE FASTCALL rm_buserr(DWORD addr);
 
+/*
+ * Fast paths for the CPU accesses to main RAM ($000000-$9fffff).
+ * MEM keeps every 68000 word in host (little endian) order, so a word is
+ * one aligned 16-bit host access at MEM + addr (bytes are at addr ^ 1).
+ * They have the same side effects as the generic code (MemByteAccess and
+ * BusErrFlag are read elsewhere, e.g. dmac.c), which handles everything
+ * else.  The slow versions are kept out of line so that the fast path of
+ * the exported functions needs no stack frame.
+ */
+#define	RAM_END	0x00a00000
+#define	NOINLINE	__attribute__((noinline))
+typedef WORD __attribute__((may_alias)) WORD_A;
+
+static void FASTCALL cpu_writemem24_slow(DWORD addr, BYTE val) NOINLINE;
+static void FASTCALL cpu_writemem24_word_slow(DWORD addr, WORD val) NOINLINE;
+static BYTE FASTCALL cpu_readmem24_slow(DWORD addr) NOINLINE;
+static WORD FASTCALL cpu_readmem24_word_slow(DWORD addr) NOINLINE;
+
 BYTE (FASTCALL *MemReadTable[])(DWORD) = {
 	TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read,
 	TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read, TVRAM_Read,
@@ -182,6 +200,20 @@ dma_writemem24_dword(DWORD addr, DWORD val)
 void FASTCALL
 cpu_writemem24(DWORD addr, BYTE val)
 {
+	DWORD a = addr & 0x00ffffff;
+
+	if (a < RAM_END) {
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		MEM[a ^ 1] = val;
+		return;
+	}
+	cpu_writemem24_slow(addr, val);
+}
+
+static void FASTCALL
+cpu_writemem24_slow(DWORD addr, BYTE val)
+{
 
 	MemByteAccess = 0;
 	BusErrFlag = 0;
@@ -196,6 +228,20 @@ cpu_writemem24(DWORD addr, BYTE val)
 void FASTCALL
 cpu_writemem24_word(DWORD addr, WORD val)
 {
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a < RAM_END) {
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		*(WORD_A *)(MEM + a) = val;
+		return;
+	}
+	cpu_writemem24_word_slow(addr, val);
+}
+
+static void FASTCALL
+cpu_writemem24_word_slow(DWORD addr, WORD val)
+{
 
 	MemByteAccess = 0;
 
@@ -206,8 +252,16 @@ cpu_writemem24_word(DWORD addr, WORD val)
 
 	BusErrFlag = 0;
 
-	wm_cnt(addr, (val >> 8) & 0xff);
-	wm_main(addr + 1, val & 0xff);
+	if ((addr & 0x00ffffff) - 0x00c00000 < 0x00200000) {
+		/*
+		 * GVRAM: what wm_cnt / wm_main do there (GVRAM_Write does not
+		 * touch BusErrFlag, so the low byte is always written)
+		 */
+		GVRAM_WriteWord(addr & 0x00ffffff, val);
+	} else {
+		wm_cnt(addr, (val >> 8) & 0xff);
+		wm_main(addr + 1, val & 0xff);
+	}
 
 	if (BusErrFlag & 2) {
 		Memory_ErrTrace();
@@ -358,6 +412,17 @@ dma_readmem24_dword(DWORD addr)
 BYTE FASTCALL
 cpu_readmem24(DWORD addr)
 {
+	DWORD a = addr & 0x00ffffff;
+
+	/* a stale BusErrFlag bit 0 raises a bus error even here */
+	if (a < RAM_END && !(BusErrFlag & 1))
+		return MEM[a ^ 1];
+	return cpu_readmem24_slow(addr);
+}
+
+static BYTE FASTCALL
+cpu_readmem24_slow(DWORD addr)
+{
 	BYTE v;
 
 	v = rm_main(addr);
@@ -370,6 +435,18 @@ cpu_readmem24(DWORD addr)
 
 WORD FASTCALL
 cpu_readmem24_word(DWORD addr)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a < RAM_END) {
+		BusErrFlag = 0;
+		return *(WORD_A *)(MEM + a);
+	}
+	return cpu_readmem24_word_slow(addr);
+}
+
+static WORD FASTCALL
+cpu_readmem24_word_slow(DWORD addr)
 {
 	WORD v;
 
@@ -408,6 +485,135 @@ cpu_readmem24_dword(DWORD addr)
 	v |= rm_main(addr++) << 8;
 	v |= rm_main(addr);
 	return v;
+}
+
+/*
+ * 32-bit accesses of the C68K core: exactly two word accesses, the high
+ * word first (pre-decrement writes: the low word first), as C68K does.
+ * Both words are in RAM when addr is even and addr <= RAM_END - 4.
+ */
+static DWORD FASTCALL NOINLINE
+cpu_readmem24_long_slow(DWORD addr)
+{
+	DWORD v;
+
+	v = cpu_readmem24_word(addr) << 16;
+	return v | cpu_readmem24_word(addr + 2);
+}
+
+DWORD FASTCALL
+cpu_readmem24_long(DWORD addr)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a <= RAM_END - 4) {
+		BusErrFlag = 0;
+		return (*(WORD_A *)(MEM + a) << 16) | *(WORD_A *)(MEM + a + 2);
+	}
+	return cpu_readmem24_long_slow(addr);
+}
+
+static void FASTCALL NOINLINE
+cpu_writemem24_long_slow(DWORD addr, DWORD val)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
+		/* both words in GVRAM: what the two cpu_writemem24_word do */
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		GVRAM_WriteWord(a, val >> 16);
+		GVRAM_WriteWord(a + 2, val);
+		return;
+	}
+	cpu_writemem24_word(addr, val >> 16);
+	cpu_writemem24_word(addr + 2, val);
+}
+
+void FASTCALL
+cpu_writemem24_long(DWORD addr, DWORD val)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a <= RAM_END - 4) {
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		*(WORD_A *)(MEM + a) = val >> 16;
+		*(WORD_A *)(MEM + a + 2) = val;
+		return;
+	}
+	cpu_writemem24_long_slow(addr, val);
+}
+
+static void FASTCALL NOINLINE
+cpu_writemem24_long_pd_slow(DWORD addr, DWORD val)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
+		/* both words in GVRAM (movem.l -(An) fills): as above */
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		GVRAM_WriteWord(a + 2, val);
+		GVRAM_WriteWord(a, val >> 16);
+		return;
+	}
+	cpu_writemem24_word(addr + 2, val);
+	cpu_writemem24_word(addr, val >> 16);
+}
+
+void FASTCALL
+cpu_writemem24_long_pd(DWORD addr, DWORD val)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a <= RAM_END - 4) {
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		*(WORD_A *)(MEM + a + 2) = val;
+		*(WORD_A *)(MEM + a) = val >> 16;
+		return;
+	}
+	cpu_writemem24_long_pd_slow(addr, val);
+}
+
+/*
+ * For the idle loop skip of C68K (Bcc_8_IDLE): read the value that
+ * cpu_readmem24_word/cpu_readmem24 would return when they would take
+ * their RAM fast path, with the same side effects; 0 otherwise.  Reading
+ * main RAM again gives the same value as long as the CPU writes nothing.
+ */
+int FASTCALL
+cpu_idle_read_word(DWORD addr, UINT32 *v)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (!(addr & 1) && a < RAM_END) {
+		BusErrFlag = 0;
+		*v = *(WORD_A *)(MEM + a);
+		return 1;
+	}
+	return 0;
+}
+
+int FASTCALL
+cpu_idle_read_byte(DWORD addr, UINT32 *v)
+{
+	DWORD a = addr & 0x00ffffff;
+
+	if (a < RAM_END && !(BusErrFlag & 1)) {
+		*v = MEM[a ^ 1];
+		return 1;
+	}
+	/*
+	 * MFP GPIP: what rm_main reads there (MemReadTable: MFP_Read), with no
+	 * side effect, the same until the CPU slice ends (see C68k_Idle_Loop)
+	 */
+	if (a == 0x00e88001 && !(BusErrFlag & 1)) {
+		*v = MFP_Read(a);
+		return 1;
+	}
+	return 0;
 }
 
 static BYTE FASTCALL

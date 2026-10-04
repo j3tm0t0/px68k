@@ -58,8 +58,11 @@ static long Mcry_Clocks[8] = {
 };
 
 
+static void Mcry_Touch(void);
+
 int Mcry_IsReady(void)
 {
+	Mcry_Touch();	/* a DMA channel reads from the unit */
 	return (Mcry_SampleCnt>0);
 }
 
@@ -67,8 +70,52 @@ int Mcry_IsReady(void)
 // -----------------------------------------------------------------------
 //   MPU経過クロック時間分だけデータをバッファに溜める
 // -----------------------------------------------------------------------
+/*
+ * Mercury's counters only run once a program has touched the unit (its output
+ * is not mixed on PSP anyway); the clock until then is applied in one step.
+ * Most games never do, and ticking the YMF288 timers every raster line cost
+ * about 1 ms per frame on the PSP.
+ */
+static int Mcry_Touched;
+static DWORD Mcry_IdleClock;
+
+/*
+ * Apply the kept clock in steps: Mcry_ClockRate*clock must not overflow
+ * Mcry_PreCounter (a 32-bit long on 32-bit hosts) for the counts to come
+ * out as they would have line by line.
+ */
+static void Mcry_IdleFlush(void)
+{
+	while (Mcry_IdleClock) {
+		DWORD clock = (Mcry_IdleClock > 16384) ? 16384 : Mcry_IdleClock;
+
+		Mcry_IdleClock -= clock;
+		Mcry_PreCounter += (Mcry_ClockRate*clock);
+		while(Mcry_PreCounter>=10000000L)
+		{
+			Mcry_SampleCnt++;
+			Mcry_PreCounter -= 10000000L;
+		}
+		M288_Timer(clock);
+	}
+}
+
+static void Mcry_Touch(void)
+{
+	if (!Mcry_Touched) {
+		Mcry_Touched = 1;
+		Mcry_IdleFlush();
+	}
+}
+
 void FASTCALL Mcry_PreUpdate(DWORD clock)
 {
+	if (!Mcry_Touched) {
+		Mcry_IdleClock += clock;
+		if (Mcry_IdleClock >= 0x40000000)	/* ~100 s: don't let it wrap */
+			Mcry_IdleFlush();
+		return;
+	}
 	Mcry_PreCounter += (Mcry_ClockRate*clock);
 	while(Mcry_PreCounter>=10000000L)
 	{
@@ -144,6 +191,7 @@ INLINE void Mcry_WriteOne(void)
 // -----------------------------------------------------------------------
 void FASTCALL Mcry_Write(DWORD adr, BYTE data)
 {
+	Mcry_Touch();
 	if ((adr == 0xecc080)||(adr == 0xecc081)||(adr == 0xecc000)||(adr == 0xecc001))	// Data Port
 	{
 		if ( Mcry_SampleCnt<=0 ) return;
@@ -224,6 +272,7 @@ fclose(fp);
 // -----------------------------------------------------------------------
 BYTE FASTCALL Mcry_Read(DWORD adr)
 {
+	Mcry_Touch();
 	BYTE ret = 0;
 	if ((adr == 0xecc080)||(adr == 0xecc081)||(adr == 0xecc000)||(adr == 0xecc001))
 	{

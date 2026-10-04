@@ -33,6 +33,7 @@
 
 #include "common.h"
 #include "appftype.h"
+#include <time.h>
 
 #define		FILEH		HANDLE
 
@@ -158,7 +159,7 @@ void fname_mix(LPSTR str, LPSTR mix, int size);
 #define DD_YEAR_SHIFT		9
 
 void unix2dostime(time_t t, unsigned short *ddp, unsigned short *dtp, unsigned char *dhp);
-void dos2unixtime(u_int dd, u_int dt, u_int dh, time_t *tp);
+void dos2unixtime(unsigned int dd, unsigned int dt, unsigned int dh, time_t *tp);
 
 #ifdef __cplusplus
 };

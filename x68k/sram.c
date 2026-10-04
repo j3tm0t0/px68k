@@ -50,6 +50,43 @@ void SRAM_VirusCheck(void)
 // -----------------------------------------------------------------------
 //   ½é´ü²½
 // -----------------------------------------------------------------------
+/*
+ * Without sram.dat the IPL ROM would set up its default SRAM, which says the
+ * machine has 1 MB of RAM, so programs needing more (e.g. 2 MB+ games) fail
+ * to load. Start from that same default table, taken from the loaded IPL ROM
+ * (stored byte-swapped, see WinX68k_LoadROMs), with the RAM we really have.
+ * SRAM is filled in the file's (68000) byte order here.
+ */
+#ifdef PSP
+#define SRAM_MEMSIZE 0x400000	/* MEM_SIZE in x11/winx68k.cpp */
+#else
+#define SRAM_MEMSIZE 0xc00000
+#endif
+#define SRAM_DEFAULT_LEN 0x5b	/* bytes of the IPL's default table */
+
+static void SRAM_Default(void)
+{
+	static const BYTE magic[8] = { 0x82, 0x77, 0x36, 0x38, 0x30, 0x30, 0x30, 0x57 };	/* "\x82\x77" "68000W" */
+	DWORD i, j;
+
+	if (!IPL)
+		return;
+	for (i = 0x20000; i + SRAM_DEFAULT_LEN <= 0x40000; i++) {
+		for (j = 0; j < 8 && IPL[(i + j) ^ 1] == magic[j]; j++)
+			;
+		if (j == 8)
+			break;
+	}
+	if (i + SRAM_DEFAULT_LEN > 0x40000)
+		return;	/* not found: leave it to the IPL */
+	for (j = 0; j < SRAM_DEFAULT_LEN; j++)
+		SRAM[j] = IPL[(i + j) ^ 1];
+	SRAM[0x08] = (BYTE)(SRAM_MEMSIZE >> 24);
+	SRAM[0x09] = (BYTE)(SRAM_MEMSIZE >> 16);
+	SRAM[0x0a] = (BYTE)(SRAM_MEMSIZE >> 8);
+	SRAM[0x0b] = (BYTE)SRAM_MEMSIZE;
+}
+
 void SRAM_Init(void)
 {
 	int i;
@@ -64,12 +101,14 @@ void SRAM_Init(void)
 	{
 		File_Read(fp, SRAM, 0x4000);
 		File_Close(fp);
-		for (i=0; i<0x4000; i+=2)
-		{
-			tmp = SRAM[i];
-			SRAM[i] = SRAM[i+1];
-			SRAM[i+1] = tmp;
-		}
+	}
+	else
+		SRAM_Default();
+	for (i=0; i<0x4000; i+=2)
+	{
+		tmp = SRAM[i];
+		SRAM[i] = SRAM[i+1];
+		SRAM[i+1] = tmp;
 	}
 }
 

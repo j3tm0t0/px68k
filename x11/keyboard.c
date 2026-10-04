@@ -637,7 +637,6 @@ void
 Keyboard_Int(void)
 {
 	if (KeyBufRP != KeyBufWP) {
-		printf("KeyBufRP:%d, KeyBufWP:%d\n", KeyBufRP, KeyBufWP);
 		if (!KeyIntFlag) {
 			LastKey = KeyBuf[KeyBufRP];
 			KeyBufRP = ((KeyBufRP+1)&(KeyBufSize-1));
@@ -832,7 +831,7 @@ static void send_key(int flag)
 
 void Keyboard_skbd(void)
 {
-	static kx = 1, ky = 2;
+	static int kx = 1, ky = 2;
 	BYTE joy;
 
 	joy = get_joy_downstate();

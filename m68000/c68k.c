@@ -106,6 +106,138 @@ void C68k_Reset(c68k_struc *CPU)
 	CPU¼Â¹Ô
 --------------------------------------------------------*/
 
+#ifndef C68K_NO_IDLE
+/*--------------------------------------------------------
+	Idle loops
+--------------------------------------------------------*/
+/*
+ * Called from a Bcc.S taken back by 6 bytes (Opcode: the Bcc, PC: the
+ * branch target, ICount: after the Bcc, > 0) to a "TST.x/CMP.x
+ * (d16,An)", e.g.
+ *
+ *	loop:	tst.w	d16(An)		; 12 cycles
+ *		bne.s	loop		; 10 cycles taken
+ *
+ * that waits for an interrupt handler to change a variable in RAM (Gradius
+ * spends 70% of its instructions in such loops).  Interrupts are only
+ * taken when C68k_Exec starts, and nothing but the CPU writes RAM inside a
+ * call, so when the TST/CMP gives flags for which the branch is taken
+ * again, the rest of the slice is only these two instructions: end it at
+ * once, in exactly the state (PC, ICount, flags, BusErrFlag) of the step
+ * by step run, and return the PC.  Handled: TST.B/W (d16,An) and
+ * CMP.B/W (d16,An),Dn, both 12 cycles, with the operand in main RAM
+ * (cpu_idle_read_xxx: the same conditions as the RAM fast paths, whose
+ * reads have no other side effect).  Otherwise the flags set here are the
+ * ones the TST/CMP, which runs next, sets again (neither touches X), and
+ * nothing else changes.
+ *
+ * Also the polls of MFP GPIP ($e88001: display / raster bits), e.g. in
+ * Chorensha 68K and SION IV:
+ *
+ *	loop:	btst	#n,$e88001	; 20 cycles	(Bcc.s -10)
+ *		bne.s	loop
+ *	loop:	btst	Dn,(An)		; 8 cycles	(Bcc.s -4)
+ *		bne.s	loop
+ *
+ * GPIP depends on vline, the frame's ICount and CRTC registers, which
+ * nothing changes inside a C68k_Exec call but the CPU, and reading it has
+ * no side effect (cpu_idle_read_byte), so the same holds.  BTST only sets
+ * Z.
+ */
+UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
+{
+	UINT32 op = *(UINT16 *)PC, adr, src, dst, res;
+	INT32 c, cond, len, cyc;
+
+	switch (Opcode & 0xff)
+	{
+	case 0xfc:	/* BTST Dn,(An) */
+		if ((op & 0xf1f8) != 0x0110)
+			return PC;
+		if (!cpu_idle_read_byte(CPU->A[op & 7], &res))
+			return PC;
+		FLAG_Z = res & (1 << (CPU->D[(op >> 9) & 7] & 7));
+		len = 2;
+		cyc = 8;
+		goto cond;
+	case 0xf6:	/* BTST #n,abs.l */
+		if (op != 0x0839)
+			return PC;
+		adr = (*(UINT16 *)(PC + 4) << 16) | *(UINT16 *)(PC + 6);
+		if (!cpu_idle_read_byte(adr, &res))
+			return PC;
+		FLAG_Z = res & (1 << (*(UINT8 *)(PC + 2) & 7));
+		len = 8;
+		cyc = 20;
+		goto cond;
+	}
+	len = 4;
+	cyc = 12;
+	adr = CPU->A[op & 7] + MAKE_INT_16(*(UINT16 *)(PC + 2));
+	switch (op & 0xf1f8)
+	{
+	case 0x4068:	/* TST.W (d16,An): 0x4a68 */
+	case 0x4028:	/* TST.B (d16,An): 0x4a28 */
+		if ((op & 0xfe00) != 0x4a00)
+			return PC;
+		if (!((op & 0x40) ? cpu_idle_read_word(adr, &res) : cpu_idle_read_byte(adr, &res)))
+			return PC;
+		FLAG_C = CFLAG_CLEAR;
+		FLAG_V = VFLAG_CLEAR;
+		FLAG_Z = res;
+		FLAG_N = (op & 0x40) ? NFLAG_16(res) : NFLAG_8(res);
+		break;
+	case 0xb068:	/* CMP.W (d16,An),Dn */
+		if (!cpu_idle_read_word(adr, &src))
+			return PC;
+		dst = READ_REG_16(CPU->D[(op >> 9) & 7]);
+		res = dst - src;
+		FLAGS_CMP_16()
+		break;
+	case 0xb028:	/* CMP.B (d16,An),Dn */
+		if (!cpu_idle_read_byte(adr, &src))
+			return PC;
+		dst = READ_REG_8(CPU->D[(op >> 9) & 7]);
+		res = dst - src;
+		FLAGS_CMP_8()
+		break;
+	default:
+		return PC;
+	}
+
+cond:
+	switch ((Opcode >> 8) & 15)
+	{
+	case 2:  cond = COND_HI(); break;
+	case 3:  cond = COND_LS(); break;
+	case 4:  cond = COND_CC(); break;
+	case 5:  cond = COND_CS(); break;
+	case 6:  cond = COND_NE(); break;
+	case 7:  cond = COND_EQ(); break;
+	case 8:  cond = COND_VC(); break;
+	case 9:  cond = COND_VS(); break;
+	case 10: cond = COND_PL(); break;
+	case 11: cond = COND_MI(); break;
+	case 12: cond = COND_GE(); break;
+	case 13: cond = COND_LT(); break;
+	case 14: cond = COND_GT(); break;
+	default: cond = COND_LE(); break;
+	}
+	if (!cond)
+		return PC;
+
+	c = CPU->ICount;
+	c -= (c - 1) / (cyc + 10) * (cyc + 10);	/* whole loops: c in 1..cyc + 10 */
+	c -= cyc;			/* TST/CMP/BTST */
+	if (c > 0)
+		c -= 10;		/* Bcc, back to the TST/CMP/BTST */
+	else
+		PC += len;		/* stopped at the Bcc */
+	CPU->ICount = c;
+	return PC;
+}
+#endif
+
 extern DWORD BusErrHandling;
 extern DWORD BusErrAdr;
 
@@ -119,9 +251,12 @@ INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
 		UINT32 res;
 		UINT32 src;
 		UINT32 dst;
+#ifdef C68K_REG_ICOUNT
+		INT32 icount;
+#endif
 
 		PC = CPU->PC;
-		CPU->ICount = cycles;
+		CPU->ICount = icount = cycles;
 
 C68k_Check_Interrupt:
 		CHECK_INT
@@ -129,7 +264,7 @@ C68k_Check_Interrupt:
 		{
 
 C68k_Exec_Next:
-			if (CPU->ICount > 0)
+			if (icount > 0)
 			{
 
 				if (BusErrHandling) {
@@ -151,13 +286,18 @@ C68k_Exec_Next:
 				PC += 2;
 				goto *JumpTable[Opcode];
 
+#ifdef C68K_OP_FILE	/* the handlers in another order (Makefile.psp: c68k_op_psp.c) */
+				#include C68K_OP_FILE
+#else
 				#include "c68k_op.c"
+#endif
 			}
 		}
 
 		CPU->PC = PC;
+		CPU->ICount = icount;
 
-		return cycles - CPU->ICount;
+		return cycles - icount;
 	}
 	else
 	{

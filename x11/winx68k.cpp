@@ -324,6 +324,9 @@ void WinX68k_Exec(void)
 {
 	//char *test = NULL;
 	int clk_total, clkdiv, usedclk, hsync, clk_next, clk_count, clk_line=0;
+#ifdef PSP
+	DWORD cn_num, cn_vt, cn_q, cn_r, cn_sq, cn_sr;	/* clk_next as quotient/remainder */
+#endif
 	int KeyIntCnt = 0, MouseIntCnt = 0;
 	DWORD t_start = timeGetTime(), t_end;
 
@@ -360,6 +363,14 @@ void WinX68k_Exec(void)
 	}
 	ICount += clk_total;
 	clk_next = (clk_total/VLINE_TOTAL);
+#ifdef PSP
+	cn_num = (DWORD)clk_total;
+	cn_vt = (DWORD)VLINE_TOTAL;
+	cn_q  = cn_num/cn_vt;
+	cn_r  = cn_num%cn_vt;
+	cn_sq = cn_q;
+	cn_sr = cn_r;
+#endif
 	hsync = 1;
 
 	do {
@@ -428,10 +439,15 @@ void WinX68k_Exec(void)
 			C68K.ICount = n;
 			C68k_Exec(&C68K, C68K.ICount);
 			m = (n-C68K.ICount-m68000_ICountBk);			// 経過クロック数
-			ClkUsed += m*10;
-			usedclk = ClkUsed/clkdiv;
+			if ( (clkdiv==10)&&(!ClkUsed) ) {
+				/* (0+m*10)/10 == m and leaves ClkUsed 0: no division */
+				usedclk = m;
+			} else {
+				ClkUsed += m*10;
+				usedclk = ClkUsed/clkdiv;
+				ClkUsed -= usedclk*clkdiv;
+			}
 			clk_line += usedclk;
-			ClkUsed -= usedclk*clkdiv;
 			ICount -= m;
 			clk_count += m;
 			C68K.ICount = m68000_ICountBk = 0;
@@ -439,14 +455,15 @@ void WinX68k_Exec(void)
 
 		MFP_Timer(usedclk);
 		RTC_Timer(usedclk);
-		DMA_Exec(0);
-		DMA_Exec(1);
-		DMA_Exec(2);
+		/* DMA_Exec does nothing (no side effect) unless the channel is active */
+		if ( DMA[0].CSR&0x08 ) DMA_Exec(0);
+		if ( DMA[1].CSR&0x08 ) DMA_Exec(1);
+		if ( DMA[2].CSR&0x08 ) DMA_Exec(2);
 
 		if ( clk_count>=clk_next ) {
 			//OPM_RomeoOut(Config.BufferSize*5);
 			//MIDI_DelayOut((Config.MIDIAutoDelay)?(Config.BufferSize*5):Config.MIDIDelay);
-			MFP_TimerA();
+			if ( (MFP[MFP_TACR]&15)==8 ) MFP_TimerA();	/* event count mode only */
 			if ( (MFP[MFP_AER]&0x40)&&(vline==CRTC_IntLine) )
 				MFP_Int(1);
 			if ( (!DispFrame)&&(vline>=CRTC_VSTART)&&(vline<CRTC_VEND) ) {
@@ -464,7 +481,7 @@ void WinX68k_Exec(void)
 
 			ADPCM_PreUpdate(clk_line);
 			OPM_Timer(clk_line);
-			MIDI_Timer(clk_line);
+			if ( Config.MIDI_SW ) MIDI_Timer(clk_line);	/* it returns at once when MIDI is off */
 #ifndef	NO_MERCURY
 			Mcry_PreUpdate(clk_line);
 #endif
@@ -482,7 +499,30 @@ void WinX68k_Exec(void)
 			DSound_Send0(clk_line);
 
 			vline++;
+#ifdef PSP
+			/*
+			 * clk_next = (clk_total*(vline+1))/VLINE_TOTAL, without a
+			 * division per line: a gain on the PSP only (tools/bench)
+			 */
+			cn_num += (DWORD)clk_total;			/* DWORD, wraps like the old product */
+			if ( (cn_vt==(DWORD)VLINE_TOTAL)&&(cn_num>=(DWORD)clk_total) ) {
+				cn_q += cn_sq;
+				cn_r += cn_sr;
+				if ( cn_r>=cn_vt ) {
+					cn_r -= cn_vt;
+					cn_q++;
+				}
+			} else {						/* line count changed, or wrapped */
+				cn_vt = (DWORD)VLINE_TOTAL;
+				cn_q  = cn_num/cn_vt;
+				cn_r  = cn_num%cn_vt;
+				cn_sq = (DWORD)clk_total/cn_vt;
+				cn_sr = (DWORD)clk_total%cn_vt;
+			}
+			clk_next  = (int)cn_q;
+#else
 			clk_next  = (clk_total*(vline+1))/VLINE_TOTAL;
+#endif
 			hsync = 1;
 		}
 	} while ( vline<VLINE_TOTAL );

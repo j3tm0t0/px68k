@@ -4,13 +4,14 @@
 
 #include "common.h"
 #include "mfp.h"
+#include "rtc.h"
 
 #include <time.h>
 
 BYTE	RTC_Regs[2][16];
 BYTE	RTC_Bank = 0;
-static int RTC_Timer1 = 0;
-static int RTC_Timer16 = 0;
+int RTC_Timer1 = 0;
+int RTC_Timer16 = 0;
 
 
 // -----------------------------------------------------------------------
@@ -28,12 +29,15 @@ void RTC_Init(void)
 // -----------------------------------------------------------------------
 //   とけいのりーど
 // -----------------------------------------------------------------------
+/* Replaces the host clock, e.g. for reproducible test runs. */
+time_t (*RTC_TimeHook)(void);
+
 BYTE FASTCALL RTC_Read(DWORD adr)
 {
 	BYTE ret = 0;
 	struct tm *tm;
 	time_t t;
-	t = time(NULL);
+	t = RTC_TimeHook ? RTC_TimeHook() : time(NULL);
 	tm = localtime(&t);
 
 	adr &= 0x1f;
@@ -89,10 +93,9 @@ void FASTCALL RTC_Write(DWORD adr, BYTE data)
 }
 
 
-void RTC_Timer(int clock)
+/* RTC_Timer (rtc.h) already added the clocks; one of the edges is due. */
+void RTC_TimerEvent(void)
 {
-	RTC_Timer1  += clock;
-	RTC_Timer16 += clock;
 	if ( RTC_Timer1>=10000000 ) {
 		if ( !(RTC_Regs[0][15]&8) ) MFP_Int(15);
 		RTC_Timer1 -= 10000000;
