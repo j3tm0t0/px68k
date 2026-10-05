@@ -16,6 +16,8 @@ void TVRAM_Cleanup(void);
 
 BYTE FASTCALL TVRAM_Read(DWORD adr);
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data);
+/* a long write: the same as TVRAM_Write of its 4 bytes in order */
+void FASTCALL TVRAM_WriteLong(DWORD adr, DWORD data);
 void FASTCALL TVRAM_RCUpdate(void);
 void FASTCALL Text_DrawLine(int opaq);
 

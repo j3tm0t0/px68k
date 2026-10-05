@@ -118,10 +118,37 @@ INLINE int TVRAM_WriteByteMask(DWORD adr, BYTE data)
 // -----------------------------------------------------------------------
 //   書くなり
 // -----------------------------------------------------------------------
+/* the write changes a byte of a plane (the same test as TVRAM_WriteByte / TVRAM_WriteByteMask) */
+INLINE int TVRAM_Changes(DWORD a, BYTE data)
+{
+	if (CRTC_Regs[0x2a]&2)
+		data = (TVRAM[a] & CRTC_Regs[0x2e + ((a^1) & 1)]) | (data & (~CRTC_Regs[0x2e + ((a ^ 1) & 1)]));
+	return TVRAM[a] != data;
+}
+
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
 	int changed = 0;
 
+	/*
+	 * A write that changes no plane changes nothing at all (TVRAM,
+	 * TextDirtyLine, TextDrawWork below), so the GE guard is not needed
+	 * either: return before it (Gradius clears clear text with ~21000
+	 * byte writes a frame between its logo and its title).
+	 */
+	{
+		DWORD a = (adr & 0x7ffff) ^ 1;
+
+		if (CRTC_Regs[0x2a]&1) {
+			a &= 0x1ffff;
+			if (!((CRTC_Regs[0x2b]&0x10) && TVRAM_Changes(a, data)) &&
+			    !((CRTC_Regs[0x2b]&0x20) && TVRAM_Changes(a + 0x20000, data)) &&
+			    !((CRTC_Regs[0x2b]&0x40) && TVRAM_Changes(a + 0x40000, data)) &&
+			    !((CRTC_Regs[0x2b]&0x80) && TVRAM_Changes(a + 0x60000, data)))
+				return;
+		} else if (!TVRAM_Changes(a, data))
+			return;
+	}
 	GE_GUARD_TVRAM(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
@@ -266,6 +293,42 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		}
 	}
 #endif	/* USE_ASM */
+}
+
+
+/*
+ * A long write at an even address: what TVRAM_Write does for its 4 bytes,
+ * in order.  Clearing text that is clear already (Gradius between its
+ * logo and its title: ~5200 long writes a frame) changes nothing: when no
+ * mask is used and every plane written already holds the 4 bytes, return
+ * at once (TVRAM_Write would return before its guard for each byte).
+ */
+void FASTCALL TVRAM_WriteLong(DWORD adr, DWORD data)
+{
+	const BYTE b0 = data >> 24, b1 = data >> 16, b2 = data >> 8, b3 = data;
+
+	if (!(CRTC_Regs[0x2a]&2) && (adr & 0x1ffff) <= 0x1fffc) {	/* (each byte's address wraps on its own) */
+		DWORD a = adr & 0x7ffff;	/* TVRAM[a ^ 1] = b0, [a] = b1, [a + 3] = b2, [a + 2] = b3 */
+		int p, same = 1;
+
+		if (CRTC_Regs[0x2a]&1) {
+			a &= 0x1ffff;
+			for (p = 0; p < 4 && same; p++)
+				if (CRTC_Regs[0x2b] & (0x10 << p)) {
+					const BYTE *t = TVRAM + a + p * 0x20000;
+					same = t[1] == b0 && t[0] == b1 && t[3] == b2 && t[2] == b3;
+				}
+		} else {
+			const BYTE *t = TVRAM + a;
+			same = t[1] == b0 && t[0] == b1 && t[3] == b2 && t[2] == b3;
+		}
+		if (same)
+			return;
+	}
+	TVRAM_Write(adr, b0);
+	TVRAM_Write(adr + 1, b1);
+	TVRAM_Write(adr + 2, b2);
+	TVRAM_Write(adr + 3, b3);
 }
 
 

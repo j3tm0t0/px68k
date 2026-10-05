@@ -77,6 +77,7 @@ void MFP_Write(DWORD a, BYTE v) { devwrite(5, a, v); }
 /* TVRAM / GVRAM behave like memory (plus logging of writes) */
 BYTE TVRAM_Read(DWORD a) { a &= 0x7ffff; a ^= 1; return TVRAM[a]; }
 void TVRAM_Write(DWORD a, BYTE v) { devwrite(19, a, v); TVRAM[(a & 0x7ffff) ^ 1] = v; }
+void TVRAM_WriteLong(DWORD a, DWORD v) { TVRAM_Write(a, v >> 24); TVRAM_Write(a + 1, v >> 16); TVRAM_Write(a + 2, v >> 8); TVRAM_Write(a + 3, v); }
 BYTE GVRAM_Read(DWORD a) { mix(0x300); mix(a); return GVRAM[(a & 0x7ffff) ^ 1]; }
 void GVRAM_Write(DWORD a, BYTE v) { devwrite(20, a, v); GVRAM[(a & 0x7ffff) ^ 1] = v; }
 /* gvram.c: the same as these two byte writes (checked against the real ones by gvword.sh) */

@@ -547,6 +547,20 @@ cpu_writemem24_long_slow(DWORD addr, DWORD val)
 		PROF_LEAVE();
 		return;
 	}
+	if (!(addr & 1) && a - 0x00e00000 <= 0x00080000 - 4) {
+		/*
+		 * both words in text VRAM: what the two cpu_writemem24_word do
+		 * (cpu_writemem24_word_slow), the bytes in the same order
+		 * (Gradius clears the text screen with long writes: ~5200 a
+		 * frame between its logo and its title)
+		 */
+		PROF_IO_ENTER(a);
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		TVRAM_WriteLong(a, val);
+		PROF_LEAVE();
+		return;
+	}
 	cpu_writemem24_word(addr, val >> 16);
 	cpu_writemem24_word(addr + 2, val);
 }
