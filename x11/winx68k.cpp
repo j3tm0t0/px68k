@@ -954,12 +954,34 @@ static void psp_debug_poll(void)
 		} else if (sscanf(cmd, "nowait %d", &n) == 1) {
 			Config.NoWaitMode = n;
 			log_printf("no wait %d\n", n);
+		} else if (sscanf(cmd, "arec %d", &n) == 1 && n > 0 && n <= 60 && !DSound_RecBuf) {
+			/* Record n s of what the sound callback plays, in RAM; written when full. */
+			unsigned char *b = (unsigned char *)malloc(n * 176400);
+			struct dsound_rec_ev *e = (struct dsound_rec_ev *)malloc(n * 100 * sizeof(*e));
+
+			if (!b || !e) {
+				free(b);
+				free(e);
+				log_printf("arec: no memory for %d s\n", n);
+			} else {
+				DSound_RecEv = e;
+				DSound_RecEvMax = n * 100;
+				DSound_RecEvN = 0;
+				DSound_RecPos = 0;
+				DSound_RecLen = n * 176400;
+				DSound_RecBuf = b;	/* last: the callback starts recording */
+				log_printf("arec: recording %d s\n", n);
+			}
+		} else if (sscanf(cmd, "rate %d", &n) == 1 && (n == 0 || n == 11025 || n == 22050 || n == 44100)) {
+			Config.SampleRate = n;	/* takes effect at the next start */
+			SaveConfig();
+			log_printf("rate %d (saved; restart to apply)\n", n);
 		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
 			Config.XVIMode = n;	/* MPU clock: 0 = 10, 1 = 16, 2 = 24 MHz */
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
@@ -986,10 +1008,55 @@ static int psp_frame_due(void)
 	return due;
 }
 
+/* "arec": write the finished recording (WAV) and its callback log (CSV) next to cap.raw. */
+static void psp_arec_finish(void)
+{
+	char path[280];
+	unsigned char h[44];
+	unsigned len = DSound_RecPos, v;
+	int fd, i, dl = (int)strlen(psp_cap_path) - 7;	/* without "cap.raw" */
+
+	static const unsigned char tmpl[44] = {
+		'R','I','F','F', 0,0,0,0, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, 1,0, 2,0,
+		0x44,0xac,0,0, 0x10,0xb1,2,0, 4,0, 16,0, 'd','a','t','a', 0,0,0,0 };
+	memcpy(h, tmpl, 44);
+	v = len + 36;
+	h[4] = v; h[5] = v >> 8; h[6] = v >> 16; h[7] = v >> 24;
+	h[40] = len; h[41] = len >> 8; h[42] = len >> 16; h[43] = len >> 24;
+	snprintf(path, sizeof(path), "%.*sarec.wav", dl, psp_cap_path);
+	fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, h, 44);
+		sceIoWrite(fd, DSound_RecBuf, len);
+		sceIoClose(fd);
+	}
+	snprintf(path, sizeof(path), "%.*sarec.csv", dl, psp_cap_path);
+	fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+	if (fd >= 0) {
+		char line[64];
+
+		sceIoWrite(fd, "t_us,avail,filled\n", 18);
+		for (i = 0; i < DSound_RecEvN; i++) {
+			int n = snprintf(line, sizeof(line), "%u,%u,%u\n", DSound_RecEv[i].t_us,
+					 DSound_RecEv[i].avail, DSound_RecEv[i].filled);
+			sceIoWrite(fd, line, n);
+		}
+		sceIoClose(fd);
+	}
+	log_printf("arec: %u bytes, %d callbacks -> %.*sarec.wav/.csv\n", len, DSound_RecEvN, dl, psp_cap_path);
+	free(DSound_RecBuf);
+	free(DSound_RecEv);
+	DSound_RecEv = NULL;
+	DSound_RecBuf = NULL;
+}
+
 static void psp_count_fps(void)
 {
 	static unsigned start, emu, shown;
 	unsigned now = timeGetTime();
+
+	if (DSound_RecBuf && DSound_RecPos >= DSound_RecLen)
+		psp_arec_finish();
 
 	emu++;
 	if (!DispFrame)

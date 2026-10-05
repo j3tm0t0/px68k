@@ -31,6 +31,9 @@
 #include	"mercury.h"
 #include	"fmg_wrap.h"
 #include	"../psp/prof.h"
+#ifdef PSP
+#include	<pspthreadman.h>
+#endif
 
 short	playing = FALSE;
 
@@ -72,9 +75,9 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 	// Linuxは2倍(SDL1.2)、Android(SDL2.0)は4倍のlenでcallbackされた。
 	// この値を小さくした方が音の遅延は少なくなるが負荷があがる
 #ifdef PSP
-	/* 512 samples (11.6 ms at 44.1 kHz): the emulation is paced by the sound
+	/* 1024 samples (23 ms at 44.1 kHz): the emulation is paced by the sound
 	 * on the PSP (WinX68k main loop), so a short buffer is enough. */
-	samples = 512;
+	samples = 1024;
 #else
 	samples = 2048;
 #endif
@@ -208,6 +211,12 @@ void DSound_Flush(void)
 }
 
 int DSound_Underruns;	/* callbacks that had to synthesize ahead of the emulation */
+#ifdef PSP
+unsigned char *DSound_RecBuf;
+int DSound_RecLen, DSound_RecPos;
+struct dsound_rec_ev *DSound_RecEv;
+int DSound_RecEvMax, DSound_RecEvN;
+#endif
 
 int DSound_Enabled(void)
 {
@@ -236,11 +245,33 @@ static void FASTCALL DSound_Send(int length)
 
 #ifdef PSP
 /*
- * Plays what the emulation synthesized and pads a shortfall with silence.  It
- * used to synthesize the shortfall here: that ran the OPM ahead of the
- * emulation (the music stretched) and took the CPU from it, so once behind it
- * stayed behind (Gradius' title and game over screens fell to 47 fps at
- * 333 MHz).  The emulation is paced by this buffer (psp_frame_due).
+ * The synthesis runs at 11025 or 22050 Hz and repeats each sample 4 or 2 times
+ * for the 44.1 kHz output: steps that alias (a harsh, broken sound).  A moving
+ * average over the repeat count turns the steps into straight lines (linear
+ * interpolation, half a source sample late).
+ */
+static void smooth(short *p, int frames, int step)
+{
+	static int hist[2][4], sum[2], pos;
+	int i, c;
+
+	if (step <= 1 || step > 4)
+		return;
+	for (i = 0; i < frames; i++, p += 2) {
+		for (c = 0; c < 2; c++) {
+			sum[c] += p[c] - hist[c][pos];
+			hist[c][pos] = p[c];
+			p[c] = (short)(sum[c] / step);
+		}
+		if (++pos == step)
+			pos = 0;
+	}
+}
+
+/*
+ * Plays what the emulation synthesized; when that runs short (the emulation is
+ * behind real time), synthesizes the rest.  The emulation is paced by this
+ * buffer (psp_frame_due), so that happens only when it cannot keep up.
  */
 static void
 sdlaudio_callback(void *userdata, unsigned char *stream, int len)
@@ -248,7 +279,6 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 	long avail = pbwp - pbrp;
 	int n, first;
 
-	(void)userdata;
 	if (avail < 0)
 		avail += PCMBUF_SIZE;
 	n = avail < len ? (int)avail : len;
@@ -264,8 +294,32 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 	if (pbrp >= pbep)
 		pbrp = pbsp + (pbrp - pbep);
 	if (n < len) {
-		memset(sdlsndbuf + n, 0, len - n);
+		/*
+		 * Short: synthesize the rest (the emulation is behind real time).
+		 * Padding it with silence instead broke the sound up whenever the
+		 * emulation could not keep up (16 MHz mode, every frame drawn).
+		 */
+		short *out = (short *)(sdlsndbuf + n);
+		int frames = (len - n) / 4, step = 44100 / (int)userdata;
+
 		DSound_Underruns++;
+		memset(out, 0, len - n);
+		ADPCM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+		OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+	}
+	smooth((short *)sdlsndbuf, len / 4, 44100 / (int)userdata);
+	if (DSound_RecBuf && DSound_RecPos < DSound_RecLen) {
+		int c = DSound_RecLen - DSound_RecPos < len ? DSound_RecLen - DSound_RecPos : len;
+
+		memcpy(DSound_RecBuf + DSound_RecPos, sdlsndbuf, c);
+		DSound_RecPos += c;
+		if (DSound_RecEvN < DSound_RecEvMax) {
+			struct dsound_rec_ev *e = &DSound_RecEv[DSound_RecEvN++];
+
+			e->t_us = sceKernelGetSystemTimeLow();
+			e->avail = (unsigned)avail;
+			e->filled = n < len ? len - n : 0;
+		}
 	}
 	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
 }
