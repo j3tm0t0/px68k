@@ -636,6 +636,20 @@ unsigned prof_us[PROF_N];
 unsigned prof_count[PROF_COUNT_N];
 
 static int psp_debug_on;
+static int psp_net_up;		/* the debug WLAN is joined */
+
+extern "C" int psp_debug_net(int on)
+{
+	if (on == 0 && psp_net_up) {
+		net_pause();
+		psp_net_up = 0;
+		log_printf("debug net: off, cpu %d MHz\n", scePowerGetCpuClockFrequency());
+	} else if (on == 1 && psp_debug_on && !psp_net_up) {
+		psp_net_up = net_resume() == 0;
+		log_printf("debug net: %s\n", psp_net_up ? "on" : "rejoin failed");
+	}
+	return psp_net_up;
+}
 static int psp_fps_log;
 static int psp_emu_frames, psp_drawn_frames;
 static unsigned psp_exec_us, psp_exec_max_us;
@@ -740,6 +754,7 @@ static void psp_debug_init(const char *eboot)
 	 */
 	sceKernelChangeThreadPriority(sceKernelGetThreadId(), 0x38);
 	psp_debug_on = psp_fps_log = 1;
+	psp_net_up = 1;
 	psp_fps_start = timeGetTime();
 	log_printf("cpu %d MHz, bus %d MHz, free %d KB (max block %d KB)\n", scePowerGetCpuClockFrequency(),
 		   scePowerGetBusClockFrequency(), (int)(sceKernelTotalFreeMemSize() / 1024),
