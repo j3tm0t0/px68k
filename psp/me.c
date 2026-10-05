@@ -255,6 +255,11 @@ static int me_hook(void)
 
 	if (me_hooked)
 		return 0;
+	/*
+	 * Each step is logged before it is taken: log_printf rewrites px68k.log
+	 * at once, so after a crash it ends at the step that did not finish.
+	 */
+	log_printf("me: taking over SceMeRpc\n");
 	/* sysmem's sceSysEventForKernel; the NID is not randomized (uofw sysmem exports) */
 	refer = sctrlHENFindFunction("sceSystemMemoryManager", "sceSysEventForKernel", 0x68D55505);
 	if ((refer & 0xf0000000) != 0x80000000) {
@@ -286,6 +291,7 @@ int me_start(void (*loop)(void))
 	b->gp = gp;
 	b->loop = loop;
 	b->halt = 0;
+	log_printf("me: reset into our handler\n");	/* breadcrumbs, see me_hook */
 	if (me_reset_into(0) < 0) {
 		if (b->state == 0 && me_reset_into(1) == 0)
 			open = 1;
@@ -297,6 +303,7 @@ int me_start(void (*loop)(void))
 	}
 	if (open)
 		me_kcall((void *)me_protect_k, 0);
+	log_printf("me: waiting in me_main, go\n");
 	b->go = 1;
 	if (!me_wait(ME_RUNNING, 100)) {
 		/* it needs the protection open: leave it so (until the next reboot) */

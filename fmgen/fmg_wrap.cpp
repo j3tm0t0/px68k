@@ -381,6 +381,7 @@ void OPM_MeTestPoll(void)
 
 static void me_init(int clock, int rate)
 {
+	log_printf("me: preparing the OPM for the Media Engine\n");
 	me_opm = me_new_opm();
 	if (!me_opm || !me_init_opm(me_opm, clock, rate, 0)) {
 		me_free_opm(me_opm);
