@@ -11,12 +11,14 @@
  * itself with a little jitter, so that it does not lock onto the period of
  * the raster lines or slices.
  */
-volatile unsigned char prof_cur;
+volatile unsigned char prof_cur __attribute__((section(".data")));
 unsigned prof_ev[PEV_N];
 
 static volatile unsigned prof_hist[PS_N];
-static volatile int prof_running;
-static unsigned prof_period, prof_rnd = 1;
+/* what the handler uses: not small data either (prof.h) */
+static volatile int prof_running __attribute__((section(".data")));
+static unsigned prof_period __attribute__((section(".data")));
+static unsigned prof_rnd __attribute__((section(".data"))) = 1;
 static SceUID prof_alarm = -1;
 static unsigned prof_ev0[PEV_N];
 static unsigned prof_run0;	/* this thread's run time at the start, us */

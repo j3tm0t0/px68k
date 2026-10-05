@@ -16,8 +16,9 @@
                                       reset, then time <frames> frames from
                                       <frame> on flat out without the WLAN, once
                                       per frame skip given; prints the results
-                                      (BENCH_PROF=0: without the profiler,
-                                      BENCH_PROF=2: the sampling profiler, every
+                                      (BENCH_PROF=0 (default): without a profiler,
+                                      1: the timers (builds with -DPROF_TIMERS),
+                                      2: the sampling profiler, every
                                       BENCH_PERIOD us (default 250),
                                       BENCH_RT=1: paced in real time with sound)
   psp-debug.py pause | resume         stop / restart the emulation
@@ -236,7 +237,7 @@ def main():
         for skip in args[2:]:
             s = connect()
             drain(s)
-            s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '1')} {os.environ.get('BENCH_RT', '0')} "
+            s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '0')} {os.environ.get('BENCH_RT', '0')} "
                       f"{os.environ.get('BENCH_PERIOD', '250')}\n".encode())
             s.close()
             deadline = time.time() + float(os.environ.get("BENCH_TIMEOUT", "900"))

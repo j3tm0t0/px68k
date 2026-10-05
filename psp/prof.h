@@ -125,7 +125,12 @@ extern unsigned prof_count[PROF_COUNT_N];
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern volatile unsigned char prof_cur;	/* PS_*: what the emulator thread does */
+/*
+ * PS_*: what the emulator thread does.  Not small data (.data): the alarm
+ * handler reads it, and an interrupt handler need not run with this
+ * module's $gp (builds with -G8).
+ */
+extern volatile unsigned char prof_cur __attribute__((section(".data")));
 extern unsigned prof_ev[PEV_N];
 
 /* sample every ~period_us from now on; 0 or the alarm's error */
