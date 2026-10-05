@@ -1033,6 +1033,9 @@ static void psp_debug_poll(void)
 			Config.SampleRate = n;	/* takes effect at the next start */
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
+		} else if (sscanf(cmd, "idlefp %d", &n) == 1) {
+			C68k_IdleFast = n != 0;	/* m68000/c68k.c: idle slices without the core */
+			log_printf("idlefp %d\n", C68k_IdleFast);
 		} else if (sscanf(cmd, "idle %d", &n) == 1 && n >= 0 && n <= 5000) {
 			psp_idle_us = n;	/* psp_frame_due's sleep, 0: spin */
 			log_printf("idle %d us\n", n);
@@ -1041,7 +1044,7 @@ static void psp_debug_poll(void)
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, idle <us>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, idle <us>, idlefp <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}

@@ -243,6 +243,7 @@ cond:
  * TST/CMP/BTST (host PC; 0: none) and its Bcc.  Cleared when C68k_Exec
  * runs the core, set again when the slice ends in a skip.
  */
+int C68k_IdleFast = 1;	/* C68k_Exec_Idle on (debug command "idlefp 0|1": A/B in one build) */
 static UINT32 C68k_IdlePC, C68k_IdleBcc;
 static INT32 C68k_IdleLen;
 
@@ -350,7 +351,7 @@ static INT32 C68k_Exec_Core(c68k_struc *CPU, INT32 cycles) __attribute__((noinli
 INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
 {
 #ifndef C68K_NO_IDLE
-	if (CPU && C68k_IdlePC) {
+	if (CPU && C68k_IdlePC && C68k_IdleFast) {
 		if (C68k_Exec_Idle(CPU, cycles)) {
 			PROF_EV(PEV_IDLE_SLICES, 1);
 			return cycles - CPU->ICount;

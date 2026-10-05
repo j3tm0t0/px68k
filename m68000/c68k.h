@@ -148,6 +148,7 @@ typedef struct c68k_t
 
 extern c68k_struc C68K;
 extern int m68000_ICountBk;
+extern int C68k_IdleFast;
 
 // 68K core function declaration
 /////////////////////////////////
