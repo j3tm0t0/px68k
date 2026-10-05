@@ -61,6 +61,7 @@ static int load_profile(const char *path)
 }
 
 static int joined_id = -1;
+static volatile int paused;
 static int full_cpu, full_bus;
 
 /* WLAN is unreliable above 222 MHz on some models; join at 222. */
@@ -118,9 +119,16 @@ int net_start(const char *const *profile_paths, int count)
 	return 0;
 }
 
+int net_paused(void)
+{
+	return paused;
+}
+
 void net_pause(void)
 {
 	int state, i;
+
+	paused = 1;	/* first: the debug server stops using its sockets */
 
 	sceNetApctlDisconnect();
 	for (i = 0; i < 60; i++) {
@@ -140,5 +148,8 @@ void net_pause(void)
 
 int net_resume(void)
 {
-	return joined_id < 0 ? -1 : join(joined_id);
+	int ret = joined_id < 0 ? -1 : join(joined_id);
+
+	paused = 0;
+	return ret;
 }

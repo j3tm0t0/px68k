@@ -11,6 +11,7 @@
 
 #include "debug.h"
 #include "log.h"
+#include "net.h"
 #include "selfexec.h"
 
 #define KEY_MIN 16
@@ -280,6 +281,17 @@ static void serve(int fd)
 		char *nl;
 		int r;
 
+		if (net_paused()) {
+			/*
+			 * The WLAN is left (bench, benchf, samp, "Debug Net" off):
+			 * no socket calls until it is back.  Polling the dead
+			 * socket (select with a timeout, send, recv) kept this
+			 * thread, above the emulator's priority, busy: 4.5 ms of
+			 * CPU per emulated frame in "samp" on the device.
+			 */
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
 		while (authed && (n = log_read(&sent, out, sizeof(out))) > 0)
 			if (send_all(fd, out, n) != 0)
 				return;
@@ -419,7 +431,13 @@ static int server_thread(SceSize args, void *argp)
 	for (;;) {
 		struct sockaddr_in peer;
 		socklen_t len = sizeof(peer);
-		int fd = srv >= 0 ? accept(srv, (struct sockaddr *)&peer, &len) : -1;
+		int fd;
+
+		if (net_paused()) {	/* no socket calls while the WLAN is left (serve) */
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
+		fd = srv >= 0 ? accept(srv, (struct sockaddr *)&peer, &len) : -1;
 		if (fd < 0) {
 			/*
 			 * The socket dies when the WLAN is left (bench); listen again
