@@ -92,6 +92,11 @@ namespace FM
 		
 		void	SetVolume(int db);
 		void	SetChannelMask(uint mask);
+#ifdef PSP
+		// the Media Engine's copy gets the volume computed here (pow)
+		int		GetFMVolume() { return fmvolume; }
+		void	SetFMVolume(int v) { fmvolume = v; }
+#endif
 		
 	private:
 		virtual void Intr(bool) {}
@@ -111,6 +116,10 @@ namespace FM
 		void	MixSubL(int activech, ISample**);
 		void	LFO();
 		uint	Noise();
+#ifdef PSP
+		int		Rand();
+		uint32	rnd;
+#endif
 		
 		int		fmvolume;
 

@@ -11,6 +11,7 @@
 
 #include "net.h"
 #include "log.h"
+#include "me.h"
 
 #define CONNECT_TIMEOUT_US (30 * 1000 * 1000)
 #define MAX_NET_CONFIGS 10
@@ -122,6 +123,7 @@ void net_pause(void)
 {
 	int state, i;
 
+	me_pause();
 	sceNetApctlDisconnect();
 	for (i = 0; i < 60; i++) {
 		if (sceNetApctlGetState(&state) != 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED)
@@ -136,9 +138,19 @@ void net_pause(void)
 			break;
 		sceKernelDelayThread(50 * 1000);
 	}
+	if (me_resume() < 0)
+		log_printf("net: the Media Engine did not restart\n");
 }
 
 int net_resume(void)
 {
-	return joined_id < 0 ? -1 : join(joined_id);
+	int ret;
+
+	if (joined_id < 0)
+		return -1;
+	me_pause();
+	ret = join(joined_id);
+	if (me_resume() < 0)
+		log_printf("net: the Media Engine did not restart\n");
+	return ret;
 }

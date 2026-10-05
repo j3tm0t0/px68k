@@ -11,6 +11,7 @@
 
 #include "debug.h"
 #include "log.h"
+#include "me.h"
 #include "selfexec.h"
 
 #define KEY_MIN 16
@@ -357,6 +358,7 @@ static void serve(int fd)
 				press(fd, cmd + 4);
 			} else if (strcmp(cmd, "quit") == 0) {
 				reply(fd, "OK quit");
+				me_halt();
 				sceKernelExitGame();
 			} else if (cmd[0]) {
 				log_printf("debug: > %s\n", cmd);

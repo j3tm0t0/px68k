@@ -11,6 +11,17 @@ void FASTCALL OPM_Timer(DWORD step);
 void OPM_SetVolume(BYTE vol);
 void OPM_SetRate(int clock, int rate);
 void OPM_RomeoOut(unsigned int delay);
+#ifdef PSP
+/* OPM synthesis on the Media Engine (fmg_wrap.cpp) */
+int OPM_MeActive(void);
+void OPM_MeSetReady(BYTE *p);
+BYTE *OPM_MeReady(void);
+void OPM_MeExtra(short *buffer, int length, int rate, BYTE *pbsp, BYTE *pbep);
+void OPM_MeFail(const char *why);
+void OPM_MeTest(int sec);
+void OPM_MeTestPoll(void);
+void OPM_MeStats(unsigned *samples, unsigned *queued);
+#endif
 
 int M288_Init(int clock, int rate, const char* path);
 void M288_Cleanup(void);

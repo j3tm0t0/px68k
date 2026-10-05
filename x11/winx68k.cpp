@@ -587,6 +587,7 @@ void WinX68k_Exec(void)
 #include <pspctrl.h>
 #include <pspkernel.h>
 #include <pspgu.h>
+#include "../psp/me.h"
 
 int exit_flag = 0;
 
@@ -597,12 +598,24 @@ int exit_callback(int arg1, int arg2, void *common)
 	return 0;
 }
 
+/* The Media Engine must not run through a suspend (psp/me.h). */
+static int power_callback(int unknown, int flags, void *common)
+{
+	if (flags & (PSP_POWER_CB_SUSPENDING | PSP_POWER_CB_STANDBY))
+		me_pause();
+	else if (flags & PSP_POWER_CB_RESUME_COMPLETE)
+		me_resume();
+	return 0;
+}
+
 int CallbackThread(SceSize args, void *argp)
 {
 	int cbid;
 
 	cbid = sceKernelCreateCallback("Exit Callback", exit_callback, NULL);
 	sceKernelRegisterExitCallback(cbid); //SetExitCallback(cbid);
+	cbid = sceKernelCreateCallback("Power Callback", power_callback, NULL);
+	scePowerRegisterCallback(-1, cbid);
 
 	sceKernelSleepThreadCB(); //KernelPollCallbacks();
 
@@ -824,12 +837,21 @@ static void psp_debug_frame(unsigned us)
 	now = timeGetTime();
 	if (now - psp_fps_start < 1000)
 		return;
-	if (psp_fps_log)
-		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d\n",
+	if (psp_fps_log) {
+		unsigned me_n, me_q;
+		char me[64] = "";
+
+		OPM_MeStats(&me_n, &me_q);
+		if (OPM_MeActive())	/* ME: samples mixed, queue words, longest callback wait */
+			snprintf(me, sizeof(me), " me %u q %u wait %u.%ums", me_n, me_q,
+				 DSound_MeWaitMax / 1000, DSound_MeWaitMax / 100 % 10);
+		DSound_MeWaitMax = 0;
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
-			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns);
+			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me);
+	}
 	DSound_Underruns = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
 		psp_bench_end = 0;
@@ -868,6 +890,7 @@ static void psp_debug_poll(void)
 
 	if (!psp_debug_on)
 		return;
+	OPM_MeTestPoll();
 	/* One per emulated frame, so that a button press and release don't cancel out. */
 	if (debug_poll(cmd, sizeof(cmd))) {
 		if (sscanf(cmd, "fdd %d %127[^\n]", &n, arg) == 2 && (n == 0 || n == 1)) {
@@ -976,12 +999,14 @@ static void psp_debug_poll(void)
 			Config.SampleRate = n;	/* takes effect at the next start */
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
+		} else if (sscanf(cmd, "metest %d", &n) == 1 && n > 0 && n <= 20) {
+			OPM_MeTest(n);	/* the ME's OPM against this CPU's on n s of commands */
 		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
 			Config.XVIMode = n;	/* MPU clock: 0 = 10, 1 = 16, 2 = 24 MHz */
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
