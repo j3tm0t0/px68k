@@ -43,7 +43,7 @@ X11CXXOBJS= x11/winx68k.o
 
 WIN32APIOBJS= win32api/dosio.o win32api/fake.o win32api/peace.o
 
-PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o psp/prof.o
+PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o psp/prof.o psp/me.o psp/me_boot.o
 
 COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS) $(PSPOBJS)
 CXXOBJS=	$(FMGENOBJS) $(X11CXXOBJS)
@@ -95,6 +95,9 @@ CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 # c68kmacro.h writes the low word/byte of the 32-bit registers through
 # UINT16/UINT8 pointers (WRITE_REG_16/8): type punning
 m68000/c68k.o: CFLAGS += -fno-strict-aliasing
+# psp/me.c runs in kernel mode (kuKernelCall) and as me_wrapper's event
+# handler, with other modules' $gp: none of its data in small data.
+psp/me.o: CFLAGS += -G0
 
 LIBDIR =
 LDFLAGS =
@@ -102,7 +105,7 @@ LDFLAGS =
 # (sdl-config --libs repeats those, which splits a module's import stubs:
 # "stubs out of order", and the calls stay unresolved on real hardware).
 LIBS= -lSDLmain -lSDL -lpspgum -lpspgu -lstdc++ -lm -lpsphprm -lpspaudio \
-	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user
+	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user -lpspkubridge
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PX68K for PSP ver.$(PX68K_VERSION)
@@ -110,6 +113,9 @@ PSP_EBOOT_ICON = psp_logo.png
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
+
+# the OPM on the Media Engine: both sides must agree on these
+fmgen/fmg_wrap.o fmgen/opm.o x11/dswin.o x11/winx68k.o: fmgen/opm.h fmgen/fmg_wrap.h psp/me.h
 
 # objects that use psp/gecomp.h: rebuilt when it changes (its GE_ST_* indices must agree)
 x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o: psp/gecomp.h psp/prof.h

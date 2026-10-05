@@ -24,6 +24,9 @@ OPM::OPM()
 	lfo_count_ = 0;
 	lfo_count_prev_ = ~0;
 	BuildLFOTable();
+#ifdef PSP
+	rnd = 1;
+#endif
 	for (int i=0; i<8; i++)
 	{
 		ch[i].SetChip(&chip);
@@ -384,7 +387,11 @@ inline void OPM::LFO()
 	{
 		if ((lfo_count_ ^ lfo_count_prev_) & ~((1 << 17) - 1))
 		{
+#ifdef PSP
+			int c = (Rand() / 17) & 0xff;
+#else
 			int c = (rand() / 17) & 0xff;
+#endif
 			chip.SetPML((c - 0x80) * pmd / 128 + 0x80);
 			chip.SetAML(c * amd / 128);
 		}
@@ -397,6 +404,15 @@ inline void OPM::LFO()
 	}
 }
 
+#ifdef PSP
+// rand() goes through newlib's shared state: not on the Media Engine
+inline int OPM::Rand()
+{
+	rnd = rnd * 1103515245 + 12345;
+	return (rnd >> 1) & 0x7fffffff;
+}
+
+#endif
 inline uint OPM::Noise()
 {
 	noisecount += 2 * rateratio;

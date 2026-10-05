@@ -595,13 +595,31 @@ void WinX68k_Exec(void)
 #include <pspctrl.h>
 #include <pspkernel.h>
 #include <pspgu.h>
+#include "../psp/me.h"
+#include "../psp/log.h"
 
 int exit_flag = 0;
 
 int exit_callback(int arg1, int arg2, void *common)
 {
+	/* HOME > exit: the ME first, in case the emulation thread never gets there */
+	me_release();
 	exit_flag = 1;
 
+	return 0;
+}
+
+/*
+ * The Media Engine is stopped inside the suspend sequence (psp/me.c,
+ * me_sysevent): this callback is only a notification and may come too late
+ * for that.  It restarts the ME after a resume.
+ */
+static int power_callback(int unknown, int flags, void *common)
+{
+	log_printf("power: %08X, battery %d%%%s\n", flags, scePowerGetBatteryLifePercent(),
+		   scePowerIsBatteryCharging() ? " charging" : "");
+	if (flags & PSP_POWER_CB_RESUME_COMPLETE)
+		log_printf("me: restart after resume %s\n", me_resume() == 0 ? "ok" : "failed");
 	return 0;
 }
 
@@ -611,6 +629,8 @@ int CallbackThread(SceSize args, void *argp)
 
 	cbid = sceKernelCreateCallback("Exit Callback", exit_callback, NULL);
 	sceKernelRegisterExitCallback(cbid); //SetExitCallback(cbid);
+	cbid = sceKernelCreateCallback("Power Callback", power_callback, NULL);
+	scePowerRegisterCallback(-1, cbid);
 
 	sceKernelSleepThreadCB(); //KernelPollCallbacks();
 
@@ -722,8 +742,9 @@ static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
 /* "padat": frames (counted from the reset of benchf / capf) at which circle is held for 6 frames */
 static unsigned psp_padat[8];
 static int psp_padat_n;
-static unsigned psp_idle_us = 200;	/* psp_frame_due: sleep while no frame is due ("idle <us>") */
+static unsigned psp_idle_us = 200, psp_idle_polls;	/* psp_frame_due: sleep while no frame is due ("idle <us>") */
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
+static char psp_meoff_path[272];	/* "me boot off": the OPM stays on this CPU (A/B) */
 
 static void psp_debug_init(const char *eboot)
 {
@@ -745,6 +766,11 @@ static void psp_debug_init(const char *eboot)
 	snprintf(logpath, sizeof(logpath), "%s/px68k.log", dir);
 	log_open(logpath);
 	log_printf("PX68K %s, eboot %s\n", PX68KVERSTR, eboot);
+	snprintf(psp_meoff_path, sizeof(psp_meoff_path), "%s/me.off", dir);
+	if (sceIoGetstat(psp_meoff_path, &st) >= 0) {
+		OPM_MeOff = 1;
+		log_printf("me: off (%s)\n", psp_meoff_path);
+	}
 
 	snprintf(psp_cap_path, sizeof(psp_cap_path), "%s/cap.raw", dir);
 	snprintf(cfg, sizeof(cfg), "%s/net.cfg", dir);
@@ -864,12 +890,27 @@ static void psp_debug_frame(unsigned us)
 	now = timeGetTime();
 	if (now - psp_fps_start < 1000)
 		return;
-	if (psp_fps_log)
-		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d\n",
+	if (psp_fps_log) {
+		unsigned me_n, me_q, me_regs, me_put;
+		char me[96] = "";
+
+		OPM_MeStats(&me_n, &me_q, &me_regs, &me_put);
+		if (OPM_MeActive())	/* ME: samples mixed, queue words, longest callback wait; OPM writes, queueing */
+			snprintf(me, sizeof(me), " me %u q %u wait %u.%ums reg %u put %u.%ums", me_n, me_q,
+				 DSound_MeWaitMax / 1000, DSound_MeWaitMax / 100 % 10,
+				 me_regs, me_put / 1000, me_put / 100 % 10);
+		DSound_MeWaitMax = 0;
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s"
+			 " send %u.%u cb %u.%u ms/s idle %u\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
-			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns);
+			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me,
+			   DSound_SendUs / 1000, DSound_SendUs / 100 % 10, DSound_CbUs / 1000, DSound_CbUs / 100 % 10,
+			   psp_idle_polls);
+		DSound_SendUs = DSound_CbUs = 0;
+		psp_idle_polls = 0;
+	}
 	DSound_Underruns = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
 		psp_bench_end = 0;
@@ -908,6 +949,7 @@ static void psp_debug_poll(void)
 
 	if (!psp_debug_on)
 		return;
+	OPM_MeTestPoll();
 	/* One per emulated frame, so that a button press and release don't cancel out. */
 	if (debug_poll(cmd, sizeof(cmd))) {
 		if (sscanf(cmd, "fdd %d %127[^\n]", &n, arg) == 2 && (n == 0 || n == 1)) {
@@ -1061,12 +1103,34 @@ static void psp_debug_poll(void)
 		} else if (sscanf(cmd, "idle %d", &n) == 1 && n >= 0 && n <= 5000) {
 			psp_idle_us = n;	/* psp_frame_due's sleep, 0: spin */
 			log_printf("idle %d us\n", n);
+		} else if (strcmp(cmd, "me off") == 0) {
+			me_pause();	/* as around a suspend */
+			log_printf("me: halted, firmware handler back\n");
+		} else if (strcmp(cmd, "me boot off") == 0 || strcmp(cmd, "me boot on") == 0) {
+			if (cmd[9] == 'f') {
+				int fd = sceIoOpen(psp_meoff_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0644);
+				if (fd >= 0)
+					sceIoClose(fd);
+			} else {
+				sceIoRemove(psp_meoff_path);
+			}
+			log_printf("me: %s from the next start\n", cmd[9] == 'f' ? "off" : "on");
+		} else if (sscanf(cmd, "me clk %x", &n) == 1) {
+			me_clocks = n;	/* for the next start ("me off", "me on") */
+			log_printf("me: bus clocks %02X from the next start\n", n);
+		} else if (sscanf(cmd, "me nomix %d", &n) == 1) {
+			OPM_MeNoMix(n);	/* the ME's cost to this CPU without its mixing */
+			log_printf("me: nomix %d\n", n);
+		} else if (strcmp(cmd, "me on") == 0) {
+			log_printf("me: restart %s\n", me_resume() == 0 ? "ok" : "failed");
+		} else if (sscanf(cmd, "metest %d", &n) == 1 && n > 0 && n <= 20) {
+			OPM_MeTest(n);	/* the ME's OPM against this CPU's on n s of commands */
 		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
 			Config.XVIMode = n;	/* MPU clock: 0 = 10, 1 = 16, 2 = 24 MHz */
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, idle <us>, idlefp <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, idle <us>, idlefp <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off|boot on|boot off|nomix <0|1>|clk <hex>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
@@ -1096,8 +1160,11 @@ static int psp_frame_due(void)
 
 	if (DSound_Enabled())
 		due = DSound_BufferedMs() < PSP_SND_LEAD_MS;
-	if (!due && psp_idle_us)
-		sceKernelDelayThread(psp_idle_us);
+	if (!due) {
+		psp_idle_polls++;
+		if (psp_idle_us)
+			sceKernelDelayThread(psp_idle_us);
+	}
 	return due;
 }
 
@@ -1143,10 +1210,37 @@ static void psp_arec_finish(void)
 	DSound_RecBuf = NULL;
 }
 
+/*
+ * The ME is halted around the clock changes px68k makes (net.c, suspend);
+ * the firmware makes none of its own while px68k runs, as far as known.
+ * Report one that happens anyway with the ME running.
+ */
+static void psp_check_clock(void)
+{
+	static int clk, starts;
+	int now = scePowerGetCpuClockFrequencyInt() * 1000 + scePowerGetBusClockFrequencyInt();
+
+	static unsigned last_batt;
+	unsigned t = sceKernelGetSystemTimeLow();
+
+	if (t - last_batt > 60 * 1000 * 1000) {	/* in the file, should the PSP go off */
+		log_printf("power: battery %d%%%s, %d C\n", scePowerGetBatteryLifePercent(),
+			   scePowerIsBatteryCharging() ? " charging" : "", scePowerGetBatteryTemp());
+		last_batt = t;
+	}
+	if (clk && now != clk && me_running() && starts == me_start_count())
+		log_printf("me: clock %d/%d -> %d/%d MHz with the Media Engine running\n",
+			   clk / 1000, clk % 1000, now / 1000, now % 1000);
+	clk = now;
+	starts = me_start_count();
+}
+
 static void psp_count_fps(void)
 {
 	static unsigned start, emu, shown;
 	unsigned now = timeGetTime();
+
+	psp_check_clock();
 
 	if (DSound_RecBuf && DSound_RecPos >= DSound_RecLen)
 		psp_arec_finish();

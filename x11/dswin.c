@@ -33,6 +33,8 @@
 #include	"../psp/prof.h"
 #ifdef PSP
 #include	<pspthreadman.h>
+#include	<psputils.h>
+#include	"../psp/me.h"
 #endif
 
 short	playing = FALSE;
@@ -105,6 +107,15 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 		return FALSE;
 	}
 
+#ifdef PSP
+	if (OPM_MeActive()) {
+		/* The Media Engine mixes the OPM into this ring: uncached on both CPUs. */
+		sceKernelDcacheWritebackInvalidateRange(pcmbuffer, PCMBUF_SIZE);
+		pbsp = pbrp = pbwp = (BYTE *)ME_UNCACHED(pcmbuffer);
+		pbep = pbsp + PCMBUF_SIZE;
+		OPM_MeSetReady(pbwp);
+	}
+#endif
 	playing = TRUE;
 	return TRUE;
 }
@@ -136,12 +147,16 @@ DSound_Cleanup(void)
 }
 
 static int DSound_Pending;	/* samples due, not synthesized yet */
+#ifdef PSP
+unsigned DSound_SendUs, DSound_CbUs;	/* time in sound_send (lock wait included) / the callback */
+#endif
 
 static void sound_send(int length)
 {
 	int rate;
-
 #ifdef PSP
+	unsigned t0 = sceKernelGetSystemTimeLow();
+
 	rate = Config.SampleRate;
 #else
 	rate = 0;
@@ -170,6 +185,9 @@ static void sound_send(int length)
 #endif
 	PROF_END(snd, PROF_SOUND);
 	SDL_UnlockAudio();
+#ifdef PSP
+	DSound_SendUs += sceKernelGetSystemTimeLow() - t0;
+#endif
 	PROF_COUNT(PROF_SOUND_SAMPLES, length);
 }
 
@@ -232,6 +250,11 @@ int DSound_BufferedMs(void)
 {
 	long n = pbwp - pbrp;
 
+#ifdef PSP
+	if (OPM_MeActive())
+		n = OPM_MeReady() - pbrp;	/* the OPM still to come is not ready */
+#endif
+
 	if (n < 0)
 		n += PCMBUF_SIZE;
 	return (int)(n / 4 * 1000 / 44100);
@@ -275,6 +298,70 @@ static void smooth(short *p, int frames, int step)
 	}
 }
 
+static long ring_bytes(BYTE *to, BYTE *from)
+{
+	long n = to - from;
+
+	return n < 0 ? n + PCMBUF_SIZE : n;
+}
+
+/* Zero n bytes of the ring from p on (it wraps). */
+static void ring_zero(BYTE *p, long n)
+{
+	long first = pbep - p;
+
+	if (n <= first) {
+		memset(p, 0, n);
+	} else {
+		memset(p, 0, first);
+		memset(pbsp, 0, n - first);
+	}
+}
+
+unsigned DSound_MeWaitMax;	/* longest wait for the Media Engine in a callback, us */
+
+/*
+ * With the OPM on the Media Engine: the ring holds ADPCM up to pbwp, mixed
+ * with the OPM up to OPM_MeReady().  When the emulation is behind, the ME is
+ * asked for the OPM of the rest; either way, wait for the ME (it takes well
+ * under a callback period).
+ */
+static int me_fill(int len, int rate, long *filled)
+{
+	int step = 44100 / rate;
+	long queued = ring_bytes(pbwp, pbrp);
+	unsigned t0, w;
+
+	if (queued < len) {
+		int k = ((len - queued) / 4 + step - 1) / step;
+
+		DSound_Underruns++;
+		*filled = len - queued;
+		/* the OPM only, as below: no ADPCM ahead of the emulation's DMA */
+		ring_zero(pbwp, k * 4 * step);
+		OPM_MeExtra((short *)pbwp, k, rate, pbsp, pbep);
+		pbwp += k * 4 * step;
+		if (pbwp >= pbep)
+			pbwp = pbsp + (pbwp - pbep);
+	}
+	if (ring_bytes(OPM_MeReady(), pbrp) >= len)
+		return len;
+	t0 = sceKernelGetSystemTimeLow();
+	while (ring_bytes(OPM_MeReady(), pbrp) < len) {
+		if (me_paused_now())
+			return (int)ring_bytes(OPM_MeReady(), pbrp);
+		if (sceKernelGetSystemTimeLow() - t0 > 50 * 1000) {
+			OPM_MeFail("no answer");
+			break;	/* plays the ADPCM alone this once */
+		}
+		sceKernelDelayThread(100);
+	}
+	w = sceKernelGetSystemTimeLow() - t0;
+	if (w > DSound_MeWaitMax)
+		DSound_MeWaitMax = w;
+	return len;
+}
+
 /*
  * Plays what the emulation synthesized; when that runs short (the emulation is
  * behind real time), synthesizes the rest.  The emulation is paced by this
@@ -283,14 +370,23 @@ static void smooth(short *p, int frames, int step)
 static void
 sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 {
-	long avail = pbwp - pbrp;
+	long avail = pbwp - pbrp, filled = 0;
 	int n, first;
+	unsigned t0 = sceKernelGetSystemTimeLow();
 	PROF_ENTER(PS_CB);
 
 	PROF_EV(PEV_CB, 1);
 	if (avail < 0)
 		avail += PCMBUF_SIZE;
-	n = avail < len ? (int)avail : len;
+	if (OPM_MeActive()) {
+		avail = ring_bytes(OPM_MeReady(), pbrp);
+		if (me_paused_now())	/* halted (suspend, "me off"): what is ready */
+			n = avail < len ? (int)avail : len;
+		else
+			n = me_fill(len, (int)userdata, &filled);
+	} else {
+		n = avail < len ? (int)avail : len;
+	}
 	first = pbep - pbrp;
 	if (n <= first) {
 		memcpy(sdlsndbuf, pbrp, n);
@@ -312,14 +408,17 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		int frames = (len - n) / 4, step = 44100 / (int)userdata;
 
 		DSound_Underruns++;
+		filled = len - n;
 		PROF_SET(PS_CB_SYN);
 		PROF_EV(PEV_CB_SAMPLES, frames / step);
 		memset(out, 0, len - n);
 		/*
 		 * The OPM only: ADPCM_Update here would play ahead of the data the
 		 * emulation's DMA has not sent yet (Gradius' start voice broke up).
+		 * With the ME halted (suspend, "me off"), nothing.
 		 */
-		OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+		if (!OPM_MeActive())
+			OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
 		PROF_SET(PS_CB);
 	}
 	smooth((short *)sdlsndbuf, len / 4, 44100 / (int)userdata);
@@ -333,10 +432,11 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 
 			e->t_us = sceKernelGetSystemTimeLow();
 			e->avail = (unsigned)avail;
-			e->filled = n < len ? len - n : 0;
+			e->filled = (unsigned)filled;
 		}
 	}
 	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
+	DSound_CbUs += sceKernelGetSystemTimeLow() - t0;
 	PROF_LEAVE();
 }
 #else

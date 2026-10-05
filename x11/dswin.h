@@ -14,6 +14,10 @@ int DSound_BufferedMs(void);
 int DSound_Enabled(void);
 extern int DSound_Underruns;
 #ifdef PSP
+extern unsigned DSound_MeWaitMax;
+extern unsigned DSound_SendUs, DSound_CbUs;
+#endif
+#ifdef PSP
 /* Recording of what the callback plays ("arec" debug command): RAM only. */
 struct dsound_rec_ev {
 	unsigned t_us;		/* sceKernelGetSystemTimeLow at the callback */

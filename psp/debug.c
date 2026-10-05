@@ -11,6 +11,7 @@
 
 #include "debug.h"
 #include "log.h"
+#include "me.h"
 #include "net.h"
 #include "selfexec.h"
 
@@ -389,6 +390,7 @@ static void serve(int fd)
 				press(fd, cmd + 4);
 			} else if (strcmp(cmd, "quit") == 0) {
 				reply(fd, "OK quit");
+				me_release();
 				sceKernelExitGame();
 			} else if (cmd[0]) {
 				log_printf("debug: > %s\n", cmd);
