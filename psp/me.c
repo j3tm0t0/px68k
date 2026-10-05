@@ -31,9 +31,9 @@ static unsigned char me_stack[ME_STACK_SIZE] __attribute__((aligned(64)));
 static unsigned me_probe;	/* read cached through its user address by the ME */
 static unsigned me_prot[ME_PROT_REGS];
 /*
- * The firmware's own reset handler, which ours replaces.  It goes back, and
- * the firmware's ME core is restarted with it, whenever we halt (me_halt,
- * me_pause): before px68k's memory goes away.  0xbfc00600 on holds the
+ * The firmware's own reset handler, which ours replaces.  It goes back, with
+ * the ME held in reset, whenever we halt (me_halt, me_pause): before
+ * px68k's memory goes away.  0xbfc00600 on holds the
  * firmware core's parameters (custom-core, safe-task): not ours to touch.
  */
 #define ME_VECTOR_SAVE	0x200
@@ -143,7 +143,7 @@ static int me_reset_k(unsigned open)
 	return 0;
 }
 
-/* Kernel mode: the firmware's reset handler back, and its ME core restarted with it. */
+/* Kernel mode: the firmware's reset handler back, the ME held in reset. */
 static int me_giveback_k(void)
 {
 	int i, bad = 0;
@@ -153,12 +153,17 @@ static int me_giveback_k(void)
 	__asm__ volatile("sync");
 	for (i = 0; i < ME_VECTOR_SAVE / 4; i++)
 		bad += ((volatile unsigned *)0xbfc00000)[i] != me_vector[i];
-	if (bad)
-		return bad;	/* no reset into a damaged handler */
-	dcache_wbinv_all();
+	/*
+	 * Held in reset, not restarted: restarted with the handler's old
+	 * parameters, the firmware's core ran on into the next loadexec and
+	 * the PSP went off seconds into the next program.  me_wrapper boots it
+	 * properly itself after a reboot (sceMeBootStart), and our start
+	 * releases the reset again.
+	 */
 	__asm__ volatile("sync");
-	me_reset_pulse();
-	return 0;
+	*(volatile unsigned *)0xbc10004c |= 0x04;
+	__asm__ volatile("sync");
+	return bad;
 }
 
 /* Kernel mode: put back what me_reset_open opened. */
@@ -419,6 +424,5 @@ int me_halt(void)
 		return -1;
 	}
 	me_installed = 0;
-	sceKernelDelayThread(10 * 1000);	/* let the firmware's core come up */
 	return 0;
 }

@@ -32,8 +32,8 @@ int me_start(void (*loop)(void));
 /* Nonzero once loop() should return (me_halt); poll it in the loop. */
 int me_halting(void);
 /*
- * Make loop() return, put the firmware's reset handler back and restart the
- * firmware's ME core with it. Returns 0 once the firmware's handler is
+ * Make loop() return, put the firmware's reset handler back and hold the ME
+ * in reset (me_wrapper boots it after the next reboot). Returns 0 once the firmware's handler is
  * verified in place (or ours never was), < 0 if not.
  */
 int me_halt(void);
