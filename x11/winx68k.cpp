@@ -1386,6 +1386,7 @@ int main(int argc, char *argv[])
 			PROF_SET(PS_DEBUG);
 			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
 			psp_count_fps();
+			scePowerTick(PSP_POWER_TICK_ALL);	/* playing: no auto sleep, no screen dimming */
 			PROF_SET(PS_IDLE);
 #else
 			WinX68k_Exec();
