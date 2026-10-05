@@ -996,9 +996,7 @@ static void psp_debug_poll(void)
 			}
 #ifdef PX68K_GCOV
 		} else if (strcmp(cmd, "gcov") == 0) {
-			/* profile counts (Makefile.psp: XCFLAGS) to PSP/GAME/PX68K/gcda/ */
-			setenv("GCOV_PREFIX", "ms0:/PSP/GAME/PX68K/gcda", 1);
-			setenv("GCOV_PREFIX_STRIP", PX68K_GCOV_STRIP, 1);	/* the build directory */
+			/* the profile counts (Makefile.psp: PGO=gen) to ms0:/PSP/GAME/PX68K/pgo/ */
 			__gcov_dump();
 			log_printf("gcov: dumped\n");
 #endif
