@@ -322,6 +322,10 @@ WinX68k_Cleanup(void)
 // -----------------------------------------------------------------------------------
 //  コアのめいんるーぷ
 // -----------------------------------------------------------------------------------
+#ifdef PSP
+static int psp_catchup(void);
+#endif
+
 void WinX68k_Exec(void)
 {
 	//char *test = NULL;
@@ -334,6 +338,10 @@ void WinX68k_Exec(void)
 
 	if ( Config.FrameRate != 7 ) {
 		DispFrame = (DispFrame+1)%Config.FrameRate;
+#ifdef PSP
+		if ( psp_catchup() )
+			DispFrame = 1;		/* behind: don't draw this one (Full Frame) */
+#endif
 	} else {				// Auto Frame Skip
 		if ( FrameSkipQueue ) {
 			if ( FrameSkipCount>15 ) {
@@ -757,6 +765,7 @@ static void psp_capture(void)
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static int psp_catchup_ms = 25, psp_catchup_skips;	/* psp_catchup */
 /* "padat": frames (counted from the reset of benchf / capf) at which circle is held for 6 frames */
 static unsigned psp_padat[8];
 static int psp_padat_n;
@@ -918,18 +927,19 @@ static void psp_debug_frame(unsigned us)
 				 DSound_MeWaitMax / 1000, DSound_MeWaitMax / 100 % 10,
 				 me_regs, me_put / 1000, me_put / 100 % 10);
 		DSound_MeWaitMax = 0;
-		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s"
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d catchup %d%s"
 			 " send %u.%u cb %u.%u ms/s idle %u\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
-			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me,
+			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, psp_catchup_skips, me,
 			   DSound_SendUs / 1000, DSound_SendUs / 100 % 10, DSound_CbUs / 1000, DSound_CbUs / 100 % 10,
 			   psp_idle_polls);
 		DSound_SendUs = DSound_CbUs = 0;
 		psp_idle_polls = 0;
 	}
 	DSound_Underruns = 0;
+	psp_catchup_skips = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
 		psp_bench_end = 0;
 		log_printf("bench: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
@@ -1115,6 +1125,9 @@ static void psp_debug_poll(void)
 				p += used;
 			}
 			log_printf("padat: %d presses\n", psp_padat_n);
+		} else if (sscanf(cmd, "catchup %d", &n) == 1 && n >= 0 && n <= 100) {
+			psp_catchup_ms = n;	/* Full Frame catch-up threshold, 0: off */
+			log_printf("catchup %d ms\n", n);
 		} else if (sscanf(cmd, "idlefp %d", &n) == 1) {
 			C68k_IdleFast = n != 0;	/* m68000/c68k.c: idle slices without the core */
 			log_printf("idlefp %d\n", C68k_IdleFast);
@@ -1148,10 +1161,35 @@ static void psp_debug_poll(void)
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, idle <us>, idlefp <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off|boot on|boot off|nomix <0|1>|clk <hex>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, idle <us>, idlefp <0|1>, catchup <ms>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off|boot on|boot off|nomix <0|1>|clk <hex>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
+}
+
+/*
+ * Full Frame catch-up: when the emulation has fallen behind the sound
+ * output (less than psp_catchup_ms of sound left when a frame starts: the
+ * pacing starts frames below PSP_SND_LEAD_MS), the frame is emulated but
+ * not drawn, at most every other frame and only while behind, so that it
+ * catches up instead of the callback synthesizing ahead (a stretched
+ * note).  Gradius' game start: ~25 frames over budget.  Only in real time
+ * with the sound playing: benchf (no wait), capf and the menu's frame
+ * skips are left alone.  "catchup <ms>" (0: off).
+ */
+static int psp_catchup(void)
+{
+	static int skipped;
+
+	if (Config.FrameRate != 1 || Config.NoWaitMode || !psp_catchup_ms || psp_cap_frame ||
+	    !DSound_Enabled() || SDL_GetAudioStatus() != SDL_AUDIO_PLAYING || skipped ||
+	    DSound_BufferedMs() >= psp_catchup_ms) {
+		skipped = 0;
+		return 0;
+	}
+	skipped = 1;
+	psp_catchup_skips++;
+	return 1;
 }
 
 /* For the "Show FPS" overlay (x11/windraw.c). */
