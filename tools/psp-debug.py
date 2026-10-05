@@ -19,7 +19,7 @@
                                       (BENCH_PROF=0 (default): without a profiler,
                                       1: the timers (builds with -DPROF_TIMERS),
                                       2: the sampling profiler, every
-                                      BENCH_PERIOD us (default 250),
+                                      BENCH_PERIOD us (default 1000),
                                       BENCH_RT=1: paced in real time with sound)
   psp-debug.py pause | resume         stop / restart the emulation
   psp-debug.py back                   return to pspbrew.dev (ends `psp.py run`)
@@ -238,7 +238,7 @@ def main():
             s = connect()
             drain(s)
             s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '0')} {os.environ.get('BENCH_RT', '0')} "
-                      f"{os.environ.get('BENCH_PERIOD', '250')}\n".encode())
+                      f"{os.environ.get('BENCH_PERIOD', '1000')}\n".encode())
             s.close()
             deadline = time.time() + float(os.environ.get("BENCH_TIMEOUT", "900"))
             result = None

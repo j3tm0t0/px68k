@@ -41,7 +41,9 @@ enum {
  * section), and an alarm interrupt (psp/prof.c) counts the section it finds
  * every ~period us.  A section's share of the samples times the measured
  * time per frame is its time per frame.  The stores cost a few thousand
- * instructions per frame, the alarm one interrupt per sample.  The sound
+ * instructions per frame, the alarm one interrupt per sample: ~22 us on a
+ * PSP Go at 333 MHz (benchf 14.5 -> 15.9 ms/frame at a 250 us period), so
+ * the default period is 1000 us (~2 %, inflating all sections alike).  The sound
  * callback runs on a thread of its own, preempting the emulator: it enters
  * its own section and restores the emulator's when it returns.
  */

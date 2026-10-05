@@ -935,7 +935,7 @@ static void psp_debug_poll(void)
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
 			psp_exec_us = psp_exec_max_us = 0;
-		} else if ((dx = 1, dy = 0, bf_period = 250,
+		} else if ((dx = 1, dy = 0, bf_period = 1000,
 			    sscanf(cmd, "benchf %u %u %d %d %d %u", &bf_start, &bf_frames, &n, &dx, &dy, &bf_period)) >= 3 && bf_start > 0 &&
 			   bf_frames > 0 && n >= 1 && n <= 6 && dx >= 0 && dx <= 2 && !psp_bf_end && !psp_bench_end && !psp_samp_end) {
 			/* Deterministic: same frames after a reset, run flat out. */
@@ -974,7 +974,7 @@ static void psp_debug_poll(void)
 		} else if (strcmp(cmd, "reset") == 0) {
 			WinX68k_Reset();
 			log_printf("reset\n");
-		} else if ((bf_period = 250, dx = 0, sscanf(cmd, "samp %d %u %d", &n, &bf_period, &dx)) >= 1 && n > 0 && n <= 600 &&
+		} else if ((bf_period = 1000, dx = 0, sscanf(cmd, "samp %d %u %d", &n, &bf_period, &dx)) >= 1 && n > 0 && n <= 600 &&
 			   !psp_samp_end && !psp_bf_end && !psp_bench_end) {
 			/*
 			 * As played (paced, sound on): n s under the sampling profiler,
