@@ -148,10 +148,14 @@ static void meq_put(const unsigned *w, int n)
 	int i;
 
 	while (meq_head + n - m->tail > MEQ_SIZE) {
-		if (!t0 || me_paused_now()) {	/* halted (clock change, suspend): wait */
+		/*
+		 * Bounded either way: this thread may be the one that would resume
+		 * a halted ME ("me on"), so waiting for that deadlocked it.
+		 */
+		if (!t0) {
 			t0 = sceKernelGetSystemTimeLow();
-		} else if (sceKernelGetSystemTimeLow() - t0 > 200 * 1000) {
-			OPM_MeFail("queue stuck");
+		} else if (sceKernelGetSystemTimeLow() - t0 > (me_paused_now() ? 2000 : 200) * 1000) {
+			OPM_MeFail(me_paused_now() ? "halted with the queue full" : "queue stuck");
 			return;
 		}
 		sceKernelDelayThread(100);
