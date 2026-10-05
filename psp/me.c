@@ -59,6 +59,7 @@ static int me_hooked;
 static void (*me_loop_fn)(void);
 
 extern char me_reset[], me_reset_end[], me_reset_open[], me_reset_open_end[];
+unsigned me_clocks = 0x0f;	/* the ME's 0xbc100050 (debug "me clk") */
 
 int me_halt(void);
 
@@ -115,6 +116,7 @@ static int me_reset_k(unsigned open)
 		me_vector_saved = 1;
 	}
 	memcpy((void *)0xbfc00000, h, e - h);
+	*(volatile unsigned *)0xbfc00008 = me_clocks;	/* ME_CLOCKS in me_boot.S */
 	me_installed = 1;
 	dcache_wbinv_all();
 	__asm__ volatile("sync");

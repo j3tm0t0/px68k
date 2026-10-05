@@ -40,6 +40,7 @@ int debug_paused(void);
 
 /* Buttons the debug client is holding down (PSP_CTRL_* bits). */
 unsigned debug_pad(void);
+extern unsigned debug_pad_frame;
 
 /* Run path like the launch command (used to return to pspbrew.dev). */
 void debug_launch(const char *path);

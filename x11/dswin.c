@@ -147,12 +147,16 @@ DSound_Cleanup(void)
 }
 
 static int DSound_Pending;	/* samples due, not synthesized yet */
+#ifdef PSP
+unsigned DSound_SendUs, DSound_CbUs;	/* time in sound_send (lock wait included) / the callback */
+#endif
 
 static void sound_send(int length)
 {
 	int rate;
-
 #ifdef PSP
+	unsigned t0 = sceKernelGetSystemTimeLow();
+
 	rate = Config.SampleRate;
 #else
 	rate = 0;
@@ -177,6 +181,9 @@ static void sound_send(int length)
 #endif
 	PROF_END(snd, PROF_SOUND);
 	SDL_UnlockAudio();
+#ifdef PSP
+	DSound_SendUs += sceKernelGetSystemTimeLow() - t0;
+#endif
 	PROF_COUNT(PROF_SOUND_SAMPLES, length);
 }
 
@@ -344,6 +351,7 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 {
 	long avail = pbwp - pbrp, filled = 0;
 	int n, first;
+	unsigned t0 = sceKernelGetSystemTimeLow();
 
 	if (avail < 0)
 		avail += PCMBUF_SIZE;
@@ -398,6 +406,7 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		}
 	}
 	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
+	DSound_CbUs += sceKernelGetSystemTimeLow() - t0;
 }
 #else
 static void

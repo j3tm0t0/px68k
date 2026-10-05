@@ -19,9 +19,13 @@
 	.text
 
 .macro	ME_CLOCKS
+	b	1f
+	nop
+	.word	0x0f			/* +8: the bus clocks, set in the copy by me_start */
+1:	li	$k0, 0xbfc00000
+	lw	$k1, 8($k0)
 	li	$k0, 0xbc100000
-	li	$k1, 0x0f
-	sw	$k1, 0x50($k0)		/* bus clocks: ME, AW bus A and B, eDRAM */
+	sw	$k1, 0x50($k0)		/* the ME's bus clocks (0x0f: ME, AW bus A and B, eDRAM) */
 	lw	$k1, 0x40($k0)
 	ori	$k1, $k1, 0x02
 	sw	$k1, 0x40($k0)		/* ME access to main memory */

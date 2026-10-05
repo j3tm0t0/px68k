@@ -64,6 +64,7 @@ struct meq {
 	unsigned gen_n;			/* ME: samples mixed */
 	FM::OPM *opm;			/* ME: the one the queue drives (MEQ_OPM: "metest") */
 	FM::OPM *live;			/* the one the sound callback's requests go to */
+	unsigned nomix;			/* debug ("me nomix"): GEN without the mixing */
 	/* the sound callback -> ME: mix ahead of the emulation (it is behind) */
 	unsigned xreq, xack, xhead;
 	unsigned xw[5];			/* as a GEN entry */
@@ -73,6 +74,7 @@ static struct meq meq_mem __attribute__((aligned(64)));
 static volatile struct meq *mq;
 static FM::OPM *me_opm;		/* the ME's; main never touches it once started */
 static int me_on;
+int OPM_MeOff;			/* debug: keep the OPM on the main CPU */
 static unsigned meq_head;
 
 
@@ -82,7 +84,8 @@ static void me_gen(volatile struct meq *m, FM::OPM *opm, const unsigned *w)
 	BYTE *dest = (BYTE *)w[1], *bsp = (BYTE *)w[2], *bep = (BYTE *)w[3];
 	int n = w[0] & 0xffffff, rate = w[4];
 
-	opm->Mix((FM::Sample *)dest, n, rate, bsp, bep);
+	if (!m->nomix)
+		opm->Mix((FM::Sample *)dest, n, rate, bsp, bep);
 	dest += n * 4 * (44100 / rate);
 	if (dest >= bep)
 		dest = bsp + (dest - bep);
@@ -136,18 +139,26 @@ static void me_loop(void)
 		} else if (t != m->head) {
 			m->tail = t = me_cmd(m, t);
 		} else {
-			me_spin(256);	/* idle: off the bus */
+			/*
+			 * idle: off the bus.  Each poll is an uncached read the main
+			 * CPU's cache misses wait behind; 16k cycles (~50 us) is still
+			 * far below a batch (32 samples, 1.5 ms).
+			 */
+			me_spin(16384);
 		}
 	}
 }
 
+static unsigned meq_tail;	/* the ME's tail as last read: uncached reads are slow */
+static unsigned meq_put_us, meq_regs;	/* stats: time in meq_put, register writes queued */
+
 static void meq_put(const unsigned *w, int n)
 {
 	volatile struct meq *m = mq;
-	unsigned t0 = 0;
+	unsigned t0 = 0, tp = sceKernelGetSystemTimeLow();
 	int i;
 
-	while (meq_head + n - m->tail > MEQ_SIZE) {
+	while (meq_head + n - meq_tail > MEQ_SIZE && meq_head + n - (meq_tail = m->tail) > MEQ_SIZE) {
 		/*
 		 * Bounded either way: this thread may be the one that would resume
 		 * a halted ME ("me on"), so waiting for that deadlocked it.
@@ -165,6 +176,7 @@ static void meq_put(const unsigned *w, int n)
 	__asm__ volatile("sync");
 	meq_head += n;
 	m->head = meq_head;
+	meq_put_us += sceKernelGetSystemTimeLow() - tp;
 }
 
 /*
@@ -176,14 +188,44 @@ static unsigned *mt_log;
 static int mt_n, mt_max, mt_clock, mt_rate, mt_vol;
 static unsigned mt_end;
 
+/*
+ * Register writes (hundreds a frame) are staged here and go to the queue with
+ * the next other command (a GEN every 32 samples): one uncached burst, one
+ * sync and one head update instead of each per write.
+ */
+#define MEQ_STAGE	256
+static unsigned meq_stage[MEQ_STAGE];
+static int meq_staged;
+
+static void meq_flush(void)
+{
+	if (meq_staged) {
+		meq_put(meq_stage, meq_staged);
+		meq_staged = 0;
+	}
+}
+
 static void meq_live(const unsigned *w, int n)
 {
+	int i;
+
 	if (mt_log && mt_n + 2 <= mt_max) {
 		mt_log[mt_n++] = w[0];	/* a GEN keeps its length only */
 		if ((w[0] >> 24) == MEQ_VOL)
 			mt_log[mt_n++] = w[1];
 	}
-	meq_put(w, n);
+	if ((w[0] >> 24) == MEQ_REG) {
+		meq_regs++;
+		meq_stage[meq_staged++] = w[0];
+		if (meq_staged == MEQ_STAGE)
+			meq_flush();
+		return;
+	}
+	if (meq_staged + n > MEQ_STAGE)
+		meq_flush();
+	for (i = 0; i < n; i++)
+		meq_stage[meq_staged++] = w[i];
+	meq_flush();
 }
 
 static int me_init_opm(FM::OPM *o, int clock, int rate, int vol)
@@ -350,6 +392,8 @@ static void me_init(int clock, int rate)
 	sceKernelDcacheWritebackInvalidateRange(&meq_mem, sizeof(meq_mem));
 	mq = (volatile struct meq *)ME_UNCACHED(&meq_mem);
 	mq->head = mq->tail = 0;
+	meq_tail = 0;
+	meq_staged = 0;
 	mq->xreq = mq->xack = 0;
 	mq->ready = NULL;
 	mq->opm = mq->live = me_opm;
@@ -361,6 +405,12 @@ static void me_init(int clock, int rate)
 		me_free_opm(me_opm);
 		me_opm = NULL;
 	}
+}
+
+void OPM_MeNoMix(int on)
+{
+	if (me_on)
+		mq->nomix = on;
 }
 
 int OPM_MeActive(void)
@@ -404,12 +454,15 @@ void OPM_MeFail(const char *why)
 	me_halt();
 }
 
-/* Since the last call: samples mixed; queue words now. */
-void OPM_MeStats(unsigned *samples, unsigned *queued)
+/* Since the last call: samples mixed, register writes, us in meq_put; queue words now. */
+void OPM_MeStats(unsigned *samples, unsigned *queued, unsigned *regs, unsigned *put_us)
 {
 	static unsigned n0;
 	unsigned n;
 
+	*regs = meq_regs;
+	*put_us = meq_put_us;
+	meq_regs = meq_put_us = 0;
 	if (!me_on) {
 		*samples = *queued = 0;
 		return;
@@ -512,7 +565,7 @@ int OPM_Init(int clock, int rate)
 		return FALSE;
 	}
 #ifdef PSP
-	if ( rate >= 11025 )
+	if ( rate >= 11025 && !OPM_MeOff )
 		me_init(clock, rate);
 #endif
 	return TRUE;

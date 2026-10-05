@@ -58,6 +58,8 @@ int me_resume(void);
 int me_paused_now(void);
 /* Successful me_start calls so far (a clock change across a restart is fine). */
 int me_start_count(void);
+/* The ME's bus clock enable register value its handler sets (from the next start). */
+extern unsigned me_clocks;
 
 /* Busy-wait about n cycles without touching memory (ME polling loops). */
 static inline void me_spin(int n)

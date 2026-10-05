@@ -722,7 +722,10 @@ static void psp_capture(void)
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static unsigned psp_padat[8];	/* "padat": frames (after a benchf reset) to press circle at */
+static int psp_padat_n;
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
+static char psp_meoff_path[272];	/* "me boot off": the OPM stays on this CPU (A/B) */
 
 static void psp_debug_init(const char *eboot)
 {
@@ -744,6 +747,11 @@ static void psp_debug_init(const char *eboot)
 	snprintf(logpath, sizeof(logpath), "%s/px68k.log", dir);
 	log_open(logpath);
 	log_printf("PX68K %s, eboot %s\n", PX68KVERSTR, eboot);
+	snprintf(psp_meoff_path, sizeof(psp_meoff_path), "%s/me.off", dir);
+	if (sceIoGetstat(psp_meoff_path, &st) >= 0) {
+		OPM_MeOff = 1;
+		log_printf("me: off (%s)\n", psp_meoff_path);
+	}
 
 	snprintf(psp_cap_path, sizeof(psp_cap_path), "%s/cap.raw", dir);
 	snprintf(cfg, sizeof(cfg), "%s/net.cfg", dir);
@@ -772,6 +780,15 @@ static void psp_debug_frame(unsigned us)
 	if (!psp_debug_on)
 		return;
 	psp_frame_no++;
+	{
+		/* "padat": circle for 20 frames from each given frame after the reset */
+		int i;
+
+		debug_pad_frame = 0;
+		for (i = 0; i < psp_padat_n; i++)
+			if (psp_frame_no >= psp_padat[i] && psp_frame_no < psp_padat[i] + 20)
+				debug_pad_frame = PSP_CTRL_CIRCLE;
+	}
 	if (psp_cap_frame && psp_frame_no == psp_cap_frame) {
 		psp_capture();
 		psp_cap_frame = 0;
@@ -843,19 +860,23 @@ static void psp_debug_frame(unsigned us)
 	if (now - psp_fps_start < 1000)
 		return;
 	if (psp_fps_log) {
-		unsigned me_n, me_q;
-		char me[64] = "";
+		unsigned me_n, me_q, me_regs, me_put;
+		char me[96] = "";
 
-		OPM_MeStats(&me_n, &me_q);
-		if (OPM_MeActive())	/* ME: samples mixed, queue words, longest callback wait */
-			snprintf(me, sizeof(me), " me %u q %u wait %u.%ums", me_n, me_q,
-				 DSound_MeWaitMax / 1000, DSound_MeWaitMax / 100 % 10);
+		OPM_MeStats(&me_n, &me_q, &me_regs, &me_put);
+		if (OPM_MeActive())	/* ME: samples mixed, queue words, longest callback wait; OPM writes, queueing */
+			snprintf(me, sizeof(me), " me %u q %u wait %u.%ums reg %u put %u.%ums", me_n, me_q,
+				 DSound_MeWaitMax / 1000, DSound_MeWaitMax / 100 % 10,
+				 me_regs, me_put / 1000, me_put / 100 % 10);
 		DSound_MeWaitMax = 0;
-		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s\n",
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s"
+			 " send %u.%u cb %u.%u ms/s\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
-			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me);
+			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me,
+			   DSound_SendUs / 1000, DSound_SendUs / 100 % 10, DSound_CbUs / 1000, DSound_CbUs / 100 % 10);
+		DSound_SendUs = DSound_CbUs = 0;
 	}
 	DSound_Underruns = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
@@ -1007,6 +1028,33 @@ static void psp_debug_poll(void)
 		} else if (strcmp(cmd, "me off") == 0) {
 			me_pause();	/* as around a suspend */
 			log_printf("me: halted, firmware handler back\n");
+		} else if (strcmp(cmd, "me boot off") == 0 || strcmp(cmd, "me boot on") == 0) {
+			if (cmd[9] == 'f') {
+				int fd = sceIoOpen(psp_meoff_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0644);
+				if (fd >= 0)
+					sceIoClose(fd);
+			} else {
+				sceIoRemove(psp_meoff_path);
+			}
+			log_printf("me: %s from the next start\n", cmd[9] == 'f' ? "off" : "on");
+		} else if (sscanf(cmd, "me clk %x", &n) == 1) {
+			me_clocks = n;	/* for the next start ("me off", "me on") */
+			log_printf("me: bus clocks %02X from the next start\n", n);
+		} else if (strncmp(cmd, "padat", 5) == 0) {
+			/* for benchf: start Gradius at the same frames in every run */
+			char *p = cmd + 5;
+			int k;
+
+			for (psp_padat_n = 0; psp_padat_n < 8; psp_padat_n++) {
+				psp_padat[psp_padat_n] = strtoul(p, &p, 10);
+				if (!psp_padat[psp_padat_n])
+					break;
+			}
+			for (k = 0; k < psp_padat_n; k++)
+				log_printf("padat: circle at frame %u\n", psp_padat[k]);
+		} else if (sscanf(cmd, "me nomix %d", &n) == 1) {
+			OPM_MeNoMix(n);	/* the ME's cost to this CPU without its mixing */
+			log_printf("me: nomix %d\n", n);
 		} else if (strcmp(cmd, "me on") == 0) {
 			log_printf("me: restart %s\n", me_resume() == 0 ? "ok" : "failed");
 		} else if (sscanf(cmd, "metest %d", &n) == 1 && n > 0 && n <= 20) {
@@ -1016,7 +1064,7 @@ static void psp_debug_poll(void)
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off, me boot on|off, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
