@@ -719,6 +719,7 @@ static void psp_capture(void)
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static unsigned psp_idle_us = 200;	/* psp_frame_due: sleep while no frame is due ("idle <us>") */
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
 
 static void psp_debug_init(const char *eboot)
@@ -1032,12 +1033,15 @@ static void psp_debug_poll(void)
 			Config.SampleRate = n;	/* takes effect at the next start */
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
+		} else if (sscanf(cmd, "idle %d", &n) == 1 && n >= 0 && n <= 5000) {
+			psp_idle_us = n;	/* psp_frame_due's sleep, 0: spin */
+			log_printf("idle %d us\n", n);
 		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
 			Config.XVIMode = n;	/* MPU clock: 0 = 10, 1 = 16, 2 = 24 MHz */
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, idle <us>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
@@ -1055,12 +1059,20 @@ extern "C" int WinDraw_FpsEmu10, WinDraw_FpsShown;
  */
 #define PSP_SND_LEAD_MS	35
 
+/*
+ * Waiting for the next frame, the main loop spun flat out (pad, debug port,
+ * this test), taking the bus from the GE (and the ME) and keeping the CPU
+ * busy for nothing: a short sleep instead; "idle <us>" (0: spin) for
+ * comparisons.  (After 0749d24 on psp-me-sound.)
+ */
 static int psp_frame_due(void)
 {
 	int due = Timer_GetCount();	/* keeps the timer current either way */
 
 	if (DSound_Enabled())
-		return DSound_BufferedMs() < PSP_SND_LEAD_MS;
+		due = DSound_BufferedMs() < PSP_SND_LEAD_MS;
+	if (!due && psp_idle_us)
+		sceKernelDelayThread(psp_idle_us);
 	return due;
 }
 
