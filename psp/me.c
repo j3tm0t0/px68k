@@ -53,6 +53,8 @@ static int me_started, me_paused, me_starts;
  * custom-core's kinit replaces it); px68k starts the ME only once that hook
  * is in place, and takes it out at exit.
  */
+static volatile int me_last_event;
+static volatile unsigned me_suspend_state;
 static PspSysEventHandler *me_rpc;
 static PspSysEventHandlerFunc me_rpc_orig;
 static int me_hooked;
@@ -172,10 +174,12 @@ static int me_sysevent(int ev_id, char *ev_name, void *param, int *result)
 	volatile struct me_boot *b = boot();
 	int i;
 
+	me_last_event = ev_id;	/* logged by me_resume: no I/O in here */
 	if (ev_id == 0x4005 && me_started) {
 		b->halt = 1;
 		for (i = 0; i < 20000 && b->state != ME_HALTED; i++)
 			me_spin(1000);	/* about 60 ms at most */
+		me_suspend_state = b->state;
 		*(volatile unsigned *)0xbc10004c |= 0x04;	/* ME reset on */
 		__asm__ volatile("sync");
 		me_started = 0;
@@ -262,6 +266,7 @@ static int me_hook(void)
 		return -1;
 	}
 	me_hooked = 1;
+	log_printf("me: SceMeRpc events taken over\n");
 	return 0;
 }
 
@@ -342,11 +347,15 @@ int me_clock_safe(void)
 
 void me_release(void)
 {
+	if (!me_installed && !me_hooked)
+		return;
+	log_printf("me: release\n");
 	me_halt();
 	if (me_hooked) {
 		me_kcall((void *)me_unhook_k, 0);
 		me_hooked = 0;
 	}
+	log_printf("me: released\n");
 }
 
 int me_pause(void)
@@ -359,6 +368,11 @@ int me_pause(void)
 
 int me_resume(void)
 {
+	if (me_suspend_state) {
+		log_printf("me: halted for a suspend (state %08X), last event %X\n",
+			   me_suspend_state, me_last_event);
+		me_suspend_state = 0;
+	}
 	if (!me_paused)
 		return 0;
 	me_paused = 0;

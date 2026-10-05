@@ -75,6 +75,7 @@ static int join(int id)
 		log_printf("net: the firmware would wait for its Media Engine core, not joining\n");
 		return -1;
 	}
+	log_printf("net: joining setting %d\n", id);	/* breadcrumbs: they reach the file at once */
 	if (full_cpu > 222)
 		scePowerSetClockFrequency(222, 222, 111);
 	for (i = 0; i < 3 && ret != 0; i++)	/* the first try after a loadexec sometimes fails */
@@ -82,6 +83,7 @@ static int join(int id)
 	/* The firmware keeps the clock at 222 MHz while the WLAN is up anyway. */
 	if (full_cpu > 222)
 		scePowerSetClockFrequency(full_cpu, full_cpu, full_bus);
+	log_printf("net: join %s, cpu %d MHz\n", ret == 0 ? "ok" : "failed", scePowerGetCpuClockFrequency());
 	return ret;
 }
 
@@ -141,6 +143,7 @@ int net_pause(void)
 		log_printf("net: the firmware would wait for its Media Engine core, WLAN and clock left as they are\n");
 		return -1;
 	}
+	log_printf("net: leaving the WLAN\n");
 	sceNetApctlDisconnect();
 	for (i = 0; i < 60; i++) {
 		if (sceNetApctlGetState(&state) != 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED)
@@ -156,6 +159,7 @@ int net_pause(void)
 		sceKernelDelayThread(50 * 1000);
 	}
 	net_paused = 1;
+	log_printf("net: off, cpu %d MHz\n", scePowerGetCpuClockFrequency());
 	return 0;
 }
 

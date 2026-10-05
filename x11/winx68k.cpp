@@ -608,6 +608,8 @@ int exit_callback(int arg1, int arg2, void *common)
  */
 static int power_callback(int unknown, int flags, void *common)
 {
+	log_printf("power: %08X, battery %d%%%s\n", flags, scePowerGetBatteryLifePercent(),
+		   scePowerIsBatteryCharging() ? " charging" : "");
 	if (flags & PSP_POWER_CB_RESUME_COMPLETE)
 		log_printf("me: restart after resume %s\n", me_resume() == 0 ? "ok" : "failed");
 	return 0;
@@ -1161,6 +1163,14 @@ static void psp_check_clock(void)
 	static int clk, starts;
 	int now = scePowerGetCpuClockFrequencyInt() * 1000 + scePowerGetBusClockFrequencyInt();
 
+	static unsigned last_batt;
+	unsigned t = sceKernelGetSystemTimeLow();
+
+	if (t - last_batt > 60 * 1000 * 1000) {	/* in the file, should the PSP go off */
+		log_printf("power: battery %d%%%s, %d C\n", scePowerGetBatteryLifePercent(),
+			   scePowerIsBatteryCharging() ? " charging" : "", scePowerGetBatteryTemp());
+		last_batt = t;
+	}
 	if (clk && now != clk && me_running() && starts == me_start_count())
 		log_printf("me: clock %d/%d -> %d/%d MHz with the Media Engine running\n",
 			   clk / 1000, clk % 1000, now / 1000, now % 1000);
