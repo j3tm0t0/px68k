@@ -100,6 +100,23 @@ void me_main(void)
 }
 
 /*
+ * Kernel mode: pulse the ME's reset (bit 2 of the reset register), leaving
+ * the other bits as they are: the firmware holds other blocks there in reset
+ * (AVC and VME while their power is off, me_wrapper), and writing the whole
+ * register, as the samples did, released them.
+ */
+static void me_reset_pulse(void)
+{
+	volatile unsigned *rst = (volatile unsigned *)0xbc10004c;
+
+	__asm__ volatile("sync");
+	*rst |= 0x04;
+	__asm__ volatile("sync");
+	*rst &= ~0x04;
+	__asm__ volatile("sync");
+}
+
+/*
  * Kernel mode (kuKernelCall): put a handler at the ME's reset vector and
  * reset it. arg1: me_reset_open, after saving the protection it opens.
  */
@@ -122,10 +139,7 @@ static int me_reset_k(unsigned open)
 	me_installed = 1;
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
-	*(volatile unsigned *)0xbc10004c = 0x04;	/* ME reset on */
-	__asm__ volatile("sync");
-	*(volatile unsigned *)0xbc10004c = 0;
-	__asm__ volatile("sync");
+	me_reset_pulse();
 	return 0;
 }
 
@@ -143,10 +157,7 @@ static int me_giveback_k(void)
 		return bad;	/* no reset into a damaged handler */
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
-	*(volatile unsigned *)0xbc10004c = 0x04;
-	__asm__ volatile("sync");
-	*(volatile unsigned *)0xbc10004c = 0;
-	__asm__ volatile("sync");
+	me_reset_pulse();
 	return 0;
 }
 
