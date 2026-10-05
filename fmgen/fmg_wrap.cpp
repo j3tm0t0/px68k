@@ -523,7 +523,7 @@ void OPM_Cleanup(void)
 {
 #ifdef PSP
 	me_on = 0;
-	me_halt();
+	me_release();
 #endif
 	juliet_YM2151Reset();
 	juliet_unload();

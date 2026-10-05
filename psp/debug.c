@@ -358,7 +358,7 @@ static void serve(int fd)
 				press(fd, cmd + 4);
 			} else if (strcmp(cmd, "quit") == 0) {
 				reply(fd, "OK quit");
-				me_halt();
+				me_release();
 				sceKernelExitGame();
 			} else if (cmd[0]) {
 				log_printf("debug: > %s\n", cmd);

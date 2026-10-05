@@ -595,7 +595,7 @@ int exit_flag = 0;
 int exit_callback(int arg1, int arg2, void *common)
 {
 	/* HOME > exit: the ME first, in case the emulation thread never gets there */
-	me_halt();
+	me_release();
 	exit_flag = 1;
 
 	return 0;
@@ -1005,7 +1005,7 @@ static void psp_debug_poll(void)
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
 		} else if (strcmp(cmd, "me off") == 0) {
-			me_pause();	/* as around a clock change */
+			me_pause();	/* as around a suspend */
 			log_printf("me: halted, firmware handler back\n");
 		} else if (strcmp(cmd, "me on") == 0) {
 			log_printf("me: restart %s\n", me_resume() == 0 ? "ok" : "failed");

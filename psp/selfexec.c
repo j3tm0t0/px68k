@@ -14,7 +14,7 @@ void exec_eboot(const char *eboot)
 	struct SceKernelLoadExecParam param;
 	int ret, state, i;
 
-	me_halt();	/* before its code and buffers go away */
+	me_release();	/* before its code and buffers go away */
 	/* Let the debug server flush the last log lines to its client. */
 	sceKernelDelayThread(500 * 1000);
 	sceNetApctlDisconnect();

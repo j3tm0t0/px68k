@@ -349,7 +349,7 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		avail += PCMBUF_SIZE;
 	if (OPM_MeActive()) {
 		avail = ring_bytes(OPM_MeReady(), pbrp);
-		if (me_paused_now())	/* halted for a clock change (WLAN): what is ready */
+		if (me_paused_now())	/* halted (suspend, "me off"): what is ready */
 			n = avail < len ? (int)avail : len;
 		else
 			n = me_fill(len, (int)userdata, &filled);

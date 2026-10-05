@@ -33,21 +33,25 @@ int me_start(void (*loop)(void));
 int me_halting(void);
 /*
  * Make loop() return, put the firmware's reset handler back and restart the
- * firmware's ME core with it: before px68k's memory goes away (exit,
- * loadexec) and before any clock change. Returns 0 once the firmware's
- * handler is verified in place (or ours never was), < 0 if not: then the
- * clock must not change.
+ * firmware's ME core with it. Returns 0 once the firmware's handler is
+ * verified in place (or ours never was), < 0 if not.
  */
 int me_halt(void);
-/* Nonzero when the clock may change: the firmware's reset handler is in place. */
+/*
+ * me_halt, and the firmware's "SceMeRpc" event handler back (me.c): before
+ * px68k's memory goes away (exit, loadexec).
+ */
+void me_release(void);
+/*
+ * Nonzero when the clock may change: the firmware will not wait for its ME
+ * core (its SceMeRpc events are dropped while px68k owns the ME).
+ */
 int me_clock_safe(void);
 int me_running(void);
 /*
- * Around clock changes (the WLAN going up or down changes the PLL) and
- * suspend: the firmware then resets the ME itself and waits for its own
- * reset handler to answer; with ours in place the PSP hung.  me_resume
- * restarts loop() where it stopped (everything it keeps is in RAM); returns
- * < 0 if the ME did not come back.
+ * Around a suspend (the ME loses power).  me_resume restarts loop() where it
+ * stopped (everything it keeps is in RAM); returns < 0 if the ME did not
+ * come back.
  */
 int me_pause(void);	/* me_halt, to be undone with me_resume */
 int me_resume(void);

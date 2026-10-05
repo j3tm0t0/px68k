@@ -1,6 +1,8 @@
 #include <pspkernel.h>
 #include <psputils.h>
 #include <kubridge.h>
+#include <pspsysevent.h>
+#include <systemctrl.h>
 #include <string.h>
 
 #include "me.h"
@@ -29,18 +31,31 @@ static unsigned char me_stack[ME_STACK_SIZE] __attribute__((aligned(64)));
 static unsigned me_probe;	/* read cached through its user address by the ME */
 static unsigned me_prot[ME_PROT_REGS];
 /*
- * The firmware's own reset handler, which ours replaces: the firmware resets
- * the ME itself (clock changes: the WLAN going up or down; suspend) and waits
- * for that handler's answer, so the PSP hung there with ours in place.  It
- * goes back, and the firmware's ME core is restarted with it, whenever we
- * halt (me_halt, me_pause).  0xbfc00600 on holds the handler's parameters
- * (custom-core, safe-task): not ours to touch.
+ * The firmware's own reset handler, which ours replaces.  It goes back, and
+ * the firmware's ME core is restarted with it, whenever we halt (me_halt,
+ * me_pause): before px68k's memory goes away.  0xbfc00600 on holds the
+ * firmware core's parameters (custom-core, safe-task): not ours to touch.
  */
 #define ME_VECTOR_SAVE	0x200
 static unsigned me_vector[ME_VECTOR_SAVE / 4];
 static int me_vector_saved;
 static int me_installed;	/* our handler is at the reset vector */
 static int me_started, me_paused, me_starts;
+
+/*
+ * The firmware talks to its ME core from the "SceMeRpc" system event handler
+ * of me_wrapper (uofw src/kd/me_wrapper): on a clock change (events 0x1000002
+ * and 0x1000020) and around a suspend it sends the core a request and waits,
+ * without a time limit, for its answer.  With our code on the ME there is no
+ * answer: that hung the PSP at "bench" (the WLAN going down raises the clock),
+ * also with the firmware's reset handler put back and its core restarted.
+ * So while px68k owns the ME, that handler's events are dropped (as
+ * custom-core's kinit replaces it); px68k starts the ME only once that hook
+ * is in place, and takes it out at exit.
+ */
+static PspSysEventHandler *me_rpc;
+static PspSysEventHandlerFunc me_rpc_orig;
+static int me_hooked;
 static void (*me_loop_fn)(void);
 
 extern char me_reset[], me_reset_end[], me_reset_open[], me_reset_open_end[];
@@ -142,6 +157,34 @@ static int me_protect_k(void)
 	return 0;
 }
 
+/* Called by the kernel for SceMeRpc's events while hooked: none reaches the firmware's core. */
+static int me_sysevent(int ev_id, char *ev_name, void *param, int *result)
+{
+	return 0;
+}
+
+/* Kernel mode: arg1 = sceKernelReferSysEventHandler. */
+static int me_hook_k(unsigned refer)
+{
+	PspSysEventHandler *h = ((PspSysEventHandler *(*)(void))refer)();
+
+	for (; h; h = h->next) {
+		if (h->name && strcmp(h->name, "SceMeRpc") == 0) {
+			me_rpc = h;
+			me_rpc_orig = h->handler;
+			h->handler = me_sysevent;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int me_unhook_k(void)
+{
+	me_rpc->handler = me_rpc_orig;
+	return 0;
+}
+
 /* f(arg) in kernel mode; f's return value, or < 0 if the call failed. */
 static int me_kcall(void *f, unsigned arg)
 {
@@ -181,6 +224,26 @@ static int me_reset_into(int open)
 	return me_wait(ME_READY, 200) ? 0 : -1;
 }
 
+static int me_hook(void)
+{
+	unsigned refer;
+
+	if (me_hooked)
+		return 0;
+	/* sysmem's sceSysEventForKernel; the NID is not randomized (uofw sysmem exports) */
+	refer = sctrlHENFindFunction("sceSystemMemoryManager", "sceSysEventForKernel", 0x68D55505);
+	if ((refer & 0xf0000000) != 0x80000000) {
+		log_printf("me: sceKernelReferSysEventHandler not found (%08X)\n", refer);
+		return -1;
+	}
+	if (me_kcall((void *)me_hook_k, refer) != 1) {
+		log_printf("me: no SceMeRpc event handler to take over\n");
+		return -1;
+	}
+	me_hooked = 1;
+	return 0;
+}
+
 int me_start(void (*loop)(void))
 {
 	volatile struct me_boot *b = boot();
@@ -189,6 +252,8 @@ int me_start(void (*loop)(void))
 
 	if (me_started)
 		return 0;
+	if (me_hook() < 0)
+		return -1;	/* the ME stays the firmware's */
 	__asm__ volatile("move %0, $gp" : "=r"(gp));
 	sceKernelDcacheWritebackInvalidateRange(&me_boot, sizeof(me_boot));
 	b->sp = (unsigned)me_stack + ME_STACK_SIZE - 64;
@@ -251,7 +316,16 @@ int me_paused_now(void)
 
 int me_clock_safe(void)
 {
-	return !me_installed;
+	return !me_installed || me_hooked;
+}
+
+void me_release(void)
+{
+	me_halt();
+	if (me_hooked) {
+		me_kcall((void *)me_unhook_k, 0);
+		me_hooked = 0;
+	}
 }
 
 int me_pause(void)

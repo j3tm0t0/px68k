@@ -70,7 +70,7 @@ static int join(int id)
 	int ret = -1, i;
 
 	if (!me_clock_safe()) {	/* joining changes the clock (psp/me.h) */
-		log_printf("net: the Media Engine is not halted, not joining\n");
+		log_printf("net: the firmware would wait for its Media Engine core, not joining\n");
 		return -1;
 	}
 	if (full_cpu > 222)
@@ -126,8 +126,8 @@ int net_start(const char *const *profile_paths, int count)
 static int net_paused;
 
 /*
- * Leaving the WLAN changes the clock: the ME is halted first, and if that is
- * not confirmed (psp/me.h) the WLAN and the clock stay as they are (-1).
+ * Leaving the WLAN changes the clock: unless that is safe with the ME
+ * (psp/me.h), the WLAN and the clock stay as they are (-1).
  */
 int net_pause(void)
 {
@@ -135,9 +135,8 @@ int net_pause(void)
 
 	if (net_paused)
 		return 0;
-	if (me_pause() < 0) {
-		log_printf("net: the Media Engine did not halt, WLAN and clock left as they are\n");
-		me_resume();
+	if (!me_clock_safe()) {
+		log_printf("net: the firmware would wait for its Media Engine core, WLAN and clock left as they are\n");
 		return -1;
 	}
 	sceNetApctlDisconnect();
@@ -155,8 +154,6 @@ int net_pause(void)
 		sceKernelDelayThread(50 * 1000);
 	}
 	net_paused = 1;
-	if (me_resume() < 0)
-		log_printf("net: the Media Engine did not restart\n");
 	return 0;
 }
 
@@ -168,15 +165,8 @@ int net_resume(void)
 		return -1;
 	if (!net_paused)	/* never left (net_pause refused) */
 		return 0;
-	if (me_pause() < 0) {
-		log_printf("net: the Media Engine did not halt, not rejoining\n");
-		me_resume();
-		return -1;
-	}
 	ret = join(joined_id);
 	if (ret == 0)
 		net_paused = 0;
-	if (me_resume() < 0)
-		log_printf("net: the Media Engine did not restart\n");
 	return ret;
 }
