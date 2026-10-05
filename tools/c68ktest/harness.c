@@ -210,6 +210,26 @@ int main(int argc, char **argv)
 			m68000_ICountBk = 0;
 			ret = C68k_Exec(&C68K, 1 + rnd() % (idle ? 400 : 80));
 			hash_state(ret);
+			if (idle) {	/* more slices: idle loops that go on across slices (C68k_Exec_Idle) */
+				int j, more = rnd() % 6;
+				for (j = 0; j < more; j++) {
+					switch (rnd() % 8) {
+					case 0: C68k_Set_IRQ(&C68K, rnd() % 8, rnd() % 4); break;
+					case 1: BusErrHandling = (rnd() % 4 == 0); break;
+					case 2: {	/* the polled word changes */
+						DWORD a = (C68K.A[MEM[0x1010] & 7] + (INT16)*(WORD *)(MEM + 0x1012)) & 0x1ffff;
+						*(WORD *)(MEM + (a & ~1)) = (rnd() % 2) ? 0 : rnd();
+						break;
+					}
+					case 3: gpip = rnd(); break;
+					case 4: if (rnd() % 4 == 0) *(WORD *)(MEM + 0x1014) ^= 0x0100; break;	/* the code changes */
+					case 5: BusErrFlag = rnd() & 7; break;
+					}
+					m68000_ICountBk = 0;
+					ret = C68k_Exec(&C68K, 1 + rnd() % 400);
+					hash_state(ret);
+				}
+			}
 			if (argc >= 6 && i >= atoi(argv[4]) && i <= atoi(argv[5])) {
 				int k;
 				fprintf(stderr, "case %d H=%08x ret=%d pc=%06x op=%04x sr=%04x bef=%x beh=%x mba=%x icbk=%d\n", i, H, ret,

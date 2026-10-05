@@ -88,6 +88,7 @@ enum {
 	PEV_SYN_SAMPLES = PEV_IO + 6,	/* samples synthesized on the emulator thread */
 	PEV_CB,		/* sound callbacks */
 	PEV_CB_SAMPLES,	/* samples synthesized by the callback */
+	PEV_IDLE_SLICES,	/* slices run by C68k_Exec_Idle, without the core */
 	PEV_N
 };
 

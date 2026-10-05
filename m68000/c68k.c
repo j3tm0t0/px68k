@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "c68kmacro.h"
+#include "../psp/prof.h"
 
 
 /******************************************************************************
@@ -106,6 +107,9 @@ void C68k_Reset(c68k_struc *CPU)
 	CPU¼Â¹Ô
 --------------------------------------------------------*/
 
+extern DWORD BusErrHandling;
+extern DWORD BusErrAdr;
+
 #ifndef C68K_NO_IDLE
 /*--------------------------------------------------------
 	Idle loops
@@ -144,28 +148,34 @@ void C68k_Reset(c68k_struc *CPU)
  * no side effect (cpu_idle_read_byte), so the same holds.  BTST only sets
  * Z.
  */
-UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
+/*
+ * The TST/CMP/BTST of an idle loop at PC (the Bcc's target; Opcode: the
+ * Bcc): sets the flags it sets and returns whether the Bcc branches again
+ * (*len, *cyc: its length and cycles), or -1 (nothing changed) if it is not
+ * one of the forms handled or its operand is not plain RAM / GPIP.
+ */
+static INT32 C68k_Idle_Eval(c68k_struc *CPU, UINT32 PC, UINT32 Opcode, INT32 *plen, INT32 *pcyc)
 {
 	UINT32 op = *(UINT16 *)PC, adr, src, dst, res;
-	INT32 c, cond, len, cyc;
+	INT32 cond, len, cyc;
 
 	switch (Opcode & 0xff)
 	{
 	case 0xfc:	/* BTST Dn,(An) */
 		if ((op & 0xf1f8) != 0x0110)
-			return PC;
+			return -1;
 		if (!cpu_idle_read_byte(CPU->A[op & 7], &res))
-			return PC;
+			return -1;
 		FLAG_Z = res & (1 << (CPU->D[(op >> 9) & 7] & 7));
 		len = 2;
 		cyc = 8;
 		goto cond;
 	case 0xf6:	/* BTST #n,abs.l */
 		if (op != 0x0839)
-			return PC;
+			return -1;
 		adr = (*(UINT16 *)(PC + 4) << 16) | *(UINT16 *)(PC + 6);
 		if (!cpu_idle_read_byte(adr, &res))
-			return PC;
+			return -1;
 		FLAG_Z = res & (1 << (*(UINT8 *)(PC + 2) & 7));
 		len = 8;
 		cyc = 20;
@@ -179,9 +189,9 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
 	case 0x4068:	/* TST.W (d16,An): 0x4a68 */
 	case 0x4028:	/* TST.B (d16,An): 0x4a28 */
 		if ((op & 0xfe00) != 0x4a00)
-			return PC;
+			return -1;
 		if (!((op & 0x40) ? cpu_idle_read_word(adr, &res) : cpu_idle_read_byte(adr, &res)))
-			return PC;
+			return -1;
 		FLAG_C = CFLAG_CLEAR;
 		FLAG_V = VFLAG_CLEAR;
 		FLAG_Z = res;
@@ -189,20 +199,20 @@ UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
 		break;
 	case 0xb068:	/* CMP.W (d16,An),Dn */
 		if (!cpu_idle_read_word(adr, &src))
-			return PC;
+			return -1;
 		dst = READ_REG_16(CPU->D[(op >> 9) & 7]);
 		res = dst - src;
 		FLAGS_CMP_16()
 		break;
 	case 0xb028:	/* CMP.B (d16,An),Dn */
 		if (!cpu_idle_read_byte(adr, &src))
-			return PC;
+			return -1;
 		dst = READ_REG_8(CPU->D[(op >> 9) & 7]);
 		res = dst - src;
 		FLAGS_CMP_8()
 		break;
 	default:
-		return PC;
+		return -1;
 	}
 
 cond:
@@ -223,10 +233,22 @@ cond:
 	case 14: cond = COND_GT(); break;
 	default: cond = COND_LE(); break;
 	}
-	if (!cond)
-		return PC;
+	*plen = len;
+	*pcyc = cyc;
+	return cond != 0;
+}
 
-	c = CPU->ICount;
+/*
+ * The loop of the last skip (C68k_Idle_Loop), for C68k_Exec_Idle: its
+ * TST/CMP/BTST (host PC; 0: none) and its Bcc.  Cleared when C68k_Exec
+ * runs the core, set again when the slice ends in a skip.
+ */
+static UINT32 C68k_IdlePC, C68k_IdleBcc;
+static INT32 C68k_IdleLen;
+
+/* the step by step run from the loop's TST/CMP/BTST with c cycles left after the Bcc (c > 0) */
+static UINT32 C68k_Idle_Run(c68k_struc *CPU, UINT32 PC, INT32 c, INT32 len, INT32 cyc)
+{
 	c -= (c - 1) / (cyc + 10) * (cyc + 10);	/* whole loops: c in 1..cyc + 10 */
 	c -= cyc;			/* TST/CMP/BTST */
 	if (c > 0)
@@ -236,12 +258,111 @@ cond:
 	CPU->ICount = c;
 	return PC;
 }
+
+UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
+{
+	INT32 len, cyc;
+
+	if (C68k_Idle_Eval(CPU, PC, Opcode, &len, &cyc) != 1)
+		return PC;
+	C68k_IdlePC = PC;
+	C68k_IdleBcc = Opcode;
+	C68k_IdleLen = len;
+	return C68k_Idle_Run(CPU, PC, CPU->ICount, len, cyc);
+}
+
+/* the condition of Bcc Opcode on the current flags */
+static INT32 C68k_Idle_Cond(c68k_struc *CPU, UINT32 Opcode)
+{
+	switch ((Opcode >> 8) & 15)
+	{
+	case 2:  return COND_HI();
+	case 3:  return COND_LS();
+	case 4:  return COND_CC();
+	case 5:  return COND_CS();
+	case 6:  return COND_NE();
+	case 7:  return COND_EQ();
+	case 8:  return COND_VC();
+	case 9:  return COND_VS();
+	case 10: return COND_PL();
+	case 11: return COND_MI();
+	case 12: return COND_GE();
+	case 13: return COND_LT();
+	case 14: return COND_GT();
+	default: return COND_LE();
+	}
+}
+
+/*
+ * A whole slice in the idle loop of the last skip, without entering the
+ * core (its prologue and handlers, and what they evict from the I-cache):
+ * when C68k_Exec would take no interrupt, the CPU is not halted, no bus
+ * error is pending, and the slice starts at the loop's TST/CMP/BTST or its
+ * Bcc and stays in the loop, the core would run exactly the loop to the
+ * end of the slice (C68k_Idle_Loop).  Returns 1 with the state of that
+ * run, or 0 with nothing changed (C68k_Exec runs the slice): an Eval that
+ * does not branch again leaves its flags, but the core sets the same ones
+ * when it runs the TST/CMP/BTST, and its read has no side effect but the
+ * BusErrFlag = 0 the core's read does too.
+ */
+static INT32 C68k_Exec_Idle(c68k_struc *CPU, INT32 cycles)
+{
+	UINT32 PC = CPU->PC, loop = C68k_IdlePC;
+	UINT32 fc, fv, fz, fn;
+	INT32 len, cyc, c, r;
+
+	if (CPU->IRQLine == 7 || CPU->IRQLine > CPU->flag_I || CPU->HaltState || BusErrHandling || cycles <= 0)
+		return 0;
+	if (*(UINT16 *)(loop + C68k_IdleLen) != C68k_IdleBcc)
+		return 0;	/* the code changed */
+	if (PC == loop) {
+		c = cycles;		/* at the TST/CMP/BTST: as C68k_Idle_Loop after the Bcc */
+	} else if (PC == loop + C68k_IdleLen) {
+		if (!C68k_Idle_Cond(CPU, C68k_IdleBcc))
+			return 0;
+		c = cycles - 10;	/* the Bcc */
+		if (c <= 0) {
+			CPU->PC = loop;
+			CPU->ICount = c;
+			return 1;
+		}
+	} else
+		return 0;
+	fc = CPU->flag_C;
+	fv = CPU->flag_V;
+	fz = CPU->flag_Z;
+	fn = CPU->flag_N;
+	r = C68k_Idle_Eval(CPU, loop, C68k_IdleBcc, &len, &cyc);
+	if (r != 1) {
+		CPU->flag_C = fc;
+		CPU->flag_V = fv;
+		CPU->flag_Z = fz;
+		CPU->flag_N = fn;
+		return 0;
+	}
+	CPU->PC = C68k_Idle_Run(CPU, loop, c, len, cyc);
+	return 1;
+}
 #endif
 
-extern DWORD BusErrHandling;
-extern DWORD BusErrAdr;
+static INT32 C68k_Exec_Core(c68k_struc *CPU, INT32 cycles) __attribute__((noinline));
 
 INT32 C68k_Exec(c68k_struc *CPU, INT32 cycles)
+{
+#ifndef C68K_NO_IDLE
+	if (CPU && C68k_IdlePC) {
+		if (C68k_Exec_Idle(CPU, cycles)) {
+			PROF_EV(PEV_IDLE_SLICES, 1);
+			return cycles - CPU->ICount;
+		}
+		C68k_IdlePC = 0;
+	}
+#endif
+	return C68k_Exec_Core(CPU, cycles);
+}
+
+/* the core (out of line: C68k_Exec_Idle's slices don't pay for its prologue) */
+static INT32 __attribute__((noinline)) C68k_Exec_Core(c68k_struc *CPU, INT32 cycles)
 {
 	if (CPU)
 	{

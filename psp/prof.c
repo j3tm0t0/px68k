@@ -173,10 +173,10 @@ void prof_samp_report(const char *tag, unsigned us, unsigned frames)
 	       (unsigned)((unsigned long long)ev[id] * 100 / frames % 100)
 	log_printf("samp %s: per frame: slices %u.%02u lines %u.%02u cpulines %u.%02u gelines %u.%02u "
 		   "slow io gvram %u.%02u tvram %u.%02u vid %u.%02u bg %u.%02u snd %u.%02u other %u.%02u "
-		   "synth samples %u.%02u callbacks %u.%02u callback samples %u.%02u\n", tag,
+		   "synth samples %u.%02u callbacks %u.%02u callback samples %u.%02u idle slices %u.%02u\n", tag,
 		   PF(PEV_SLICES), PF(PEV_HLINES), PF(PEV_CPULINES), PF(PEV_GELINES),
 		   PF(PEV_IO), PF(PEV_IO + 1), PF(PEV_IO + 2), PF(PEV_IO + 3), PF(PEV_IO + 4), PF(PEV_IO + 5),
-		   PF(PEV_SYN_SAMPLES), PF(PEV_CB), PF(PEV_CB_SAMPLES));
+		   PF(PEV_SYN_SAMPLES), PF(PEV_CB), PF(PEV_CB_SAMPLES), PF(PEV_IDLE_SLICES));
 #undef PF
 	prof_threads_report(tag, wall, frames);
 }

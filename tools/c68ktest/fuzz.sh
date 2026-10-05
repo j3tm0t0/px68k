@@ -23,11 +23,11 @@ EOF
 W=$(mktemp -d "${TMPDIR:-/tmp}/c68ktest.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 mkdir "$W/a" "$W/b"
-git archive "$1" m68000 x68k x11 win32api fmgen | tar xf - -C "$W/a"
+git archive "$1" m68000 x68k x11 win32api fmgen psp | tar xf - -C "$W/a"
 if [ -n "$2" ]; then
-	git archive "$2" m68000 x68k x11 win32api fmgen | tar xf - -C "$W/b"
+	git archive "$2" m68000 x68k x11 win32api fmgen psp | tar xf - -C "$W/b"
 else
-	cp -R m68000 x68k x11 win32api fmgen "$W/b/"
+	cp -R m68000 x68k x11 win32api fmgen psp "$W/b/"
 fi
 cp tools/c68ktest/harness.c "$W/"
 [ -f roms/IPLROM.DAT ] && cp roms/IPLROM.DAT "$W/"
