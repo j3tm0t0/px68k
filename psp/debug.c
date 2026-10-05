@@ -270,7 +270,8 @@ static void serve(int fd)
 {
 	char cmd[256], out[2048];
 	size_t cmd_len = 0, sent = 0;
-	int authed = 0;
+	int authed = 0, errors = 0;
+	unsigned t0;
 
 	for (;;) {
 		fd_set rd;
@@ -287,7 +288,24 @@ static void serve(int fd)
 		FD_SET(fd, &rd);
 		if (server_fd >= 0)
 			FD_SET(server_fd, &rd);
-		if (select((fd > server_fd ? fd : server_fd) + 1, &rd, NULL, NULL, &tv) <= 0)
+		t0 = sceKernelGetSystemTimeLow();
+		r = select((fd > server_fd ? fd : server_fd) + 1, &rd, NULL, NULL, &tv);
+		if (r == 0 && sceKernelGetSystemTimeLow() - t0 < 50 * 1000)
+			r = -1;	/* a timeout that did not wait: as a failure */
+		if (r < 0) {
+			/*
+			 * The WLAN is down (net_pause: bench, benchf, samp): select()
+			 * returns at once, and retrying at once spun this thread, above
+			 * the emulator's priority (4.4 ms per frame in samp).  Wait,
+			 * and give the client up after ~5 s (accept() waits too).
+			 */
+			if (++errors >= 50)
+				return;
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
+		errors = 0;
+		if (r == 0)
 			continue;
 		/*
 		 * A new client takes over: the old one may be gone without its
