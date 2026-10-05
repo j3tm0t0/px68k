@@ -2,9 +2,10 @@
 #define PX68K_PSP_PROF_H
 
 /*
- * Where the time goes (debug command "prof on"): microseconds per category,
- * summed by the frame-rate log and reset every second. Off, a section costs
- * one load and branch; on, two sceKernelGetSystemTimeLow() calls.
+ * Where the time goes (debug command "prof on", builds with -DPROF_TIMERS):
+ * microseconds per category, summed by the frame-rate log and reset every
+ * second. Off, a section costs one load and branch; on, two
+ * sceKernelGetSystemTimeLow() calls.
  *
  * On the device these timers cost more than what they time (thousands of
  * system calls per frame: benchf of Gradius' demo 30.8 ms profiled, 12.1 ms
@@ -103,14 +104,21 @@ extern unsigned prof_count[PROF_COUNT_N];
 }
 #endif
 
+#define PROF_COUNT(id, n) do { prof_count[id] += (n); } while (0)
+#else
+#define PROF_COUNT(id, n) do { } while (0)
+#endif
+/*
+ * The timers only with -DPROF_TIMERS (make -f Makefile.psp XCFLAGS=-DPROF_TIMERS):
+ * even off, their tests cost ~25k instructions per frame (2 per slice, 5 per line).
+ */
+#if defined(__psp__) && defined(PROF_TIMERS)
 #define PROF_BEGIN(name) unsigned prof_t_##name = prof_on ? sceKernelGetSystemTimeLow() : 0
 #define PROF_END(name, id) \
 	do { if (prof_on) prof_us[id] += sceKernelGetSystemTimeLow() - prof_t_##name; } while (0)
-#define PROF_COUNT(id, n) do { prof_count[id] += (n); } while (0)
 #else
 #define PROF_BEGIN(name)
 #define PROF_END(name, id) do { } while (0)
-#define PROF_COUNT(id, n) do { } while (0)
 #endif
 
 #ifdef __psp__

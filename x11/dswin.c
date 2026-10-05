@@ -257,15 +257,18 @@ static void FASTCALL DSound_Send(int length)
 static void smooth(short *p, int frames, int step)
 {
 	static int hist[2][4], sum[2], pos;
+	/* sum / step by a shift for 2 and 4 (rounded toward 0 as the division): no div per sample */
+	const int sh = step == 2 ? 1 : step == 4 ? 2 : 0;
 	int i, c;
 
 	if (step <= 1 || step > 4)
 		return;
 	for (i = 0; i < frames; i++, p += 2) {
 		for (c = 0; c < 2; c++) {
-			sum[c] += p[c] - hist[c][pos];
+			const int s = sum[c] += p[c] - hist[c][pos];
+
 			hist[c][pos] = p[c];
-			p[c] = (short)(sum[c] / step);
+			p[c] = (short)(sh ? (s + ((s >> 31) & (step - 1))) >> sh : s / step);
 		}
 		if (++pos == step)
 			pos = 0;
