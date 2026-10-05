@@ -667,6 +667,24 @@ unsigned prof_us[PROF_N];
 unsigned prof_count[PROF_COUNT_N];
 
 static int psp_debug_on;
+/*
+ * The menu's "Debug Net" (on only with debug.key): leaving the WLAN lifts the
+ * firmware's 222 MHz cap.  net_pause refuses when the clock change is not safe
+ * with the Media Engine (psp/me.h), and a failed rejoin is retried in the
+ * background, so the state shown is the network's own.
+ */
+extern "C" int psp_debug_net(int on)
+{
+	if (on == 0 && psp_debug_on && !net_paused()) {
+		if (net_pause() == 0)
+			log_printf("debug net: off, cpu %d MHz\n", scePowerGetCpuClockFrequency());
+		else
+			log_printf("debug net: stays on\n");
+	} else if (on == 1 && psp_debug_on && net_paused()) {
+		log_printf("debug net: %s\n", net_resume() == 0 ? "on" : "rejoin failed, retrying");
+	}
+	return psp_debug_on && !net_paused();
+}
 static int psp_fps_log;
 static int psp_emu_frames, psp_drawn_frames;
 static unsigned psp_exec_us, psp_exec_max_us;

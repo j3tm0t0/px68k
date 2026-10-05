@@ -100,15 +100,23 @@ struct menu_flist mfl;
 
 /***** menu items *****/
 
+#ifdef PSP
+#define MENU_NUM 16
+#else
 #define MENU_NUM 15
+#endif
 #define MENU_WINDOW 7
 
-int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1, 0, 0};
+int mval_y[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 1, 1, 0, 0, 0};
 
-enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK, M_FPS, M_CLK};
+enum menu_id {M_SYS, M_JOM, M_FD0, M_FD1, M_HD0, M_HD1, M_FS, M_SR, M_VKS, M_VBS, M_HJS, M_NW, M_JK, M_FPS, M_CLK, M_DBG};
 
 // Max # of characters is 15.
-char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "Show FPS", "MPU Clock", "uhyo", ""};
+char menu_item_key[][15] = {"SYSTEM", "Joy/Mouse", "FDD0", "FDD1", "HDD0", "HDD1", "Frame Skip", "Sound Rate", "VKey Size", "VBtn Swap", "HwJoy Setting", "No Wait Mode", "JoyKey", "Show FPS", "MPU Clock",
+#ifdef PSP
+	"Debug Net",
+#endif
+	"uhyo", ""};
 
 // Max # of characters is 30.
 // Max # of items including terminater `""' in each line is 15.
@@ -127,7 +135,8 @@ char menu_items[][15][30] = {
 	{"Off", "On", ""},
 	{"Off", "On", ""},
 	{"Off", "On", ""},
-	{"10MHz (X68000)", "16MHz (XVI)", "24MHz", ""}
+	{"10MHz (X68000)", "16MHz (XVI)", "24MHz", ""},
+	{"Off", "On", ""}
 };
 
 static void menu_system(int v);
@@ -142,6 +151,9 @@ static void menu_nowait(int v);
 static void menu_joykey(int v);
 static void menu_showfps(int v);
 static void menu_mpu_clock(int v);
+#ifdef PSP
+static void menu_debug_net(int v);
+#endif
 
 struct _menu_func {
 	void (*func)(int v);
@@ -163,7 +175,10 @@ struct _menu_func menu_func[] = {
 	{menu_nowait, 1},
 	{menu_joykey, 1},
 	{menu_showfps, 1},
-	{menu_mpu_clock, 1}
+	{menu_mpu_clock, 1},
+#ifdef PSP
+	{menu_debug_net, 1}
+#endif
 };
 
 int WinUI_get_drv_num(int key)
@@ -243,6 +258,9 @@ WinUI_Init(void)
 	mval_y[M_JK] = Config.JoyKey;
 	mval_y[M_FPS] = Config.ShowFPS;
 	mval_y[M_CLK] = (Config.XVIMode >= 0 && Config.XVIMode <= 2) ? Config.XVIMode : 0;
+#ifdef PSP
+	mval_y[M_DBG] = psp_debug_net(-1);
+#endif
 
 #if defined(ANDROID)
 #define CUR_DIR_STR winx68k_dir
@@ -528,6 +546,17 @@ static void menu_mpu_clock(int v)
 {
 	Config.XVIMode = v;	/* 0: 10 MHz, 1: 16 MHz, 2: 24 MHz */
 }
+
+#ifdef PSP
+/*
+ * The debug server's WLAN (only with debug.key): the firmware caps the CPU at
+ * 222 MHz while it is up, so it can be left for playing.
+ */
+static void menu_debug_net(int v)
+{
+	mval_y[M_DBG] = psp_debug_net(v);
+}
+#endif
 
 // ex. ./hoge/.. -> ./
 // ( ./ ---down hoge dir--> ./hoge ---up hoge dir--> ./hoge/.. )
