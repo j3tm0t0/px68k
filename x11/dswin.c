@@ -298,13 +298,26 @@ static long ring_bytes(BYTE *to, BYTE *from)
 	return n < 0 ? n + PCMBUF_SIZE : n;
 }
 
+/* Zero n bytes of the ring from p on (it wraps). */
+static void ring_zero(BYTE *p, long n)
+{
+	long first = pbep - p;
+
+	if (n <= first) {
+		memset(p, 0, n);
+	} else {
+		memset(p, 0, first);
+		memset(pbsp, 0, n - first);
+	}
+}
+
 unsigned DSound_MeWaitMax;	/* longest wait for the Media Engine in a callback, us */
 
 /*
  * With the OPM on the Media Engine: the ring holds ADPCM up to pbwp, mixed
- * with the OPM up to OPM_MeReady().  When the emulation is behind, the
- * ADPCM for the rest is made here and the ME is asked for the OPM; either
- * way, wait for the ME (it takes well under a callback period).
+ * with the OPM up to OPM_MeReady().  When the emulation is behind, the ME is
+ * asked for the OPM of the rest; either way, wait for the ME (it takes well
+ * under a callback period).
  */
 static int me_fill(int len, int rate, long *filled)
 {
@@ -317,7 +330,8 @@ static int me_fill(int len, int rate, long *filled)
 
 		DSound_Underruns++;
 		*filled = len - queued;
-		ADPCM_Update((short *)pbwp, k, rate, pbsp, pbep);
+		/* the OPM only, as below: no ADPCM ahead of the emulation's DMA */
+		ring_zero(pbwp, k * 4 * step);
 		OPM_MeExtra((short *)pbwp, k, rate, pbsp, pbep);
 		pbwp += k * 4 * step;
 		if (pbwp >= pbep)
@@ -387,8 +401,12 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		DSound_Underruns++;
 		filled = len - n;
 		memset(out, 0, len - n);
-		ADPCM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
-		if (!OPM_MeActive())	/* else the ME is halted: ADPCM alone for now */
+		/*
+		 * The OPM only: ADPCM_Update here would play ahead of the data the
+		 * emulation's DMA has not sent yet (Gradius' start voice broke up).
+		 * With the ME halted (suspend, "me off"), nothing.
+		 */
+		if (!OPM_MeActive())
 			OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
 	}
 	smooth((short *)sdlsndbuf, len / 4, 44100 / (int)userdata);
