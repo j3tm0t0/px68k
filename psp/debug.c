@@ -229,11 +229,13 @@ int debug_paused(void)
 	return paused || transfers;
 }
 
+unsigned debug_pad_frame;	/* buttons held by the emulator thread for this frame ("padat") */
+
 unsigned debug_pad(void)
 {
 	if (pad_buttons && sceKernelGetSystemTimeWide() >= pad_until)
 		pad_buttons = 0;
-	return pad_buttons;
+	return pad_buttons | debug_pad_frame;
 }
 
 int debug_poll(char *buf, int len)

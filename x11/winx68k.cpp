@@ -719,6 +719,9 @@ static void psp_capture(void)
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+/* "padat": frames (counted from the reset of benchf / capf) at which circle is held for 6 frames */
+static unsigned psp_padat[8];
+static int psp_padat_n;
 static unsigned psp_idle_us = 200;	/* psp_frame_due: sleep while no frame is due ("idle <us>") */
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
 
@@ -770,6 +773,14 @@ static void psp_debug_frame(unsigned us)
 	if (!psp_debug_on)
 		return;
 	psp_frame_no++;
+	{
+		int k;
+
+		debug_pad_frame = 0;
+		for (k = 0; k < psp_padat_n; k++)
+			if (psp_frame_no - psp_padat[k] < 6)
+				debug_pad_frame |= PSP_CTRL_CIRCLE;
+	}
 	if (psp_samp_end && (int)(timeGetTime() - psp_samp_end) >= 0) {
 		prof_samp_stop();
 		prof_samp_report("window", sceKernelGetSystemTimeLow() - psp_samp_t0, psp_frame_no - psp_samp_frame0);
@@ -1033,6 +1044,17 @@ static void psp_debug_poll(void)
 			Config.SampleRate = n;	/* takes effect at the next start */
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
+		} else if (strncmp(cmd, "padat", 5) == 0) {
+			/* "padat <frame>...": deterministic presses of circle in benchf / capf runs ("padat": none) */
+			const char *p = cmd + 5;
+			int used;
+
+			psp_padat_n = 0;
+			while (psp_padat_n < 8 && sscanf(p, "%u%n", &psp_padat[psp_padat_n], &used) == 1) {
+				psp_padat_n++;
+				p += used;
+			}
+			log_printf("padat: %d presses\n", psp_padat_n);
 		} else if (sscanf(cmd, "idlefp %d", &n) == 1) {
 			C68k_IdleFast = n != 0;	/* m68000/c68k.c: idle slices without the core */
 			log_printf("idlefp %d\n", C68k_IdleFast);
