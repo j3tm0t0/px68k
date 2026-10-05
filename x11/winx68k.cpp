@@ -601,15 +601,15 @@ int exit_callback(int arg1, int arg2, void *common)
 	return 0;
 }
 
-/* The Media Engine must not run through a suspend (psp/me.h). */
+/*
+ * The Media Engine is stopped inside the suspend sequence (psp/me.c,
+ * me_sysevent): this callback is only a notification and may come too late
+ * for that.  It restarts the ME after a resume.
+ */
 static int power_callback(int unknown, int flags, void *common)
 {
-	if (flags & (PSP_POWER_CB_SUSPENDING | PSP_POWER_CB_STANDBY)) {
-		if (me_pause() < 0)	/* the suspend cannot be refused */
-			log_printf("me: not halted before the suspend\n");
-	}
-	else if (flags & PSP_POWER_CB_RESUME_COMPLETE)
-		me_resume();
+	if (flags & PSP_POWER_CB_RESUME_COMPLETE)
+		log_printf("me: restart after resume %s\n", me_resume() == 0 ? "ok" : "failed");
 	return 0;
 }
 

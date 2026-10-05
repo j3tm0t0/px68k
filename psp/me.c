@@ -159,9 +159,28 @@ static int me_protect_k(void)
 	return 0;
 }
 
-/* Called by the kernel for SceMeRpc's events while hooked: none reaches the firmware's core. */
+/*
+ * Called by the kernel for SceMeRpc's events while hooked: none reaches the
+ * firmware's core.  0x4005 (16389) is the last step before a suspend, where
+ * me_wrapper has its core save itself and then holds the ME in reset: here
+ * our loop is stopped (its cache written back) and the ME held in reset, in
+ * that same synchronous step; the power callback restarts it on resume.  No
+ * system calls: this runs inside the suspend sequence.
+ */
 static int me_sysevent(int ev_id, char *ev_name, void *param, int *result)
 {
+	volatile struct me_boot *b = boot();
+	int i;
+
+	if (ev_id == 0x4005 && me_started) {
+		b->halt = 1;
+		for (i = 0; i < 20000 && b->state != ME_HALTED; i++)
+			me_spin(1000);	/* about 60 ms at most */
+		*(volatile unsigned *)0xbc10004c |= 0x04;	/* ME reset on */
+		__asm__ volatile("sync");
+		me_started = 0;
+		me_paused = 1;
+	}
 	return 0;
 }
 
