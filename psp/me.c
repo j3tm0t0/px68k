@@ -39,10 +39,13 @@ static unsigned me_prot[ME_PROT_REGS];
 #define ME_VECTOR_SAVE	0x200
 static unsigned me_vector[ME_VECTOR_SAVE / 4];
 static int me_vector_saved;
+static int me_installed;	/* our handler is at the reset vector */
 static int me_started, me_paused, me_starts;
 static void (*me_loop_fn)(void);
 
 extern char me_reset[], me_reset_end[], me_reset_open[], me_reset_open_end[];
+
+int me_halt(void);
 
 static volatile struct me_boot *boot(void)
 {
@@ -97,6 +100,7 @@ static int me_reset_k(unsigned open)
 		me_vector_saved = 1;
 	}
 	memcpy((void *)0xbfc00000, h, e - h);
+	me_installed = 1;
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
 	*(volatile unsigned *)0xbc10004c = 0x04;	/* ME reset on */
@@ -109,10 +113,15 @@ static int me_reset_k(unsigned open)
 /* Kernel mode: the firmware's reset handler back, and its ME core restarted with it. */
 static int me_giveback_k(void)
 {
-	int i;
+	int i, bad = 0;
 
 	for (i = 0; i < ME_VECTOR_SAVE / 4; i++)
 		((volatile unsigned *)0xbfc00000)[i] = me_vector[i];
+	__asm__ volatile("sync");
+	for (i = 0; i < ME_VECTOR_SAVE / 4; i++)
+		bad += ((volatile unsigned *)0xbfc00000)[i] != me_vector[i];
+	if (bad)
+		return bad;	/* no reset into a damaged handler */
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
 	*(volatile unsigned *)0xbc10004c = 0x04;
@@ -133,13 +142,16 @@ static int me_protect_k(void)
 	return 0;
 }
 
+/* f(arg) in kernel mode; f's return value, or < 0 if the call failed. */
 static int me_kcall(void *f, unsigned arg)
 {
 	KernelCallArg args;
+	int ret;
 
 	memset(&args, 0, sizeof(args));
 	args.arg1 = arg;
-	return kuKernelCall(f, &args);
+	ret = kuKernelCall(f, &args);
+	return ret < 0 ? ret : (int)args.ret1;
 }
 
 static int me_wait(unsigned state, int ms)
@@ -188,7 +200,7 @@ int me_start(void (*loop)(void))
 			open = 1;
 		else {
 			log_printf("me: no answer from the Media Engine\n");
-			me_kcall((void *)me_giveback_k, 0);
+			me_halt();
 			return -1;
 		}
 	}
@@ -199,12 +211,12 @@ int me_start(void (*loop)(void))
 		/* it needs the protection open: leave it so (until the next reboot) */
 		if (!open || me_reset_into(1) < 0) {
 			log_printf("me: the Media Engine stopped (state %08X)\n", b->state);
-			me_kcall((void *)me_giveback_k, 0);
+			me_halt();
 			return -1;
 		}
 		b->go = 1;
 		if (!me_wait(ME_RUNNING, 100)) {
-			me_kcall((void *)me_giveback_k, 0);
+			me_halt();
 			return -1;
 		}
 		log_printf("me: running with the memory protection open\n");
@@ -237,12 +249,17 @@ int me_paused_now(void)
 	return me_paused;
 }
 
-void me_pause(void)
+int me_clock_safe(void)
 {
-	if (!me_started)
-		return;
+	return !me_installed;
+}
+
+int me_pause(void)
+{
+	if (!me_installed)
+		return 0;
 	me_paused = 1;	/* first: the sound callback stops waiting for it */
-	me_halt();
+	return me_halt();
 }
 
 int me_resume(void)
@@ -253,19 +270,28 @@ int me_resume(void)
 	return me_start(me_loop_fn);
 }
 
-void me_halt(void)
+int me_halt(void)
 {
 	volatile struct me_boot *b = boot();
-	int i;
+	int i, ret;
 
-	if (!me_started)
-		return;
-	b->halt = 1;
-	for (i = 0; i < 100 && b->state != ME_HALTED; i++)
-		sceKernelDelayThread(1000);
-	me_started = 0;
-	if (me_vector_saved) {
-		me_kcall((void *)me_giveback_k, 0);
-		sceKernelDelayThread(10 * 1000);	/* let the firmware's core come up */
+	if (me_started) {
+		b->halt = 1;
+		for (i = 0; i < 100 && b->state != ME_HALTED; i++)
+			sceKernelDelayThread(1000);
+		if (b->state != ME_HALTED)
+			log_printf("me: the loop did not stop (state %08X); reset anyway\n", b->state);
+		me_started = 0;
 	}
+	if (!me_installed)
+		return 0;
+	/* the reset stops whatever the ME runs; then the firmware's handler has it */
+	ret = me_kcall((void *)me_giveback_k, 0);
+	if (ret != 0) {
+		log_printf("me: the firmware's reset handler could not be put back (%d)\n", ret);
+		return -1;
+	}
+	me_installed = 0;
+	sceKernelDelayThread(10 * 1000);	/* let the firmware's core come up */
+	return 0;
 }

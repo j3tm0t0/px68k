@@ -32,18 +32,24 @@ int me_start(void (*loop)(void));
 /* Nonzero once loop() should return (me_halt); poll it in the loop. */
 int me_halting(void);
 /*
- * Make loop() return and halt the ME, before px68k's memory goes away
- * (exit, loadexec), or the ME runs on in whatever is loaded next.
+ * Make loop() return, put the firmware's reset handler back and restart the
+ * firmware's ME core with it: before px68k's memory goes away (exit,
+ * loadexec) and before any clock change. Returns 0 once the firmware's
+ * handler is verified in place (or ours never was), < 0 if not: then the
+ * clock must not change.
  */
-void me_halt(void);
+int me_halt(void);
+/* Nonzero when the clock may change: the firmware's reset handler is in place. */
+int me_clock_safe(void);
 int me_running(void);
 /*
- * Halt the ME around clock changes (the WLAN going up or down changes the
- * PLL): it reads DDR all the time, and the PSP hung when the clock went to
- * 333 MHz with it running.  me_resume restarts loop() where it stopped
- * (everything it keeps is in RAM); returns < 0 if the ME did not come back.
+ * Around clock changes (the WLAN going up or down changes the PLL) and
+ * suspend: the firmware then resets the ME itself and waits for its own
+ * reset handler to answer; with ours in place the PSP hung.  me_resume
+ * restarts loop() where it stopped (everything it keeps is in RAM); returns
+ * < 0 if the ME did not come back.
  */
-void me_pause(void);
+int me_pause(void);	/* me_halt, to be undone with me_resume */
 int me_resume(void);
 int me_paused_now(void);
 /* Successful me_start calls so far (a clock change across a restart is fine). */

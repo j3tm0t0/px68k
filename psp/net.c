@@ -69,6 +69,10 @@ static int join(int id)
 {
 	int ret = -1, i;
 
+	if (!me_clock_safe()) {	/* joining changes the clock (psp/me.h) */
+		log_printf("net: the Media Engine is not halted, not joining\n");
+		return -1;
+	}
 	if (full_cpu > 222)
 		scePowerSetClockFrequency(222, 222, 111);
 	for (i = 0; i < 3 && ret != 0; i++)	/* the first try after a loadexec sometimes fails */
@@ -119,11 +123,23 @@ int net_start(const char *const *profile_paths, int count)
 	return 0;
 }
 
-void net_pause(void)
+static int net_paused;
+
+/*
+ * Leaving the WLAN changes the clock: the ME is halted first, and if that is
+ * not confirmed (psp/me.h) the WLAN and the clock stay as they are (-1).
+ */
+int net_pause(void)
 {
 	int state, i;
 
-	me_pause();
+	if (net_paused)
+		return 0;
+	if (me_pause() < 0) {
+		log_printf("net: the Media Engine did not halt, WLAN and clock left as they are\n");
+		me_resume();
+		return -1;
+	}
 	sceNetApctlDisconnect();
 	for (i = 0; i < 60; i++) {
 		if (sceNetApctlGetState(&state) != 0 || state == PSP_NET_APCTL_STATE_DISCONNECTED)
@@ -138,8 +154,10 @@ void net_pause(void)
 			break;
 		sceKernelDelayThread(50 * 1000);
 	}
+	net_paused = 1;
 	if (me_resume() < 0)
 		log_printf("net: the Media Engine did not restart\n");
+	return 0;
 }
 
 int net_resume(void)
@@ -148,8 +166,16 @@ int net_resume(void)
 
 	if (joined_id < 0)
 		return -1;
-	me_pause();
+	if (!net_paused)	/* never left (net_pause refused) */
+		return 0;
+	if (me_pause() < 0) {
+		log_printf("net: the Media Engine did not halt, not rejoining\n");
+		me_resume();
+		return -1;
+	}
 	ret = join(joined_id);
+	if (ret == 0)
+		net_paused = 0;
 	if (me_resume() < 0)
 		log_printf("net: the Media Engine did not restart\n");
 	return ret;

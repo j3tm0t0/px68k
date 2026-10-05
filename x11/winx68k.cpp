@@ -588,6 +588,7 @@ void WinX68k_Exec(void)
 #include <pspkernel.h>
 #include <pspgu.h>
 #include "../psp/me.h"
+#include "../psp/log.h"
 
 int exit_flag = 0;
 
@@ -603,8 +604,10 @@ int exit_callback(int arg1, int arg2, void *common)
 /* The Media Engine must not run through a suspend (psp/me.h). */
 static int power_callback(int unknown, int flags, void *common)
 {
-	if (flags & (PSP_POWER_CB_SUSPENDING | PSP_POWER_CB_STANDBY))
-		me_pause();
+	if (flags & (PSP_POWER_CB_SUSPENDING | PSP_POWER_CB_STANDBY)) {
+		if (me_pause() < 0)	/* the suspend cannot be refused */
+			log_printf("me: not halted before the suspend\n");
+	}
 	else if (flags & PSP_POWER_CB_RESUME_COMPLETE)
 		me_resume();
 	return 0;
