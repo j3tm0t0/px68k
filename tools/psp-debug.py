@@ -265,7 +265,7 @@ def main():
                 for line in run.splitlines():
                     if line.startswith("benchf: ") and " us/frame" in line:
                         result = line
-                    elif line.startswith("samp benchf: "):
+                    elif line.startswith("samp benchf: ") or line.startswith("benchf: slowest frame"):
                         samp.append(line)
             print(f"skip {skip}: {result or 'timed out'}")
             for line in samp:
