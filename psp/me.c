@@ -28,6 +28,17 @@ struct me_boot me_boot __attribute__((aligned(64)));
 static unsigned char me_stack[ME_STACK_SIZE] __attribute__((aligned(64)));
 static unsigned me_probe;	/* read cached through its user address by the ME */
 static unsigned me_prot[ME_PROT_REGS];
+/*
+ * The firmware's own reset handler, which ours replaces: the firmware resets
+ * the ME itself (clock changes: the WLAN going up or down; suspend) and waits
+ * for that handler's answer, so the PSP hung there with ours in place.  It
+ * goes back, and the firmware's ME core is restarted with it, whenever we
+ * halt (me_halt, me_pause).  0xbfc00600 on holds the handler's parameters
+ * (custom-core, safe-task): not ours to touch.
+ */
+#define ME_VECTOR_SAVE	0x200
+static unsigned me_vector[ME_VECTOR_SAVE / 4];
+static int me_vector_saved;
 static int me_started, me_paused, me_starts;
 static void (*me_loop_fn)(void);
 
@@ -80,10 +91,31 @@ static int me_reset_k(unsigned open)
 	if (open)
 		for (i = 0; i < ME_PROT_REGS; i++)
 			me_prot[i] = ((volatile unsigned *)0xbc000000)[i];
+	if (!me_vector_saved) {
+		for (i = 0; i < ME_VECTOR_SAVE / 4; i++)
+			me_vector[i] = ((volatile unsigned *)0xbfc00000)[i];
+		me_vector_saved = 1;
+	}
 	memcpy((void *)0xbfc00000, h, e - h);
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
 	*(volatile unsigned *)0xbc10004c = 0x04;	/* ME reset on */
+	__asm__ volatile("sync");
+	*(volatile unsigned *)0xbc10004c = 0;
+	__asm__ volatile("sync");
+	return 0;
+}
+
+/* Kernel mode: the firmware's reset handler back, and its ME core restarted with it. */
+static int me_giveback_k(void)
+{
+	int i;
+
+	for (i = 0; i < ME_VECTOR_SAVE / 4; i++)
+		((volatile unsigned *)0xbfc00000)[i] = me_vector[i];
+	dcache_wbinv_all();
+	__asm__ volatile("sync");
+	*(volatile unsigned *)0xbc10004c = 0x04;
 	__asm__ volatile("sync");
 	*(volatile unsigned *)0xbc10004c = 0;
 	__asm__ volatile("sync");
@@ -156,6 +188,7 @@ int me_start(void (*loop)(void))
 			open = 1;
 		else {
 			log_printf("me: no answer from the Media Engine\n");
+			me_kcall((void *)me_giveback_k, 0);
 			return -1;
 		}
 	}
@@ -166,11 +199,14 @@ int me_start(void (*loop)(void))
 		/* it needs the protection open: leave it so (until the next reboot) */
 		if (!open || me_reset_into(1) < 0) {
 			log_printf("me: the Media Engine stopped (state %08X)\n", b->state);
+			me_kcall((void *)me_giveback_k, 0);
 			return -1;
 		}
 		b->go = 1;
-		if (!me_wait(ME_RUNNING, 100))
+		if (!me_wait(ME_RUNNING, 100)) {
+			me_kcall((void *)me_giveback_k, 0);
 			return -1;
+		}
 		log_printf("me: running with the memory protection open\n");
 	} else if (open) {
 		log_printf("me: started with the protection open, now closed again\n");
@@ -228,4 +264,8 @@ void me_halt(void)
 	for (i = 0; i < 100 && b->state != ME_HALTED; i++)
 		sceKernelDelayThread(1000);
 	me_started = 0;
+	if (me_vector_saved) {
+		me_kcall((void *)me_giveback_k, 0);
+		sceKernelDelayThread(10 * 1000);	/* let the firmware's core come up */
+	}
 }

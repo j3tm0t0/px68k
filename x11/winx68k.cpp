@@ -593,6 +593,8 @@ int exit_flag = 0;
 
 int exit_callback(int arg1, int arg2, void *common)
 {
+	/* HOME > exit: the ME first, in case the emulation thread never gets there */
+	me_halt();
 	exit_flag = 1;
 
 	return 0;
@@ -999,6 +1001,11 @@ static void psp_debug_poll(void)
 			Config.SampleRate = n;	/* takes effect at the next start */
 			SaveConfig();
 			log_printf("rate %d (saved; restart to apply)\n", n);
+		} else if (strcmp(cmd, "me off") == 0) {
+			me_pause();	/* as around a clock change */
+			log_printf("me: halted, firmware handler back\n");
+		} else if (strcmp(cmd, "me on") == 0) {
+			log_printf("me: restart %s\n", me_resume() == 0 ? "ok" : "failed");
 		} else if (sscanf(cmd, "metest %d", &n) == 1 && n > 0 && n <= 20) {
 			OPM_MeTest(n);	/* the ME's OPM against this CPU's on n s of commands */
 		} else if (sscanf(cmd, "xvi %d", &n) == 1 && n >= 0 && n <= 2) {
@@ -1006,7 +1013,7 @@ static void psp_debug_poll(void)
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, metest <sec>, me on|off, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
