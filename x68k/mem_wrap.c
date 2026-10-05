@@ -263,6 +263,14 @@ cpu_writemem24_word_slow(DWORD addr, WORD val)
 		 * touch BusErrFlag, so the low byte is always written)
 		 */
 		GVRAM_WriteWord(addr & 0x00ffffff, val);
+	} else if ((addr & 0x00ffffff) - 0x00e00000 < 0x00080000) {
+		/*
+		 * Text VRAM: what wm_cnt / wm_main do there (MemWriteTable:
+		 * TVRAM_Write, which does not touch BusErrFlag), without the
+		 * dispatch: Gradius' game start writes ~3700 words a frame
+		 */
+		TVRAM_Write(addr & 0x00ffffff, (val >> 8) & 0xff);
+		TVRAM_Write((addr + 1) & 0x00ffffff, val & 0xff);
 	} else {
 		wm_cnt(addr, (val >> 8) & 0xff);
 		wm_main(addr + 1, val & 0xff);

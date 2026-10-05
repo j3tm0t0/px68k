@@ -22,7 +22,7 @@
 //	WORD	Text_LineBuf[1024];	// →BGのを使うように変更
 	BYTE	Text_TrFlag[1024];
 
-INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data);
+INLINE int TVRAM_WriteByteMask(DWORD adr, BYTE data);
 
 // -----------------------------------------------------------------------
 //   全部書き換え〜
@@ -87,27 +87,31 @@ BYTE FASTCALL TVRAM_Read(DWORD adr)
 // -----------------------------------------------------------------------
 //   1ばいと書くなり
 // -----------------------------------------------------------------------
-INLINE void TVRAM_WriteByte(DWORD adr, BYTE data)
+INLINE int TVRAM_WriteByte(DWORD adr, BYTE data)
 {
 	if (TVRAM[adr]!=data)
 	{
 		TextDirtyLine[(((adr&0x1ffff)/128)-TextScrollY)&1023] = 1;
 		TVRAM[adr] = data;
+		return 1;
 	}
+	return 0;
 }
 
 
 // -----------------------------------------------------------------------
 //   ますく付きで書くなり
 // -----------------------------------------------------------------------
-INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
+INLINE int TVRAM_WriteByteMask(DWORD adr, BYTE data)
 {
 	data = (TVRAM[adr] & CRTC_Regs[0x2e + ((adr^1) & 1)]) | (data & (~CRTC_Regs[0x2e + ((adr ^ 1) & 1)]));
 	if (TVRAM[adr] != data)
 	{
 		TextDirtyLine[(((adr&0x1ffff)/128)-TextScrollY)&1023] = 1;
 		TVRAM[adr] = data;
+		return 1;
 	}
+	return 0;
 }
 
 
@@ -116,6 +120,8 @@ INLINE void TVRAM_WriteByteMask(DWORD adr, BYTE data)
 // -----------------------------------------------------------------------
 void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 {
+	int changed = 0;
+
 	GE_GUARD_TVRAM(adr);
 	adr &= 0x7ffff;
 	adr ^= 1;
@@ -124,30 +130,39 @@ void FASTCALL TVRAM_Write(DWORD adr, BYTE data)
 		adr &= 0x1ffff;
 		if (CRTC_Regs[0x2a]&2)		// Text Mask
 		{
-			if (CRTC_Regs[0x2b]&0x10) TVRAM_WriteByteMask(adr        , data);
-			if (CRTC_Regs[0x2b]&0x20) TVRAM_WriteByteMask(adr+0x20000, data);
-			if (CRTC_Regs[0x2b]&0x40) TVRAM_WriteByteMask(adr+0x40000, data);
-			if (CRTC_Regs[0x2b]&0x80) TVRAM_WriteByteMask(adr+0x60000, data);
+			if (CRTC_Regs[0x2b]&0x10) changed |= TVRAM_WriteByteMask(adr        , data);
+			if (CRTC_Regs[0x2b]&0x20) changed |= TVRAM_WriteByteMask(adr+0x20000, data);
+			if (CRTC_Regs[0x2b]&0x40) changed |= TVRAM_WriteByteMask(adr+0x40000, data);
+			if (CRTC_Regs[0x2b]&0x80) changed |= TVRAM_WriteByteMask(adr+0x60000, data);
 		}
 		else
 		{
-			if (CRTC_Regs[0x2b]&0x10) TVRAM_WriteByte(adr        , data);
-			if (CRTC_Regs[0x2b]&0x20) TVRAM_WriteByte(adr+0x20000, data);
-			if (CRTC_Regs[0x2b]&0x40) TVRAM_WriteByte(adr+0x40000, data);
-			if (CRTC_Regs[0x2b]&0x80) TVRAM_WriteByte(adr+0x60000, data);
+			if (CRTC_Regs[0x2b]&0x10) changed |= TVRAM_WriteByte(adr        , data);
+			if (CRTC_Regs[0x2b]&0x20) changed |= TVRAM_WriteByte(adr+0x20000, data);
+			if (CRTC_Regs[0x2b]&0x40) changed |= TVRAM_WriteByte(adr+0x40000, data);
+			if (CRTC_Regs[0x2b]&0x80) changed |= TVRAM_WriteByte(adr+0x60000, data);
 		}
 	}
 	else					// シングルアクセス
 	{
 		if (CRTC_Regs[0x2a]&2)		// Text Mask
 		{
-			TVRAM_WriteByteMask(adr, data);
+			changed = TVRAM_WriteByteMask(adr, data);
 		}
 		else
 		{
-			TVRAM_WriteByte(adr, data);
+			changed = TVRAM_WriteByte(adr, data);
 		}
 	}
+	/*
+	 * TextDrawWork (the 4 planes of this byte as 8 dots) only changes when
+	 * a plane did: every writer keeps it in step with TVRAM (here,
+	 * TVRAM_RCUpdate, TVRAM_Init).  Games clear text that is clear already
+	 * (Gradius' game start: 87 % of ~7400 writes a frame change nothing),
+	 * and each recomputation reads 4 tables and a TextDrawWork line.
+	 */
+	if (!changed)
+		return;
 #ifdef USE_ASM
 	_asm {
 		push	edi
