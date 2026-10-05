@@ -1381,7 +1381,14 @@ int main(int argc, char *argv[])
 		    && (Config.NoWaitMode || Timer_GetCount())) {
 #endif
 #ifdef PSP
+			static unsigned tick;
 			unsigned t0 = sceKernelGetSystemTimeLow();
+
+			/* No Auto Sleep or screen off while emulating: the pad may sit idle (demo, debug runs). */
+			if (t0 - tick > 1000 * 1000) {
+				scePowerTick(PSP_POWER_TICK_ALL);
+				tick = t0;
+			}
 			WinX68k_Exec();
 			PROF_SET(PS_DEBUG);
 			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
