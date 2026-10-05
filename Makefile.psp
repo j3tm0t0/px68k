@@ -64,7 +64,19 @@ SDL_INCLUDE=	$(shell $(SDL_CONFIG) --cflags | sed "s|-I/psp/|-I$(PSPDEV)/psp/|g"
 SDL_LIB=	$(shell $(SDL_CONFIG) --libs | sed "s|-L/psp/|-L$(PSPDEV)/psp/|g")
 
 INCDIR = ./x11 ./x68k ./fmgen ./win32api
-CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION)
+CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION) $(XCFLAGS)
+# XCFLAGS: extra flags for an experiment, e.g. -DPROF_TIMERS ("prof on"), or
+# profile-guided optimization (trained in PPSSPP: the counts do not depend on
+# the speed):
+#   make -f Makefile.psp clean; make -f Makefile.psp XCFLAGS="-DPX68K_GCOV -fprofile-generate -fprofile-update=single"
+#   run it with PSP/GAME/PX68K/gcda/{m68000,x68k,x11,fmgen,win32api,psp}/ made
+#   beforehand (libgcov makes no directories), play, debug command "gcov";
+#   copy gcda/*/*.gcda next to the objects, then
+#   make -f Makefile.psp clean; make -f Makefile.psp XCFLAGS="-fprofile-use -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch"
+#   (find . -name '*.gcda' -delete afterwards)
+ifneq ($(findstring PX68K_GCOV,$(XCFLAGS)),)
+CFLAGS += -DPX68K_GCOV_STRIP='"$(words $(subst /, ,$(CURDIR)))"'
+endif
 # for debugging
 #CFLAGS = -g -G0 -Wall $(SDL_INCLUDE)
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti

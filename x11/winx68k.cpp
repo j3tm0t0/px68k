@@ -639,6 +639,9 @@ int SetupCallbacks(void)
 #include "../psp/log.h"
 #include "../psp/net.h"
 
+#ifdef PX68K_GCOV
+extern "C" void __gcov_dump(void);
+#endif
 int prof_on;
 unsigned prof_us[PROF_N];
 unsigned prof_count[PROF_COUNT_N];
@@ -991,6 +994,14 @@ static void psp_debug_poll(void)
 				log_printf("samp: %d s every %u us, cpu %d/%d MHz%s\n", n, bf_period, scePowerGetCpuClockFrequency(),
 					   scePowerGetBusClockFrequency(), psp_samp_wlan ? ", WLAN up" : "");
 			}
+#ifdef PX68K_GCOV
+		} else if (strcmp(cmd, "gcov") == 0) {
+			/* profile counts (Makefile.psp: XCFLAGS) to PSP/GAME/PX68K/gcda/ */
+			setenv("GCOV_PREFIX", "ms0:/PSP/GAME/PX68K/gcda", 1);
+			setenv("GCOV_PREFIX_STRIP", PX68K_GCOV_STRIP, 1);	/* the build directory */
+			__gcov_dump();
+			log_printf("gcov: dumped\n");
+#endif
 		} else if (strcmp(cmd, "prof on") == 0 || strcmp(cmd, "prof off") == 0) {
 			prof_on = cmd[6] == 'n';
 		} else if (strcmp(cmd, "fps on") == 0 || strcmp(cmd, "fps off") == 0) {
