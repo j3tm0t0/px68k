@@ -13,18 +13,25 @@ struct me_boot {
 	unsigned sp, gp;
 	void (*loop)(void);
 	unsigned halt;		/* main -> ME: return from loop */
-	unsigned state;		/* ME -> main: ME_RUNNING, ME_HALTED */
-	unsigned pad[11];
+	unsigned go;		/* main -> ME: run loop (the protection is set) */
+	unsigned state;		/* ME -> main: ME_READY, ME_RUNNING, ME_HALTED */
+	unsigned pad[10];
 };
+#define ME_READY	0x4d45ac00
 #define ME_RUNNING	0x4d45ac01
 #define ME_HALTED	0x4d45ac02
 
+/* 0xbc000000-0xbc000044: main RAM protection, user access to hardware registers */
+#define ME_PROT_REGS	18
+
 struct me_boot me_boot __attribute__((aligned(64)));
 static unsigned char me_stack[ME_STACK_SIZE] __attribute__((aligned(64)));
-static int me_started, me_paused;
+static unsigned me_probe;	/* read cached through its user address by the ME */
+static unsigned me_prot[ME_PROT_REGS];
+static int me_started, me_paused, me_starts;
 static void (*me_loop_fn)(void);
 
-extern char me_reset[], me_reset_end[];
+extern char me_reset[], me_reset_end[], me_reset_open[], me_reset_open_end[];
 
 static volatile struct me_boot *boot(void)
 {
@@ -49,17 +56,31 @@ void me_main(void)
 {
 	volatile struct me_boot *b = boot();
 
-	b->state = ME_RUNNING;
+	b->state = ME_READY;
+	while (!b->go)
+		me_spin(64);
+	/* main RAM through the user segment, as the loop's objects are */
+	b->state = ME_RUNNING + *(volatile unsigned *)&me_probe;
 	b->loop();
 	/* Nothing of ours may be written back later over the next program. */
 	dcache_wbinv_all();
 	b->state = ME_HALTED;
 }
 
-/* Kernel mode (kuKernelCall): put me_reset at the ME's reset vector and reset it. */
-static int me_reset_k(void)
+/*
+ * Kernel mode (kuKernelCall): put a handler at the ME's reset vector and
+ * reset it. arg1: me_reset_open, after saving the protection it opens.
+ */
+static int me_reset_k(unsigned open)
 {
-	memcpy((void *)0xbfc00000, me_reset, me_reset_end - me_reset);
+	char *h = open ? me_reset_open : me_reset;
+	char *e = open ? me_reset_open_end : me_reset_end;
+	int i;
+
+	if (open)
+		for (i = 0; i < ME_PROT_REGS; i++)
+			me_prot[i] = ((volatile unsigned *)0xbc000000)[i];
+	memcpy((void *)0xbfc00000, h, e - h);
 	dcache_wbinv_all();
 	__asm__ volatile("sync");
 	*(volatile unsigned *)0xbc10004c = 0x04;	/* ME reset on */
@@ -69,12 +90,58 @@ static int me_reset_k(void)
 	return 0;
 }
 
+/* Kernel mode: put back what me_reset_open opened. */
+static int me_protect_k(void)
+{
+	int i;
+
+	for (i = 0; i < ME_PROT_REGS; i++)
+		((volatile unsigned *)0xbc000000)[i] = me_prot[i];
+	__asm__ volatile("sync");
+	return 0;
+}
+
+static int me_kcall(void *f, unsigned arg)
+{
+	KernelCallArg args;
+
+	memset(&args, 0, sizeof(args));
+	args.arg1 = arg;
+	return kuKernelCall(f, &args);
+}
+
+static int me_wait(unsigned state, int ms)
+{
+	volatile struct me_boot *b = boot();
+
+	while (b->state != state && ms-- > 0)
+		sceKernelDelayThread(1000);
+	return b->state == state;
+}
+
+/* Reset the ME into me_main (waiting for go); 1 = with the open handler. */
+static int me_reset_into(int open)
+{
+	volatile struct me_boot *b = boot();
+	int ret;
+
+	b->state = 0;
+	b->go = 0;
+	/* What the ME reads cached (code, tables, its objects) must be in RAM. */
+	sceKernelDcacheWritebackInvalidateAll();
+	ret = me_kcall((void *)me_reset_k, open);
+	if (ret < 0) {
+		log_printf("me: kuKernelCall failed %08X\n", ret);
+		return -1;
+	}
+	return me_wait(ME_READY, 200) ? 0 : -1;
+}
+
 int me_start(void (*loop)(void))
 {
 	volatile struct me_boot *b = boot();
-	KernelCallArg args;
 	unsigned gp;
-	int i, ret;
+	int open = 0;
 
 	if (me_started)
 		return 0;
@@ -84,22 +151,32 @@ int me_start(void (*loop)(void))
 	b->gp = gp;
 	b->loop = loop;
 	b->halt = 0;
-	b->state = 0;
-	/* What the ME reads cached (code, tables, its objects) must be in RAM. */
-	sceKernelDcacheWritebackInvalidateAll();
-	memset(&args, 0, sizeof(args));
-	ret = kuKernelCall((void *)me_reset_k, &args);
-	if (ret < 0) {
-		log_printf("me: kuKernelCall failed %08X\n", ret);
-		return -1;
+	if (me_reset_into(0) < 0) {
+		if (b->state == 0 && me_reset_into(1) == 0)
+			open = 1;
+		else {
+			log_printf("me: no answer from the Media Engine\n");
+			return -1;
+		}
 	}
-	for (i = 0; i < 200 && b->state != ME_RUNNING; i++)
-		sceKernelDelayThread(1000);
-	if (b->state != ME_RUNNING) {
-		log_printf("me: no answer from the Media Engine\n");
-		return -1;
+	if (open)
+		me_kcall((void *)me_protect_k, 0);
+	b->go = 1;
+	if (!me_wait(ME_RUNNING, 100)) {
+		/* it needs the protection open: leave it so (until the next reboot) */
+		if (!open || me_reset_into(1) < 0) {
+			log_printf("me: the Media Engine stopped (state %08X)\n", b->state);
+			return -1;
+		}
+		b->go = 1;
+		if (!me_wait(ME_RUNNING, 100))
+			return -1;
+		log_printf("me: running with the memory protection open\n");
+	} else if (open) {
+		log_printf("me: started with the protection open, now closed again\n");
 	}
 	me_started = 1;
+	me_starts++;
 	me_loop_fn = loop;
 	return 0;
 }
@@ -112,6 +189,11 @@ int me_halting(void)
 int me_running(void)
 {
 	return me_started && boot()->state == ME_RUNNING;
+}
+
+int me_start_count(void)
+{
+	return me_starts;
 }
 
 int me_paused_now(void)

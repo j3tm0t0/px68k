@@ -1075,10 +1075,29 @@ static void psp_arec_finish(void)
 	DSound_RecBuf = NULL;
 }
 
+/*
+ * The ME is halted around the clock changes px68k makes (net.c, suspend);
+ * the firmware makes none of its own while px68k runs, as far as known.
+ * Report one that happens anyway with the ME running.
+ */
+static void psp_check_clock(void)
+{
+	static int clk, starts;
+	int now = scePowerGetCpuClockFrequencyInt() * 1000 + scePowerGetBusClockFrequencyInt();
+
+	if (clk && now != clk && me_running() && starts == me_start_count())
+		log_printf("me: clock %d/%d -> %d/%d MHz with the Media Engine running\n",
+			   clk / 1000, clk % 1000, now / 1000, now % 1000);
+	clk = now;
+	starts = me_start_count();
+}
+
 static void psp_count_fps(void)
 {
 	static unsigned start, emu, shown;
 	unsigned now = timeGetTime();
+
+	psp_check_clock();
 
 	if (DSound_RecBuf && DSound_RecPos >= DSound_RecLen)
 		psp_arec_finish();

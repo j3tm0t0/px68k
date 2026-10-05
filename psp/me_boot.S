@@ -1,37 +1,34 @@
 /*
- * Media Engine start-up (psp/me.c). me_reset is copied to the ME's reset
- * vector (0xbfc00000) by me_start; it is relocated with the module before
- * that, so its absolute addresses stay right. The register setup follows
+ * Media Engine start-up (psp/me.c). One of the handlers below is copied to
+ * the ME's reset vector (0xbfc00000) by me_start; it is relocated with the
+ * module before that, so its absolute addresses stay right. They follow
  * meLibHandler of mcidclan's psp-media-engine-custom-core (MIT, Copyright (c)
- * 2026 mcidclan): with only the clocks and the memory access bit set (as in
- * his older me-minimal-handler), the ME never reached our code on a PSP Go.
- * Opening the protection registers also opens kernel memory to user mode
- * until the next reboot.
+ * 2026 mcidclan): bus clocks on, the ME's access to main memory (bit 1 of
+ * 0xbc100040, keeping the other bits), Status with CU0/CU1 and without
+ * ERL/BEV, then a jump into our code in the kernel segment.
+ *
+ * me_reset_open also clears the NMI flags and opens the protection registers
+ * 0xbc000000-0xbc000044 as meLibHandler does (custom-core's
+ * meLibUnlockMemory/meLibUnlockHwUserRegisters: the memory protection of the
+ * main RAM and the user access to hardware registers); me_start uses it
+ * only if me_reset does not get the ME to our code, and puts the protection
+ * back once it is there.
  */
 	.set	noreorder
 	.set	noat
 	.text
 
-	.globl	me_reset
-	.globl	me_reset_end
-me_reset:
+.macro	ME_CLOCKS
 	li	$k0, 0xbc100000
 	li	$k1, 0x0f
 	sw	$k1, 0x50($k0)		/* bus clocks: ME, AW bus A and B, eDRAM */
 	lw	$k1, 0x40($k0)
 	ori	$k1, $k1, 0x02
 	sw	$k1, 0x40($k0)		/* ME access to main memory */
-	li	$k1, -1
-	sw	$k1, 0x04($k0)		/* clear the NMI flags */
 	sync
-	/* open the memory and hardware register protection to the ME */
-	li	$k0, 0xbc000000
-1:	sw	$k1, 0($k0)
-	addiu	$k0, $k0, 4
-	li	$at, 0xbc000048
-	bne	$k0, $at, 1b
-	nop
-	sync
+.endm
+
+.macro	ME_JUMP
 	li	$k0, 0x30000000		/* Status: CU0, CU1; ERL and BEV off */
 	mtc0	$k0, $12
 	sync
@@ -40,7 +37,31 @@ me_reset:
 	or	$k0, $k0, $k1
 	jr	$k0
 	nop
+.endm
+
+	.globl	me_reset
+	.globl	me_reset_end
+me_reset:
+	ME_CLOCKS
+	ME_JUMP
 me_reset_end:
+
+	.globl	me_reset_open
+	.globl	me_reset_open_end
+me_reset_open:
+	ME_CLOCKS
+	li	$k0, 0xbc100000
+	li	$k1, -1
+	sw	$k1, 0x04($k0)		/* clear the NMI flags */
+	li	$k0, 0xbc000000
+1:	sw	$k1, 0($k0)
+	addiu	$k0, $k0, 4
+	li	$at, 0xbc000048
+	bne	$k0, $at, 1b
+	nop
+	sync
+	ME_JUMP
+me_reset_open_end:
 
 /*
  * On the ME. Its caches may still hold lines of whatever ran there before
