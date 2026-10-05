@@ -20,7 +20,10 @@ int net_start(const char *const *profile_paths, int count);
  * -1: refused, the Media Engine could not be halted for the clock change.
  */
 int net_pause(void);
-/* Rejoin after net_pause; returns 0 once an IP address is held. */
+/*
+ * Rejoin after net_pause; returns 0 once an IP address is held. On failure
+ * it keeps retrying in the background.
+ */
 int net_resume(void);
 
 #ifdef __cplusplus

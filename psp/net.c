@@ -19,7 +19,7 @@
 /* Connect with a saved setting; returns 0 once an IP is held. */
 static int connect_profile(int id)
 {
-	int state, progressed = 0;
+	int state = -1, progressed = 0;
 	SceUInt64 start;
 
 	if (sceNetApctlConnect(id) != 0)
@@ -38,6 +38,8 @@ static int connect_profile(int id)
 			break;
 		sceKernelDelayThread(50 * 1000);
 	}
+	log_printf("net: setting %d: no IP (state %d%s)\n", id, state,
+		   progressed ? ", dropped" : "");
 	sceNetApctlDisconnect();
 	return -1;
 }
@@ -157,6 +159,33 @@ int net_pause(void)
 	return 0;
 }
 
+/*
+ * A rejoin that fails (the access point not answering for a while) is
+ * retried here with growing pauses until it works: without the WLAN the
+ * debug port, the only way in, stays dark (its server listens again by
+ * itself once the WLAN is back).
+ */
+static SceUID rejoin_thid = -1;
+
+static int rejoin_thread(SceSize args, void *argp)
+{
+	int wait = 5;
+
+	while (net_paused) {
+		sceKernelDelayThread(wait * 1000 * 1000);
+		if (join(joined_id) == 0) {
+			net_paused = 0;
+			log_printf("net: rejoined\n");
+			break;
+		}
+		if (wait < 60)
+			wait *= 2;
+		log_printf("net: rejoin failed, again in %d s\n", wait);
+	}
+	rejoin_thid = -1;
+	return sceKernelExitDeleteThread(0);
+}
+
 int net_resume(void)
 {
 	int ret;
@@ -165,8 +194,18 @@ int net_resume(void)
 		return -1;
 	if (!net_paused)	/* never left (net_pause refused) */
 		return 0;
+	if (rejoin_thid >= 0)
+		return -1;	/* being retried */
 	ret = join(joined_id);
-	if (ret == 0)
+	if (ret == 0) {
 		net_paused = 0;
+		return 0;
+	}
+	rejoin_thid = sceKernelCreateThread("net_rejoin", rejoin_thread, 0x30, 0x2000, 0, NULL);
+	if (rejoin_thid >= 0 && sceKernelStartThread(rejoin_thid, 0, NULL) < 0) {
+		sceKernelDeleteThread(rejoin_thid);
+		rejoin_thid = -1;
+	}
+	log_printf("net: rejoin failed%s\n", rejoin_thid >= 0 ? ", retrying" : "");
 	return ret;
 }
