@@ -17,6 +17,8 @@
                                       <frame> on flat out without the WLAN, once
                                       per frame skip given; prints the results
                                       (BENCH_PROF=0: without the profiler,
+                                      BENCH_PROF=2: the sampling profiler, every
+                                      BENCH_PERIOD us (default 250),
                                       BENCH_RT=1: paced in real time with sound)
   psp-debug.py pause | resume         stop / restart the emulation
   psp-debug.py back                   return to pspbrew.dev (ends `psp.py run`)
@@ -234,7 +236,8 @@ def main():
         for skip in args[2:]:
             s = connect()
             drain(s)
-            s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '1')} {os.environ.get('BENCH_RT', '0')}\n".encode())
+            s.sendall(f"benchf {start} {frames} {skip} {os.environ.get('BENCH_PROF', '1')} {os.environ.get('BENCH_RT', '0')} "
+                      f"{os.environ.get('BENCH_PERIOD', '250')}\n".encode())
             s.close()
             deadline = time.time() + float(os.environ.get("BENCH_TIMEOUT", "900"))
             result = None
@@ -257,10 +260,15 @@ def main():
                     pass
                 s.close()
                 run = text.decode("utf-8", "replace").split(f"debug: > benchf {start} {frames} {skip} ")[-1]
+                samp = []
                 for line in run.splitlines():
                     if line.startswith("benchf: ") and " us/frame" in line:
                         result = line
+                    elif line.startswith("samp benchf: "):
+                        samp.append(line)
             print(f"skip {skip}: {result or 'timed out'}")
+            for line in samp:
+                print(f"skip {skip}: {line}")
     elif cmd in ("pause", "resume"):
         s = connect()
         drain(s)

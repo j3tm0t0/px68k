@@ -148,8 +148,12 @@ static void sound_send(int length)
 #endif
 	SDL_LockAudio();
 	PROF_BEGIN(snd);
+	PROF_ENTER(PS_SYN_ADPCM);
+	PROF_EV(PEV_SYN_SAMPLES, length);
 	ADPCM_Update((short *)pbwp, length, rate, pbsp, pbep);
+	PROF_SET(PS_SYN_OPM);
 	OPM_Update((short *)pbwp, length, rate, pbsp, pbep);
+	PROF_LEAVE();
 #ifndef	NO_MERCURY
 	//Mcry_Update((short *)pcmbufp, length);
 #endif
@@ -278,7 +282,9 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 {
 	long avail = pbwp - pbrp;
 	int n, first;
+	PROF_ENTER(PS_CB);
 
+	PROF_EV(PEV_CB, 1);
 	if (avail < 0)
 		avail += PCMBUF_SIZE;
 	n = avail < len ? (int)avail : len;
@@ -303,9 +309,12 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		int frames = (len - n) / 4, step = 44100 / (int)userdata;
 
 		DSound_Underruns++;
+		PROF_SET(PS_CB_SYN);
+		PROF_EV(PEV_CB_SAMPLES, frames / step);
 		memset(out, 0, len - n);
 		ADPCM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
 		OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+		PROF_SET(PS_CB);
 	}
 	smooth((short *)sdlsndbuf, len / 4, 44100 / (int)userdata);
 	if (DSound_RecBuf && DSound_RecPos < DSound_RecLen) {
@@ -322,6 +331,7 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		}
 	}
 	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
+	PROF_LEAVE();
 }
 #else
 static void

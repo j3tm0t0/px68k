@@ -368,7 +368,11 @@ void FASTCALL BG_Write(DWORD adr, BYTE data)
 		adr -= 0xeb8000;
 		if (BG[adr]==data) return;			// データに変化が無ければ帰る
 #ifdef PSP
-		GE_BGData(adr, data);	/* before BG[] changes */
+		{
+			PROF_ENTER(PS_GE_GUARD);
+			GE_BGData(adr, data);	/* before BG[] changes */
+			PROF_LEAVE();
+		}
 #endif
 		BG[adr] = data;
 #ifdef BG_USE_CHRBUF

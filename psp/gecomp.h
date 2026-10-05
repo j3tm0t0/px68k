@@ -21,6 +21,7 @@
 #ifdef PSP
 
 #include "common.h"
+#include "prof.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +68,7 @@ extern int GE_G16Live;
 void GE_G16Write(DWORD a);
 /* GVRAM bytes a .. a + n - 1 changed (word aligned), e.g. by a fast clear: as GE_GVRAM_ROW for each word */
 void GE_GvramSpan(DWORD a, DWORD n);
-#define GE_GVRAM_ROW(a)		do { if (GE_G16Live) GE_G16Write(a); \
+#define GE_GVRAM_ROW(a)		do { if (GE_G16Live) { PROF_ENTER(PS_GE_GUARD); GE_G16Write(a); PROF_LEAVE(); } \
 				     else GE_GRowGen[((a) >> 10) & 511]++; } while (0)
 /* TVRAM_Write: the TextDrawWork byte at a * 8 changed */
 #define GE_TVRAM_TOUCH(a)	(GE_TRowGen[((a) >> 7) & 0x3ff]++)
@@ -76,10 +77,12 @@ extern DWORD GE_Pal16Gen;
 /* windraw.c: ScrBufL row y was written by the CPU */
 void GE_ScrRowWritten(DWORD y);
 
-#define GE_GUARD_GVRAM(a)	do { if (GE_Guard) GE_GvramGuard(a); } while (0)
-#define GE_GUARD_TVRAM(a)	do { if (GE_Guard) GE_TvramGuard(a); } while (0)
-#define GE_GUARD_SPRITE()	do { if (GE_Guard) GE_SpriteGuard(); } while (0)
-#define GE_GUARD_FULL(why)	do { if (GE_Guard) GE_FullGuard(why); } while (0)
+/* (the time of the guards, "samp": PS_GE_GUARD; their waits: PS_GE_BUILD / PS_GE_WAIT) */
+#define GE_GUARD_CALL(f)	do { if (GE_Guard) { PROF_ENTER(PS_GE_GUARD); f; PROF_LEAVE(); } } while (0)
+#define GE_GUARD_GVRAM(a)	GE_GUARD_CALL(GE_GvramGuard(a))
+#define GE_GUARD_TVRAM(a)	GE_GUARD_CALL(GE_TvramGuard(a))
+#define GE_GUARD_SPRITE()	GE_GUARD_CALL(GE_SpriteGuard())
+#define GE_GUARD_FULL(why)	GE_GUARD_CALL(GE_FullGuard(why))
 
 /* windraw.c, WinDraw_DrawLine: 1 if line VLINE is left to the GE */
 int GE_Line(void);

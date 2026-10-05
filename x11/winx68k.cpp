@@ -441,6 +441,8 @@ void WinX68k_Exec(void)
 			C68K.ICount = n;
 			{
 				PROF_BEGIN(cpu);
+				PROF_SET(PS_CPU);
+				PROF_EV(PEV_SLICES, 1);
 				C68k_Exec(&C68K, C68K.ICount);
 				PROF_END(cpu, PROF_CPU);
 			}
@@ -461,6 +463,7 @@ void WinX68k_Exec(void)
 
 		{
 			PROF_BEGIN(slice);
+			PROF_SET(PS_SLICE);
 			MFP_Timer(usedclk);
 			RTC_Timer(usedclk);
 			/* DMA_Exec does nothing (no side effect) unless the channel is active */
@@ -476,6 +479,8 @@ void WinX68k_Exec(void)
 			if ( (MFP[MFP_TACR]&15)==8 ) MFP_TimerA();	/* event count mode only */
 			if ( (MFP[MFP_AER]&0x40)&&(vline==CRTC_IntLine) )
 				MFP_Int(1);
+			PROF_SET(PS_LINE);
+			PROF_EV(PEV_HLINES, 1);
 			if ( (!DispFrame)&&(vline>=CRTC_VSTART)&&(vline<CRTC_VEND) ) {
 				if ( CRTC_VStep==1 ) {				// HighReso 256dot（2度読み）
 					if ( vline%2 )
@@ -539,6 +544,8 @@ void WinX68k_Exec(void)
 		}
 	} while ( vline<VLINE_TOTAL );
 
+	PROF_SET(PS_FRAME);
+	PROF_EV(PEV_FRAMES, 1);
 	if ( CRTC_Mode&2 ) {		// FastClrビットの調整（PITAPAT）
 		if ( CRTC_FastClr ) {	// FastClr=1 且つ CRTC_Mode&2 なら 終了
 			CRTC_FastClr--;
@@ -567,6 +574,7 @@ void WinX68k_Exec(void)
 	else
 		WinDraw_Flush();	/* show the last drawn frame; its swap waits for the GE */
 #endif
+	PROF_SET(PS_FRAME);
 	TimerICount += clk_total;
 
 	t_end = timeGetTime();
@@ -650,6 +658,10 @@ static SceUInt64 psp_bf_t0;
 static int psp_bf_skip, psp_bf_prof, psp_bf_saved_skip, psp_bf_saved_prof;
 static int psp_bf_rt;	/* benchf in real time: paced, with the sound callback, as in play */
 static unsigned psp_bf_exec_us;
+static unsigned psp_bf_period;	/* benchf prof 2: sampling period, us */
+/* "samp": a window of real time (as played) under the sampling profiler (psp/prof.h) */
+static unsigned psp_samp_end, psp_samp_frame0, psp_samp_t0;
+static int psp_samp_wlan;	/* the WLAN stays up during the window */
 /* capf: frame whose composited screen goes to cap.raw (0: none). */
 static unsigned psp_cap_frame;
 static int psp_cap_saved_skip;
@@ -754,6 +766,13 @@ static void psp_debug_frame(unsigned us)
 	if (!psp_debug_on)
 		return;
 	psp_frame_no++;
+	if (psp_samp_end && (int)(timeGetTime() - psp_samp_end) >= 0) {
+		prof_samp_stop();
+		prof_samp_report("window", sceKernelGetSystemTimeLow() - psp_samp_t0, psp_frame_no - psp_samp_frame0);
+		psp_samp_end = 0;
+		if (!psp_samp_wlan)
+			log_printf("samp: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
+	}
 	if (psp_cap_frame && psp_frame_no == psp_cap_frame) {
 		psp_capture();
 		psp_cap_frame = 0;
@@ -773,9 +792,11 @@ static void psp_debug_frame(unsigned us)
 			if (psp_bf_rt)
 				DSound_Play();
 			psp_bf_exec_us = 0;
-			prof_on = psp_bf_prof;	/* the timers cost time too */
+			prof_on = psp_bf_prof == 1;	/* the timers cost time too */
 			memset(prof_us, 0, sizeof(prof_us));
 			memset(prof_count, 0, sizeof(prof_count));
+			if (psp_bf_prof == 2 && prof_samp_start(psp_bf_period) != 0)
+				log_printf("benchf: no sampling (alarm failed)\n");
 			psp_bf_t0 = sceKernelGetSystemTimeWide();
 			return;
 		}
@@ -787,6 +808,10 @@ static void psp_debug_frame(unsigned us)
 			if (psp_frame_no < psp_bf_end)
 				return;	/* no per-second log while measuring */
 			total = (unsigned)(sceKernelGetSystemTimeWide() - psp_bf_t0);
+			if (psp_bf_prof == 2) {
+				prof_samp_stop();
+				prof_samp_report("benchf", total, n);
+			}
 			Config.NoWaitMode = 0;
 			Config.FrameRate = psp_bf_saved_skip;
 			prof_on = psp_bf_saved_prof;
@@ -864,7 +889,7 @@ static void psp_debug_poll(void)
 {
 	char cmd[128], arg[128], btn;
 	int n, dx, dy;
-	unsigned bf_start, bf_frames;
+	unsigned bf_start, bf_frames, bf_period;
 
 	if (!psp_debug_on)
 		return;
@@ -907,13 +932,15 @@ static void psp_debug_poll(void)
 			psp_fps_start = timeGetTime();
 			psp_emu_frames = psp_drawn_frames = 0;
 			psp_exec_us = psp_exec_max_us = 0;
-		} else if ((dx = 1, dy = 0, sscanf(cmd, "benchf %u %u %d %d %d", &bf_start, &bf_frames, &n, &dx, &dy)) >= 3 && bf_start > 0 &&
-			   bf_frames > 0 && n >= 1 && n <= 6 && !psp_bf_end && !psp_bench_end) {
+		} else if ((dx = 1, dy = 0, bf_period = 250,
+			    sscanf(cmd, "benchf %u %u %d %d %d %u", &bf_start, &bf_frames, &n, &dx, &dy, &bf_period)) >= 3 && bf_start > 0 &&
+			   bf_frames > 0 && n >= 1 && n <= 6 && dx >= 0 && dx <= 2 && !psp_bf_end && !psp_bench_end && !psp_samp_end) {
 			/* Deterministic: same frames after a reset, run flat out. */
 			psp_bf_start = bf_start;
 			psp_bf_end = bf_start + bf_frames;
 			psp_bf_skip = n;
-			psp_bf_prof = dx != 0;
+			psp_bf_prof = dx;	/* 1: the timers, 2: the sampling profiler */
+			psp_bf_period = bf_period;
 			psp_bf_rt = dy != 0;
 			psp_frame_no = 0;
 			DSound_Stop();	/* deterministic, see capf */
@@ -944,6 +971,26 @@ static void psp_debug_poll(void)
 		} else if (strcmp(cmd, "reset") == 0) {
 			WinX68k_Reset();
 			log_printf("reset\n");
+		} else if ((bf_period = 250, dx = 0, sscanf(cmd, "samp %d %u %d", &n, &bf_period, &dx)) >= 1 && n > 0 && n <= 600 &&
+			   !psp_samp_end && !psp_bf_end && !psp_bench_end) {
+			/*
+			 * As played (paced, sound on): n s under the sampling profiler,
+			 * without the WLAN unless asked (it caps the clocks).
+			 */
+			psp_samp_wlan = dx != 0;
+			if (!psp_samp_wlan)
+				net_pause();
+			if (prof_samp_start(bf_period) != 0) {
+				log_printf("samp: the alarm failed\n");
+				if (!psp_samp_wlan)
+					net_resume();
+			} else {
+				psp_samp_frame0 = psp_frame_no;
+				psp_samp_t0 = sceKernelGetSystemTimeLow();
+				psp_samp_end = timeGetTime() + n * 1000;
+				log_printf("samp: %d s every %u us, cpu %d/%d MHz%s\n", n, bf_period, scePowerGetCpuClockFrequency(),
+					   scePowerGetBusClockFrequency(), psp_samp_wlan ? ", WLAN up" : "");
+			}
 		} else if (strcmp(cmd, "prof on") == 0 || strcmp(cmd, "prof off") == 0) {
 			prof_on = cmd[6] == 'n';
 		} else if (strcmp(cmd, "fps on") == 0 || strcmp(cmd, "fps off") == 0) {
@@ -981,7 +1028,7 @@ static void psp_debug_poll(void)
 			log_printf("xvi %d\n", n);
 		} else {
 			log_printf("commands: fdd <0|1> <path>, eject <0|1>, reset, fps on|off, "
-				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1] [rt 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
+				   "skip <1-7>, nowait <0|1>, xvi <0|1|2>, arec <sec>, rate <Hz>, ge [on|off|time on|time off], bench <sec>, cpubench <0-2> <Mcycles> [slice], benchf <frame> <frames> <skip> [prof 0|1|2] [rt 0|1] [period us], samp <sec> [period us] [wlan 0|1], capf <frame>, prof on|off, mouse <dx> <dy>, mbtn <l|r> <0|1>, "
 				   "pad, shot, get, push, exec, launch, quit\n");
 		}
 	}
@@ -1315,8 +1362,10 @@ int main(int argc, char *argv[])
 #ifdef PSP
 			unsigned t0 = sceKernelGetSystemTimeLow();
 			WinX68k_Exec();
+			PROF_SET(PS_DEBUG);
 			psp_debug_frame(sceKernelGetSystemTimeLow() - t0);
 			psp_count_fps();
+			PROF_SET(PS_IDLE);
 #else
 			WinX68k_Exec();
 #endif
