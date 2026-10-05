@@ -722,6 +722,7 @@ static void psp_capture(void)
 	log_printf("capf: frame %u, %dx%d -> %s\n", psp_frame_no, TextDotX, TextDotY, psp_cap_path);
 }
 static unsigned psp_bench_end;	/* timeGetTime() at which a bench run ends */
+static unsigned psp_idle_us = 200, psp_idle_polls;	/* psp_frame_due */
 static unsigned psp_padat[8];	/* "padat": frames (after a benchf reset) to press circle at */
 static int psp_padat_n;
 static char psp_dev[8];	/* "ms0:" or "ef0:" */
@@ -870,13 +871,15 @@ static void psp_debug_frame(unsigned us)
 				 me_regs, me_put / 1000, me_put / 100 % 10);
 		DSound_MeWaitMax = 0;
 		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d%s"
-			 " send %u.%u cb %u.%u ms/s\n",
+			 " send %u.%u cb %u.%u ms/s idle %u\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
 			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns, me,
-			   DSound_SendUs / 1000, DSound_SendUs / 100 % 10, DSound_CbUs / 1000, DSound_CbUs / 100 % 10);
+			   DSound_SendUs / 1000, DSound_SendUs / 100 % 10, DSound_CbUs / 1000, DSound_CbUs / 100 % 10,
+			   psp_idle_polls);
 		DSound_SendUs = DSound_CbUs = 0;
+		psp_idle_polls = 0;
 	}
 	DSound_Underruns = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
@@ -1052,6 +1055,9 @@ static void psp_debug_poll(void)
 			}
 			for (k = 0; k < psp_padat_n; k++)
 				log_printf("padat: circle at frame %u\n", psp_padat[k]);
+		} else if (sscanf(cmd, "idle %d", &n) == 1 && n >= 0 && n <= 5000) {
+			psp_idle_us = n;
+			log_printf("idle %d us\n", n);
 		} else if (sscanf(cmd, "me nomix %d", &n) == 1) {
 			OPM_MeNoMix(n);	/* the ME's cost to this CPU without its mixing */
 			log_printf("me: nomix %d\n", n);
@@ -1082,12 +1088,24 @@ extern "C" int WinDraw_FpsEmu10, WinDraw_FpsShown;
  */
 #define PSP_SND_LEAD_MS	35
 
+/*
+ * Waiting for the next frame, the main loop spun flat out (pad, debug port,
+ * this test): with the OPM on the ME each test is an uncached read, and that
+ * stream slowed everything else on the bus (the GE drawing the frame, the
+ * ME).  A short sleep instead; "idle <us>" (0: spin) for comparisons.
+ */
+
 static int psp_frame_due(void)
 {
 	int due = Timer_GetCount();	/* keeps the timer current either way */
 
 	if (DSound_Enabled())
-		return DSound_BufferedMs() < PSP_SND_LEAD_MS;
+		due = DSound_BufferedMs() < PSP_SND_LEAD_MS;
+	if (!due) {
+		psp_idle_polls++;
+		if (psp_idle_us)
+			sceKernelDelayThread(psp_idle_us);
+	}
 	return due;
 }
 
