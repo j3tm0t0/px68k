@@ -4,6 +4,7 @@
 
 #include "log.h"
 #include "prof.h"
+#include "gecomp.h"
 
 /*
  * The sampling profiler of prof.h: an alarm (an interrupt handler: no
@@ -23,6 +24,7 @@ static SceUID prof_alarm = -1;
 static unsigned prof_ev0[PEV_N];
 static unsigned prof_run0;	/* this thread's run time at the start, us */
 static unsigned prof_t0;
+static unsigned prof_ge0[3];	/* GE_StatFlushes, GE_Stat[GE_ST_WAIT_US], [GE_ST_FRAME_WAIT_US] at the start */
 /* every thread's run time at the start: where the emulator thread's wall time goes */
 #define PROF_NTH	48
 static SceUID prof_thid[PROF_NTH];
@@ -109,6 +111,9 @@ int prof_samp_start(unsigned period_us)
 	for (i = 0; i < PS_N; i++)
 		prof_hist[i] = 0;
 	memcpy(prof_ev0, prof_ev, sizeof(prof_ev0));
+	prof_ge0[0] = GE_StatFlushes;
+	prof_ge0[1] = GE_Stat[GE_ST_WAIT_US];
+	prof_ge0[2] = GE_Stat[GE_ST_FRAME_WAIT_US];
 	prof_threads_start();
 	prof_run0 = prof_run_us();
 	prof_t0 = sceKernelGetSystemTimeLow();
@@ -179,4 +184,8 @@ void prof_samp_report(const char *tag, unsigned us, unsigned frames)
 		   PF(PEV_SYN_SAMPLES), PF(PEV_CB), PF(PEV_CB_SAMPLES), PF(PEV_IDLE_SLICES));
 #undef PF
 	prof_threads_report(tag, wall, frames);
+	/* the GE drawing the waiting lines early (guards) and the CPU waiting for it */
+	log_printf("samp %s: GE per frame: early flushes %u.%02u, guard waits %u us, frame waits %u us\n", tag,
+		   (GE_StatFlushes - prof_ge0[0]) / frames, (GE_StatFlushes - prof_ge0[0]) * 100 / frames % 100,
+		   (GE_Stat[GE_ST_WAIT_US] - prof_ge0[1]) / frames, (GE_Stat[GE_ST_FRAME_WAIT_US] - prof_ge0[2]) / frames);
 }

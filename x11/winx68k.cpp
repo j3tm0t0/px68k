@@ -669,6 +669,7 @@ static SceUInt64 psp_bf_t0;
 static int psp_bf_skip, psp_bf_prof, psp_bf_saved_skip, psp_bf_saved_prof;
 static int psp_bf_rt;	/* benchf in real time: paced, with the sound callback, as in play */
 static unsigned psp_bf_exec_us;
+static unsigned psp_bf_max_us, psp_bf_max_frame;	/* the slowest frame of the window */
 static unsigned psp_bf_period;	/* benchf prof 2: sampling period, us */
 /* "samp": a window of real time (as played) under the sampling profiler (psp/prof.h) */
 static unsigned psp_samp_end, psp_samp_frame0, psp_samp_t0;
@@ -816,6 +817,7 @@ static void psp_debug_frame(unsigned us)
 			if (psp_bf_rt)
 				DSound_Play();
 			psp_bf_exec_us = 0;
+			psp_bf_max_us = psp_bf_max_frame = 0;
 			prof_on = psp_bf_prof == 1;	/* the timers cost time too */
 			memset(prof_us, 0, sizeof(prof_us));
 			memset(prof_count, 0, sizeof(prof_count));
@@ -829,6 +831,10 @@ static void psp_debug_frame(unsigned us)
 			unsigned total, decode, mix;
 
 			psp_bf_exec_us += us;
+			if (us > psp_bf_max_us) {
+				psp_bf_max_us = us;
+				psp_bf_max_frame = psp_frame_no;
+			}
 			if (psp_frame_no < psp_bf_end)
 				return;	/* no per-second log while measuring */
 			total = (unsigned)(sceKernelGetSystemTimeWide() - psp_bf_t0);
@@ -853,6 +859,7 @@ static void psp_debug_frame(unsigned us)
 				   prof_us[PROF_ADPCMPRE] / n, prof_us[PROF_OPMTIMER] / n, prof_us[PROF_MCRY] / n,
 				   prof_count[PROF_LINES], prof_count[PROF_FRAMES], scePowerGetCpuClockFrequency(),
 				   scePowerGetBusClockFrequency(), psp_bf_rt ? " rt" : "", psp_bf_exec_us / (n - 1 ? n - 1 : 1));
+			log_printf("benchf: slowest frame %u: %u us\n", psp_bf_max_frame, psp_bf_max_us);
 			log_printf("benchf: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
 			RTC_TimeHook = NULL;
 			DSound_Play();
