@@ -315,7 +315,10 @@ sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 		PROF_SET(PS_CB_SYN);
 		PROF_EV(PEV_CB_SAMPLES, frames / step);
 		memset(out, 0, len - n);
-		ADPCM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+		/*
+		 * The OPM only: ADPCM_Update here would play ahead of the data the
+		 * emulation's DMA has not sent yet (Gradius' start voice broke up).
+		 */
 		OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
 		PROF_SET(PS_CB);
 	}
