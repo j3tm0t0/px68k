@@ -10,6 +10,9 @@ void DSound_Play(void);
 void DSound_Stop(void);
 void FASTCALL DSound_Send0(long clock);
 void DSound_Flush(void);
+int DSound_BufferedMs(void);
+int DSound_Enabled(void);
+extern int DSound_Underruns;
 
 void DS_SetVolumeOPM(long vol);
 void DS_SetVolumeADPCM(long vol);

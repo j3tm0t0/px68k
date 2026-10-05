@@ -71,7 +71,13 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 
 	// Linuxは2倍(SDL1.2)、Android(SDL2.0)は4倍のlenでcallbackされた。
 	// この値を小さくした方が音の遅延は少なくなるが負荷があがる
+#ifdef PSP
+	/* 512 samples (11.6 ms at 44.1 kHz): the emulation is paced by the sound
+	 * on the PSP (WinX68k main loop), so a short buffer is enough. */
+	samples = 512;
+#else
 	samples = 2048;
+#endif
 
 	memset(&fmt, 0, sizeof(fmt));
 #ifdef PSP
@@ -201,16 +207,69 @@ void DSound_Flush(void)
 	}
 }
 
+int DSound_Underruns;	/* callbacks that had to synthesize ahead of the emulation */
+
+int DSound_Enabled(void)
+{
+	return audio_fd >= 0;
+}
+
+/* Sound synthesized but not played yet, in ms (44.1 kHz stereo 16-bit on the PSP). */
+int DSound_BufferedMs(void)
+{
+	long n = pbwp - pbrp;
+
+	if (n < 0)
+		n += PCMBUF_SIZE;
+	return (int)(n / 4 * 1000 / 44100);
+}
+
+#ifndef PSP
 static void FASTCALL DSound_Send(int length)
 {
-	int rate;
-
 	if (audio_fd < 0) {
 		return;
 	}
 	sound_send(length);
 }
+#endif
 
+#ifdef PSP
+/*
+ * Plays what the emulation synthesized and pads a shortfall with silence.  It
+ * used to synthesize the shortfall here: that ran the OPM ahead of the
+ * emulation (the music stretched) and took the CPU from it, so once behind it
+ * stayed behind (Gradius' title and game over screens fell to 47 fps at
+ * 333 MHz).  The emulation is paced by this buffer (psp_frame_due).
+ */
+static void
+sdlaudio_callback(void *userdata, unsigned char *stream, int len)
+{
+	long avail = pbwp - pbrp;
+	int n, first;
+
+	(void)userdata;
+	if (avail < 0)
+		avail += PCMBUF_SIZE;
+	n = avail < len ? (int)avail : len;
+	first = pbep - pbrp;
+	if (n <= first) {
+		memcpy(sdlsndbuf, pbrp, n);
+		pbrp += n;
+	} else {
+		memcpy(sdlsndbuf, pbrp, first);
+		memcpy(sdlsndbuf + first, pbsp, n - first);
+		pbrp = pbsp + (n - first);
+	}
+	if (pbrp >= pbep)
+		pbrp = pbsp + (pbrp - pbep);
+	if (n < len) {
+		memset(sdlsndbuf + n, 0, len - n);
+		DSound_Underruns++;
+	}
+	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
+}
+#else
 static void
 sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 {
@@ -240,6 +299,7 @@ cb_start:
 		datalen = pbwp - pbrp;
 		if (datalen < len) {
 			// needs more data
+			DSound_Underruns++;
 #ifdef PSP
 			DSound_Send((len - datalen) / 4 / (44100 / rate));
 #else
@@ -279,6 +339,7 @@ cb_start:
 		} else {
 			lenb = len - lena;
 			if (pbwp - pbsp < lenb) {
+				DSound_Underruns++;
 #ifdef PSP
 				DSound_Send((lenb - (pbwp - pbsp)) / 4 / (44100 / rate));
 #else
@@ -306,6 +367,7 @@ cb_start:
 
 	bef = now;
 }
+#endif /* PSP */
 
 #else	/* NOSOUND */
 int

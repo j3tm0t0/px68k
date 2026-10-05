@@ -825,11 +825,12 @@ static void psp_debug_frame(unsigned us)
 	if (now - psp_fps_start < 1000)
 		return;
 	if (psp_fps_log)
-		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d\n",
+		log_note("fps: emu %d drawn %d exec avg %u.%ums max %u.%ums skip %d cpu %d snd buf %d ms under %d\n",
 			   psp_emu_frames, psp_drawn_frames,
 			   psp_exec_us / psp_emu_frames / 1000, psp_exec_us / psp_emu_frames / 100 % 10,
 			   psp_exec_max_us / 1000, psp_exec_max_us / 100 % 10, Config.FrameRate,
-			   scePowerGetCpuClockFrequency());
+			   scePowerGetCpuClockFrequency(), DSound_BufferedMs(), DSound_Underruns);
+	DSound_Underruns = 0;
 	if (psp_bench_end && (int)(now - psp_bench_end) >= 0) {
 		psp_bench_end = 0;
 		log_printf("bench: done, rejoining %s\n", net_resume() == 0 ? "ok" : "failed");
@@ -966,6 +967,25 @@ static void psp_debug_poll(void)
 
 /* For the "Show FPS" overlay (x11/windraw.c). */
 extern "C" int WinDraw_FpsEmu10, WinDraw_FpsShown;
+/*
+ * With sound on, the sound output paces the emulation: a frame runs whenever
+ * less than PSP_SND_LEAD_MS of synthesized sound waits to be played.  Paced by
+ * the millisecond timer alone, the emulation drifted from the audio clock: when
+ * it fell behind, the callback synthesized ahead of it (the music stretched),
+ * and what it got ahead piled up as latency.  35 ms covers a frame (18 ms of
+ * sound, made in a burst) plus a 512-sample callback.
+ */
+#define PSP_SND_LEAD_MS	35
+
+static int psp_frame_due(void)
+{
+	int due = Timer_GetCount();	/* keeps the timer current either way */
+
+	if (DSound_Enabled())
+		return DSound_BufferedMs() < PSP_SND_LEAD_MS;
+	return due;
+}
+
 static void psp_count_fps(void)
 {
 	static unsigned start, emu, shown;
@@ -1218,8 +1238,13 @@ int main(int argc, char *argv[])
 				DSound_Play();
 		}
 #endif
+#ifdef PSP
+		if (menu_mode == menu_out
+		    && (Config.NoWaitMode || psp_frame_due())) {
+#else
 		if (menu_mode == menu_out
 		    && (Config.NoWaitMode || Timer_GetCount())) {
+#endif
 #ifdef PSP
 			unsigned t0 = sceKernelGetSystemTimeLow();
 			WinX68k_Exec();
