@@ -294,6 +294,7 @@ int WinDraw_FpsShown;		/* frames presented per second */
 #define FPS_TEX_H 8
 static unsigned short __attribute__((aligned(16))) fps_tex[FPS_TEX_W * FPS_TEX_H];
 static char fps_text[16];
+static int fps_w = FPS_TEX_W;	/* texels in use */
 
 static const unsigned char *fps_glyph(char c)
 {
@@ -328,30 +329,48 @@ static void fps_overlay(void)
 	snprintf(text, sizeof(text), "%d.%d", WinDraw_FpsEmu10 / 10, WinDraw_FpsEmu10 % 10);
 	if (strcmp(text, fps_text)) {
 		strcpy(fps_text, text);
+		/*
+		 * 5551: white digits with a one-texel black outline, the rest
+		 * transparent (alpha 0), so only the digits cover the game.
+		 */
 		for (i = 0; i < FPS_TEX_W * FPS_TEX_H; i++)
 			fps_tex[i] = 0;
 		for (i = 0; text[i] && (i + 1) * 4 <= FPS_TEX_W; i++) {
 			const unsigned char *g = fps_glyph(text[i]);
 			for (y = 0; y < 5; y++)
 				for (x = 0; x < 3; x++)
-					if (g[y] & (4 >> x))
-						fps_tex[(y + 1) * FPS_TEX_W + i * 4 + x + 1] = 0xffff;
+					if (g[y] & (4 >> x)) {
+						int px = i * 4 + x + 1, py = y + 1, dx, dy;
+
+						for (dy = -1; dy <= 1; dy++)
+							for (dx = -1; dx <= 1; dx++) {
+								unsigned short *t = &fps_tex[(py + dy) * FPS_TEX_W + px + dx];
+
+								if (!*t)
+									*t = 0x8000;
+							}
+						fps_tex[py * FPS_TEX_W + px] = 0xffff;
+					}
 		}
+		fps_w = i * 4 + 1;
 		sceKernelDcacheWritebackRange(fps_tex, sizeof(fps_tex));
 	}
 	v = (struct Vertexes *)sceGuGetMemory(sizeof(struct Vertexes));
 	memset(v, 0, sizeof(*v));
-	v->u2 = FPS_TEX_W;
+	v->u2 = fps_w;
 	v->v2 = FPS_TEX_H;
 	v->x = 2;
 	v->y = 2;
-	v->x2 = 2 + FPS_TEX_W * 2;
+	v->x2 = 2 + fps_w * 2;
 	v->y2 = 2 + FPS_TEX_H * 2;
-	sceGuTexMode(GU_PSM_5650, 0, 0, 0);
+	sceGuTexMode(GU_PSM_5551, 0, 0, 0);
 	sceGuTexImage(0, FPS_TEX_W, FPS_TEX_H, FPS_TEX_W, fps_tex);
-	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
+	sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
 	sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+	sceGuEnable(GU_ALPHA_TEST);
+	sceGuAlphaFunc(GU_GREATER, 0, 0xff);
 	sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT|GU_COLOR_5650|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, v);
+	sceGuDisable(GU_ALPHA_TEST);
 }
 #endif
 
