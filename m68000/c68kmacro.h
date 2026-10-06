@@ -305,10 +305,14 @@ extern UINT32 BusErrFlag, MemByteAccess;
 
 #define GET_PC()				(PC - CPU->BasePC)
 
+/* A is a 68000 address: only its 32 bits (PC is a host pointer, wider on 64-bit hosts) */
 #define SET_PC(A)															\
-	CPU->BasePC = CPU->Fetch[((A) >> C68K_FETCH_SFT) & C68K_FETCH_MASK];	\
-	CPU->BasePC -= (A) & 0xff000000;										\
-	PC = (A) + CPU->BasePC;
+{																			\
+	UINT32 set_pc_a = (UINT32)(A);											\
+	CPU->BasePC = CPU->Fetch[(set_pc_a >> C68K_FETCH_SFT) & C68K_FETCH_MASK];	\
+	CPU->BasePC -= set_pc_a & 0xff000000;									\
+	PC = set_pc_a + CPU->BasePC;											\
+}
 
 #define ADJUST_PC()				PC -= CPU->BasePC;
 
@@ -1253,36 +1257,38 @@ extern UINT32 BusErrFlag, MemByteAccess;
 
 #define MOVEM_RE(size, mode)												\
 {																			\
+	C68K_PTR rp;																	\
 	EA_READ_I(16, NA, res)													\
 	EA_##mode(NA, Y)														\
-	src = (UINT32)(&D0);													\
+	rp = (C68K_PTR)(&D0);													\
 	dst = adr;																\
 	do																		\
 	{																		\
 		if (res & 1)														\
 		{																	\
-			WRITE_MEM_##size(adr, *(UINT##size *)src);							\
+			WRITE_MEM_##size(adr, *(UINT##size *)rp);							\
 			adr += (size / 8);												\
 		}																	\
-		src += 4;															\
+		rp += 4;															\
 	} while (res >>= 1);													\
 	RET(MOVEM_CLOCKS_RE_##mode + ((adr - dst) << 1))						\
 }
 
 #define MOVEM_RE_PD(size, y)												\
 {																			\
+	C68K_PTR rp;																	\
 	EA_READ_I(16, NA, res)													\
 	adr = A##y;																\
-	src = (UINT32)(&A7);													\
+	rp = (C68K_PTR)(&A7);													\
 	dst = adr;																\
 	do																		\
 	{																		\
 		if (res & 1)														\
 		{																	\
 			adr -= (size / 8);												\
-			WRITE_MEM_##size##PD(adr, *(UINT##size *)src);						\
+			WRITE_MEM_##size##PD(adr, *(UINT##size *)rp);						\
 		}																	\
-		src -= 4;															\
+		rp -= 4;															\
 	} while (res >>= 1);													\
 	A##y = adr;																\
 	RET(MOVEM_CLOCKS_RE_PD + ((dst - adr) << 1))							\
@@ -1290,36 +1296,38 @@ extern UINT32 BusErrFlag, MemByteAccess;
 
 #define MOVEM_ER(size, mode)												\
 {																			\
+	C68K_PTR rp;																	\
 	EA_READ_I(16, NA, res)													\
 	EA_##mode(NA, Y)														\
-	src = (UINT32)(&D0);													\
+	rp = (C68K_PTR)(&D0);													\
 	dst = adr;																\
 	do																		\
 	{																		\
 		if (res & 1)														\
 		{																	\
-			*(INT32 *)src = READSX_##mode(size, NA);						\
+			*(INT32 *)rp = READSX_##mode(size, NA);						\
 			adr += (size / 8);												\
 		}																	\
-		src += 4;															\
+		rp += 4;															\
 	} while (res >>= 1);													\
 	RET(MOVEM_CLOCKS_ER_##mode + ((adr - dst) << 1))						\
 }
 
 #define MOVEM_ER_PI(size, y)												\
 {																			\
+	C68K_PTR rp;																	\
 	EA_READ_I(16, NA, res)													\
 	adr = A##y;																\
-	src = (UINT32)(&D0);													\
+	rp = (C68K_PTR)(&D0);													\
 	dst = adr;																\
 	do																		\
 	{																		\
 		if (res & 1)														\
 		{																	\
-			*(INT32 *)src = READSX_MEM_##size(adr);							\
+			*(INT32 *)rp = READSX_MEM_##size(adr);							\
 			adr += (size / 8);												\
 		}																	\
-		src += 4;															\
+		rp += 4;															\
 	} while (res >>= 1);													\
 	A##y = adr;																\
 	RET(MOVEM_CLOCKS_ER_PI + ((adr - dst) << 1))							\
@@ -1634,7 +1642,7 @@ extern UINT32 BusErrFlag, MemByteAccess;
 int cpu_idle_read_word(UINT32 adr, UINT32 *v);
 int cpu_idle_read_byte(UINT32 adr, UINT32 *v);
 
-UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode);
+C68K_PTR C68k_Idle_Loop(c68k_struc *CPU, C68K_PTR PC, UINT32 Opcode);
 
 #undef Bcc_8
 #define Bcc_8(cond)															\

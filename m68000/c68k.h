@@ -16,6 +16,10 @@ extern "C" {
 #endif
 
 #include "common.h"
+#include <stdint.h>
+
+// a host address (the PC, the fetch bases): 32 bits on the PSP, 64 elsewhere
+typedef uintptr_t C68K_PTR;
 
 // setting
 ///////////
@@ -120,15 +124,15 @@ typedef struct c68k_t
 	UINT32 flag_S;
 
 	UINT32 USP;
-	UINT32 PC;
+	C68K_PTR PC;
 
 	UINT32 HaltState;
 	INT32 IRQLine;
 	INT32 IRQState;
 	INT32 ICount;
 
-	UINT32 BasePC;
-	UINT32 Fetch[C68K_FETCH_BANK];
+	C68K_PTR BasePC;
+	C68K_PTR Fetch[C68K_FETCH_BANK];
 
 	UINT8  (*Read_Byte)(UINT32 address);
 	UINT16 (*Read_Word)(UINT32 address);
@@ -164,7 +168,7 @@ void C68k_Set_IRQ(c68k_struc *cpu, INT32 line, INT32 state);
 UINT32  C68k_Get_Reg(c68k_struc *cpu, INT32 regnum);
 void C68k_Set_Reg(c68k_struc *cpu, INT32 regnum, UINT32 val);
 
-void C68k_Set_Fetch(c68k_struc *cpu, UINT32 low_adr, UINT32 high_adr, UINT32 fetch_adr);
+void C68k_Set_Fetch(c68k_struc *cpu, UINT32 low_adr, UINT32 high_adr, C68K_PTR fetch_adr);
 
 void C68k_Set_ReadB(c68k_struc *cpu, UINT8 (*Func)(UINT32 address));
 void C68k_Set_ReadW(c68k_struc *cpu, UINT16 (*Func)(UINT32 address));

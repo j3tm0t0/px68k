@@ -80,7 +80,7 @@ void C68k_Init(c68k_struc *CPU)
 	memset(c68k_bad_address, 0xff, sizeof(c68k_bad_address));
 
 	for (i = 0; i < C68K_FETCH_BANK; i++)
-		CPU->Fetch[i] = (UINT32)c68k_bad_address;
+		CPU->Fetch[i] = (C68K_PTR)c68k_bad_address;
 
 	C68k_Exec(NULL, 0);
 }
@@ -92,9 +92,7 @@ void C68k_Init(c68k_struc *CPU)
 
 void C68k_Reset(c68k_struc *CPU)
 {
-	UINT32 PC;
-
-	memset(CPU, 0, (UINT32)&CPU->BasePC - (UINT32)CPU);
+	memset(CPU, 0, (UINT8 *)&CPU->BasePC - (UINT8 *)CPU);
 
 	CPU->flag_I = 7;
 	CPU->flag_S = C68K_SR_S;
@@ -154,7 +152,7 @@ extern DWORD BusErrAdr;
  * (*len, *cyc: its length and cycles), or -1 (nothing changed) if it is not
  * one of the forms handled or its operand is not plain RAM / GPIP.
  */
-static INT32 C68k_Idle_Eval(c68k_struc *CPU, UINT32 PC, UINT32 Opcode, INT32 *plen, INT32 *pcyc)
+static INT32 C68k_Idle_Eval(c68k_struc *CPU, C68K_PTR PC, UINT32 Opcode, INT32 *plen, INT32 *pcyc)
 {
 	UINT32 op = *(UINT16 *)PC, adr, src, dst, res;
 	INT32 cond, len, cyc;
@@ -244,11 +242,12 @@ cond:
  * runs the core, set again when the slice ends in a skip.
  */
 int C68k_IdleFast = 1;	/* C68k_Exec_Idle on (debug command "idlefp 0|1": A/B in one build) */
-static UINT32 C68k_IdlePC, C68k_IdleBcc;
+static C68K_PTR C68k_IdlePC;
+static UINT32 C68k_IdleBcc;
 static INT32 C68k_IdleLen;
 
 /* the step by step run from the loop's TST/CMP/BTST with c cycles left after the Bcc (c > 0) */
-static UINT32 C68k_Idle_Run(c68k_struc *CPU, UINT32 PC, INT32 c, INT32 len, INT32 cyc)
+static C68K_PTR C68k_Idle_Run(c68k_struc *CPU, C68K_PTR PC, INT32 c, INT32 len, INT32 cyc)
 {
 	c -= (c - 1) / (cyc + 10) * (cyc + 10);	/* whole loops: c in 1..cyc + 10 */
 	c -= cyc;			/* TST/CMP/BTST */
@@ -260,7 +259,7 @@ static UINT32 C68k_Idle_Run(c68k_struc *CPU, UINT32 PC, INT32 c, INT32 len, INT3
 	return PC;
 }
 
-UINT32 C68k_Idle_Loop(c68k_struc *CPU, UINT32 PC, UINT32 Opcode)
+C68K_PTR C68k_Idle_Loop(c68k_struc *CPU, C68K_PTR PC, UINT32 Opcode)
 {
 	INT32 len, cyc;
 
@@ -308,7 +307,7 @@ static INT32 C68k_Idle_Cond(c68k_struc *CPU, UINT32 Opcode)
  */
 static INT32 C68k_Exec_Idle(c68k_struc *CPU, INT32 cycles)
 {
-	UINT32 PC = CPU->PC, loop = C68k_IdlePC;
+	C68K_PTR PC = CPU->PC, loop = C68k_IdlePC;
 	UINT32 fc, fv, fz, fn;
 	INT32 len, cyc, c, r;
 
@@ -367,7 +366,7 @@ static INT32 __attribute__((noinline)) C68k_Exec_Core(c68k_struc *CPU, INT32 cyc
 {
 	if (CPU)
 	{
-		UINT32 PC;
+		C68K_PTR PC;
 		UINT32 Opcode;
 		UINT32 adr;
 		UINT32 res;
@@ -533,7 +532,7 @@ void C68k_Set_Reg(c68k_struc *CPU, INT32 regnum, UINT32 val)
 	フェッチアドレス設定
 --------------------------------------------------------*/
 
-void C68k_Set_Fetch(c68k_struc *CPU, UINT32 low_adr, UINT32 high_adr, UINT32 fetch_adr)
+void C68k_Set_Fetch(c68k_struc *CPU, UINT32 low_adr, UINT32 high_adr, C68K_PTR fetch_adr)
 {
 	UINT32 i, j;
 

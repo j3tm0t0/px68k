@@ -1690,7 +1690,7 @@ OP(bsr_16)
 	res = READSX_IMM_16();
 	ADJUST_PC()
 	PUSH_32_F(PC + 2)
-	PC += res;
+	PC += (INT32)res;
 	SET_PC(PC)
 	RET(18)
 }
