@@ -81,6 +81,10 @@ CFLAGS = -G8 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION) $(PGOFLAG
 #   PGO=0    no profile (and no pgo/ needed)
 #   PGO=gen  the training build
 PGO ?= use
+# gcc names the .gcda files after its idea of the current directory (PWD when
+# it names the same directory, else getcwd): from a shell in a symlinked path
+# that differs from $(CURDIR) and the profile is silently not found.
+export PWD := $(CURDIR)
 ifeq ($(PGO),gen)
 PGOFLAGS = -DPX68K_GCOV -fprofile-generate=ms0:/PSP/GAME/PX68K/pgo -fprofile-prefix-path=$(CURDIR) -fprofile-update=single
 else ifeq ($(PGO),use)
