@@ -293,6 +293,20 @@ void FASTCALL Joystick_Update(int is_menu, SDL_Keycode key)
 			ret0 ^= JOY_TRG2;
 		}
 		/*
+		 * The analog stick moves the joystick too (8 directions, a dead zone
+		 * of 48 around the centre), unless the software keyboard uses it.
+		 */
+		if (!is_menu && !Keyboard_IsSwKeyboard()) {
+			if (psppad.Lx < 128 - 48 && !(psppad.Buttons & (PSP_CTRL_LEFT | PSP_CTRL_RIGHT)))
+				ret0 ^= JOY_LEFT;
+			else if (psppad.Lx > 128 + 48 && !(psppad.Buttons & (PSP_CTRL_LEFT | PSP_CTRL_RIGHT)))
+				ret0 ^= JOY_RIGHT;
+			if (psppad.Ly < 128 - 48 && !(psppad.Buttons & (PSP_CTRL_UP | PSP_CTRL_DOWN)))
+				ret0 ^= JOY_UP;
+			else if (psppad.Ly > 128 + 48 && !(psppad.Buttons & (PSP_CTRL_UP | PSP_CTRL_DOWN)))
+				ret0 ^= JOY_DOWN;
+		}
+		/*
 		 * Rapid fire: triangle = trigger 1, square = trigger 2, pressed for
 		 * 2 of every 4 emulated frames (about 14 shots/s at 55.5 Hz).
 		 * Joystick_Update(FALSE) runs once per emulated frame.
