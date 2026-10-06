@@ -118,7 +118,7 @@ include $(PSPSDK)/lib/build.mak
 fmgen/fmg_wrap.o fmgen/opm.o x11/dswin.o x11/winx68k.o: fmgen/opm.h fmgen/fmg_wrap.h psp/me.h
 
 # objects that use psp/gecomp.h: rebuilt when it changes (its GE_ST_* indices must agree)
-x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o: psp/gecomp.h psp/prof.h
+x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o psp/prof.o: psp/gecomp.h psp/prof.h
 x11/dswin.o x68k/mem_wrap.o m68000/c68k.o psp/prof.o: psp/prof.h
 
 # The 68000 handlers in the order of tools/c68ktest/hot995.txt, hottest
