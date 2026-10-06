@@ -15,10 +15,21 @@ extern "C" {
  */
 int net_start(const char *const *profile_paths, int count);
 
-/* Leave the access point so the CPU runs at full clock again (benchmarks). */
-void net_pause(void);
-/* Rejoin after net_pause; returns 0 once an IP address is held. */
+/*
+ * Leave the access point so the CPU runs at full clock again (benchmarks).
+ * -1: refused, the clock change is not safe with the Media Engine (psp/me.h).
+ */
+int net_pause(void);
+/*
+ * Rejoin after net_pause; returns 0 once an IP address is held. On failure
+ * it keeps retrying in the background.
+ */
 int net_resume(void);
+/*
+ * Between net_pause and net_resume: sockets must be left alone (the debug
+ * server sleeps instead of polling them: its socket calls kept it busy).
+ */
+int net_paused(void);
 
 #ifdef __cplusplus
 }

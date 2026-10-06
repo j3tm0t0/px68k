@@ -26,6 +26,7 @@
 #include "tvram.h"
 
 #include "fmg_wrap.h"
+#include "../psp/prof.h"
 
 void AdrError(DWORD, DWORD);
 void BusError(DWORD, DWORD);
@@ -214,6 +215,7 @@ cpu_writemem24(DWORD addr, BYTE val)
 static void FASTCALL
 cpu_writemem24_slow(DWORD addr, BYTE val)
 {
+	PROF_IO_ENTER(addr);
 
 	MemByteAccess = 0;
 	BusErrFlag = 0;
@@ -223,6 +225,7 @@ cpu_writemem24_slow(DWORD addr, BYTE val)
 		Memory_ErrTrace();
 		BusError(addr, val);
 	}
+	PROF_LEAVE();
 }
 
 void FASTCALL
@@ -242,11 +245,13 @@ cpu_writemem24_word(DWORD addr, WORD val)
 static void FASTCALL
 cpu_writemem24_word_slow(DWORD addr, WORD val)
 {
+	PROF_IO_ENTER(addr);
 
 	MemByteAccess = 0;
 
 	if (addr & 1) {
 		AdrError(addr, val);
+		PROF_LEAVE();
 		return;
 	}
 
@@ -258,6 +263,14 @@ cpu_writemem24_word_slow(DWORD addr, WORD val)
 		 * touch BusErrFlag, so the low byte is always written)
 		 */
 		GVRAM_WriteWord(addr & 0x00ffffff, val);
+	} else if ((addr & 0x00ffffff) - 0x00e00000 < 0x00080000) {
+		/*
+		 * Text VRAM: what wm_cnt / wm_main do there (MemWriteTable:
+		 * TVRAM_Write, which does not touch BusErrFlag), without the
+		 * dispatch: Gradius' game start writes ~3700 words a frame
+		 */
+		TVRAM_Write(addr & 0x00ffffff, (val >> 8) & 0xff);
+		TVRAM_Write((addr + 1) & 0x00ffffff, val & 0xff);
 	} else {
 		wm_cnt(addr, (val >> 8) & 0xff);
 		wm_main(addr + 1, val & 0xff);
@@ -267,6 +280,7 @@ cpu_writemem24_word_slow(DWORD addr, WORD val)
 		Memory_ErrTrace();
 		BusError(addr, val);
 	}
+	PROF_LEAVE();
 }
 
 void FASTCALL
@@ -424,12 +438,14 @@ static BYTE FASTCALL
 cpu_readmem24_slow(DWORD addr)
 {
 	BYTE v;
+	PROF_IO_ENTER(addr);
 
 	v = rm_main(addr);
 	if (BusErrFlag & 1) {
 		Memory_ErrTrace();
 		BusError(addr, 0);
 	}
+	PROF_LEAVE();
 	return v;
 }
 
@@ -449,9 +465,11 @@ static WORD FASTCALL
 cpu_readmem24_word_slow(DWORD addr)
 {
 	WORD v;
+	PROF_IO_ENTER(addr);
 
 	if (addr & 1) {
 		AdrError(addr, 0);
+		PROF_LEAVE();
 		return 0;
 	}
 
@@ -463,6 +481,7 @@ cpu_readmem24_word_slow(DWORD addr)
 		Memory_ErrTrace();
 		BusError(addr, 0);
 	}
+	PROF_LEAVE();
 	return v;
 }
 
@@ -520,10 +539,26 @@ cpu_writemem24_long_slow(DWORD addr, DWORD val)
 
 	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
 		/* both words in GVRAM: what the two cpu_writemem24_word do */
+		PROF_IO_ENTER(a);
 		MemByteAccess = 0;
 		BusErrFlag = 0;
 		GVRAM_WriteWord(a, val >> 16);
 		GVRAM_WriteWord(a + 2, val);
+		PROF_LEAVE();
+		return;
+	}
+	if (!(addr & 1) && a - 0x00e00000 <= 0x00080000 - 4) {
+		/*
+		 * both words in text VRAM: what the two cpu_writemem24_word do
+		 * (cpu_writemem24_word_slow), the bytes in the same order
+		 * (Gradius clears the text screen with long writes: ~5200 a
+		 * frame between its logo and its title)
+		 */
+		PROF_IO_ENTER(a);
+		MemByteAccess = 0;
+		BusErrFlag = 0;
+		TVRAM_WriteLong(a, val);
+		PROF_LEAVE();
 		return;
 	}
 	cpu_writemem24_word(addr, val >> 16);
@@ -552,10 +587,12 @@ cpu_writemem24_long_pd_slow(DWORD addr, DWORD val)
 
 	if (!(addr & 1) && a - 0x00c00000 <= 0x00200000 - 4) {
 		/* both words in GVRAM (movem.l -(An) fills): as above */
+		PROF_IO_ENTER(a);
 		MemByteAccess = 0;
 		BusErrFlag = 0;
 		GVRAM_WriteWord(a + 2, val);
 		GVRAM_WriteWord(a, val >> 16);
+		PROF_LEAVE();
 		return;
 	}
 	cpu_writemem24_word(addr + 2, val);

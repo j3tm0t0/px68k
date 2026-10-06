@@ -31,6 +31,11 @@
 #include	"mercury.h"
 #include	"fmg_wrap.h"
 #include	"../psp/prof.h"
+#ifdef PSP
+#include	<pspthreadman.h>
+#include	<psputils.h>
+#include	"../psp/me.h"
+#endif
 
 short	playing = FALSE;
 
@@ -71,7 +76,13 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 
 	// Linuxは2倍(SDL1.2)、Android(SDL2.0)は4倍のlenでcallbackされた。
 	// この値を小さくした方が音の遅延は少なくなるが負荷があがる
+#ifdef PSP
+	/* 1024 samples (23 ms at 44.1 kHz): the emulation is paced by the sound
+	 * on the PSP (WinX68k main loop), so a short buffer is enough. */
+	samples = 1024;
+#else
 	samples = 2048;
+#endif
 
 	memset(&fmt, 0, sizeof(fmt));
 #ifdef PSP
@@ -96,6 +107,15 @@ DSound_Init(unsigned long rate, unsigned long buflen)
 		return FALSE;
 	}
 
+#ifdef PSP
+	if (OPM_MeActive()) {
+		/* The Media Engine mixes the OPM into this ring: uncached on both CPUs. */
+		sceKernelDcacheWritebackInvalidateRange(pcmbuffer, PCMBUF_SIZE);
+		pbsp = pbrp = pbwp = (BYTE *)ME_UNCACHED(pcmbuffer);
+		pbep = pbsp + PCMBUF_SIZE;
+		OPM_MeSetReady(pbwp);
+	}
+#endif
 	playing = TRUE;
 	return TRUE;
 }
@@ -127,20 +147,28 @@ DSound_Cleanup(void)
 }
 
 static int DSound_Pending;	/* samples due, not synthesized yet */
+#ifdef PSP
+unsigned DSound_SendUs, DSound_CbUs;	/* time in sound_send (lock wait included) / the callback */
+#endif
 
 static void sound_send(int length)
 {
 	int rate;
-
 #ifdef PSP
+	unsigned t0 = sceKernelGetSystemTimeLow();
+
 	rate = Config.SampleRate;
 #else
 	rate = 0;
 #endif
 	SDL_LockAudio();
 	PROF_BEGIN(snd);
+	PROF_ENTER(PS_SYN_ADPCM);
+	PROF_EV(PEV_SYN_SAMPLES, length);
 	ADPCM_Update((short *)pbwp, length, rate, pbsp, pbep);
+	PROF_SET(PS_SYN_OPM);
 	OPM_Update((short *)pbwp, length, rate, pbsp, pbep);
+	PROF_LEAVE();
 #ifndef	NO_MERCURY
 	//Mcry_Update((short *)pcmbufp, length);
 #endif
@@ -157,6 +185,9 @@ static void sound_send(int length)
 #endif
 	PROF_END(snd, PROF_SOUND);
 	SDL_UnlockAudio();
+#ifdef PSP
+	DSound_SendUs += sceKernelGetSystemTimeLow() - t0;
+#endif
 	PROF_COUNT(PROF_SOUND_SAMPLES, length);
 }
 
@@ -201,16 +232,214 @@ void DSound_Flush(void)
 	}
 }
 
+int DSound_Underruns;	/* callbacks that had to synthesize ahead of the emulation */
+#ifdef PSP
+unsigned char *DSound_RecBuf;
+int DSound_RecLen, DSound_RecPos;
+struct dsound_rec_ev *DSound_RecEv;
+int DSound_RecEvMax, DSound_RecEvN;
+#endif
+
+int DSound_Enabled(void)
+{
+	return audio_fd >= 0;
+}
+
+/* Sound synthesized but not played yet, in ms (44.1 kHz stereo 16-bit on the PSP). */
+int DSound_BufferedMs(void)
+{
+	long n = pbwp - pbrp;
+
+#ifdef PSP
+	if (OPM_MeActive())
+		n = OPM_MeReady() - pbrp;	/* the OPM still to come is not ready */
+#endif
+
+	if (n < 0)
+		n += PCMBUF_SIZE;
+	return (int)(n / 4 * 1000 / 44100);
+}
+
+#ifndef PSP
 static void FASTCALL DSound_Send(int length)
 {
-	int rate;
-
 	if (audio_fd < 0) {
 		return;
 	}
 	sound_send(length);
 }
+#endif
 
+#ifdef PSP
+/*
+ * The synthesis runs at 11025 or 22050 Hz and repeats each sample 4 or 2 times
+ * for the 44.1 kHz output: steps that alias (a harsh, broken sound).  A moving
+ * average over the repeat count turns the steps into straight lines (linear
+ * interpolation, half a source sample late).
+ */
+static void smooth(short *p, int frames, int step)
+{
+	static int hist[2][4], sum[2], pos;
+	/* sum / step by a shift for 2 and 4 (rounded toward 0 as the division): no div per sample */
+	const int sh = step == 2 ? 1 : step == 4 ? 2 : 0;
+	int i, c;
+
+	if (step <= 1 || step > 4)
+		return;
+	for (i = 0; i < frames; i++, p += 2) {
+		for (c = 0; c < 2; c++) {
+			const int s = sum[c] += p[c] - hist[c][pos];
+
+			hist[c][pos] = p[c];
+			p[c] = (short)(sh ? (s + ((s >> 31) & (step - 1))) >> sh : s / step);
+		}
+		if (++pos == step)
+			pos = 0;
+	}
+}
+
+static long ring_bytes(BYTE *to, BYTE *from)
+{
+	long n = to - from;
+
+	return n < 0 ? n + PCMBUF_SIZE : n;
+}
+
+/* Zero n bytes of the ring from p on (it wraps). */
+static void ring_zero(BYTE *p, long n)
+{
+	long first = pbep - p;
+
+	if (n <= first) {
+		memset(p, 0, n);
+	} else {
+		memset(p, 0, first);
+		memset(pbsp, 0, n - first);
+	}
+}
+
+unsigned DSound_MeWaitMax;	/* longest wait for the Media Engine in a callback, us */
+
+/*
+ * With the OPM on the Media Engine: the ring holds ADPCM up to pbwp, mixed
+ * with the OPM up to OPM_MeReady().  When the emulation is behind, the ME is
+ * asked for the OPM of the rest; either way, wait for the ME (it takes well
+ * under a callback period).
+ */
+static int me_fill(int len, int rate, long *filled)
+{
+	int step = 44100 / rate;
+	long queued = ring_bytes(pbwp, pbrp);
+	unsigned t0, w;
+
+	if (queued < len) {
+		int k = ((len - queued) / 4 + step - 1) / step;
+
+		DSound_Underruns++;
+		*filled = len - queued;
+		/* the OPM only, as below: no ADPCM ahead of the emulation's DMA */
+		ring_zero(pbwp, k * 4 * step);
+		OPM_MeExtra((short *)pbwp, k, rate, pbsp, pbep);
+		pbwp += k * 4 * step;
+		if (pbwp >= pbep)
+			pbwp = pbsp + (pbwp - pbep);
+	}
+	if (ring_bytes(OPM_MeReady(), pbrp) >= len)
+		return len;
+	t0 = sceKernelGetSystemTimeLow();
+	while (ring_bytes(OPM_MeReady(), pbrp) < len) {
+		if (me_paused_now())
+			return (int)ring_bytes(OPM_MeReady(), pbrp);
+		if (sceKernelGetSystemTimeLow() - t0 > 50 * 1000) {
+			OPM_MeFail("no answer");
+			break;	/* plays the ADPCM alone this once */
+		}
+		sceKernelDelayThread(100);
+	}
+	w = sceKernelGetSystemTimeLow() - t0;
+	if (w > DSound_MeWaitMax)
+		DSound_MeWaitMax = w;
+	return len;
+}
+
+/*
+ * Plays what the emulation synthesized; when that runs short (the emulation is
+ * behind real time), synthesizes the rest.  The emulation is paced by this
+ * buffer (psp_frame_due), so that happens only when it cannot keep up.
+ */
+static void
+sdlaudio_callback(void *userdata, unsigned char *stream, int len)
+{
+	long avail = pbwp - pbrp, filled = 0;
+	int n, first;
+	unsigned t0 = sceKernelGetSystemTimeLow();
+	PROF_ENTER(PS_CB);
+
+	PROF_EV(PEV_CB, 1);
+	if (avail < 0)
+		avail += PCMBUF_SIZE;
+	if (OPM_MeActive()) {
+		avail = ring_bytes(OPM_MeReady(), pbrp);
+		if (me_paused_now())	/* halted (suspend, "me off"): what is ready */
+			n = avail < len ? (int)avail : len;
+		else
+			n = me_fill(len, (int)userdata, &filled);
+	} else {
+		n = avail < len ? (int)avail : len;
+	}
+	first = pbep - pbrp;
+	if (n <= first) {
+		memcpy(sdlsndbuf, pbrp, n);
+		pbrp += n;
+	} else {
+		memcpy(sdlsndbuf, pbrp, first);
+		memcpy(sdlsndbuf + first, pbsp, n - first);
+		pbrp = pbsp + (n - first);
+	}
+	if (pbrp >= pbep)
+		pbrp = pbsp + (pbrp - pbep);
+	if (n < len) {
+		/*
+		 * Short: synthesize the rest (the emulation is behind real time).
+		 * Padding it with silence instead broke the sound up whenever the
+		 * emulation could not keep up (16 MHz mode, every frame drawn).
+		 */
+		short *out = (short *)(sdlsndbuf + n);
+		int frames = (len - n) / 4, step = 44100 / (int)userdata;
+
+		DSound_Underruns++;
+		filled = len - n;
+		PROF_SET(PS_CB_SYN);
+		PROF_EV(PEV_CB_SAMPLES, frames / step);
+		memset(out, 0, len - n);
+		/*
+		 * The OPM only: ADPCM_Update here would play ahead of the data the
+		 * emulation's DMA has not sent yet (Gradius' start voice broke up).
+		 * With the ME halted (suspend, "me off"), nothing.
+		 */
+		if (!OPM_MeActive())
+			OPM_Update(out, frames / step, (int)userdata, (BYTE *)out, (BYTE *)out + (len - n));
+		PROF_SET(PS_CB);
+	}
+	smooth((short *)sdlsndbuf, len / 4, 44100 / (int)userdata);
+	if (DSound_RecBuf && DSound_RecPos < DSound_RecLen) {
+		int c = DSound_RecLen - DSound_RecPos < len ? DSound_RecLen - DSound_RecPos : len;
+
+		memcpy(DSound_RecBuf + DSound_RecPos, sdlsndbuf, c);
+		DSound_RecPos += c;
+		if (DSound_RecEvN < DSound_RecEvMax) {
+			struct dsound_rec_ev *e = &DSound_RecEv[DSound_RecEvN++];
+
+			e->t_us = sceKernelGetSystemTimeLow();
+			e->avail = (unsigned)avail;
+			e->filled = (unsigned)filled;
+		}
+	}
+	SDL_MixAudio(stream, sdlsndbuf, len, SDL_MIX_MAXVOLUME);
+	DSound_CbUs += sceKernelGetSystemTimeLow() - t0;
+	PROF_LEAVE();
+}
+#else
 static void
 sdlaudio_callback(void *userdata, unsigned char *stream, int len)
 {
@@ -240,6 +469,7 @@ cb_start:
 		datalen = pbwp - pbrp;
 		if (datalen < len) {
 			// needs more data
+			DSound_Underruns++;
 #ifdef PSP
 			DSound_Send((len - datalen) / 4 / (44100 / rate));
 #else
@@ -279,6 +509,7 @@ cb_start:
 		} else {
 			lenb = len - lena;
 			if (pbwp - pbsp < lenb) {
+				DSound_Underruns++;
 #ifdef PSP
 				DSound_Send((lenb - (pbwp - pbsp)) / 4 / (44100 / rate));
 #else
@@ -306,6 +537,7 @@ cb_start:
 
 	bef = now;
 }
+#endif /* PSP */
 
 #else	/* NOSOUND */
 int

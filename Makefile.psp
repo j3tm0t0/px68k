@@ -43,7 +43,7 @@ X11CXXOBJS= x11/winx68k.o
 
 WIN32APIOBJS= win32api/dosio.o win32api/fake.o win32api/peace.o
 
-PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o
+PSPOBJS= psp/debug.o psp/log.o psp/net.o psp/selfexec.o psp/gecomp.o psp/prof.o psp/me.o psp/me_boot.o
 
 COBJS=		$(X68KOBJS) $(X11OBJS) $(WIN32APIOBJS) $(CPUOBJS) $(PSPOBJS)
 CXXOBJS=	$(FMGENOBJS) $(X11CXXOBJS)
@@ -64,13 +64,40 @@ SDL_INCLUDE=	$(shell $(SDL_CONFIG) --cflags | sed "s|-I/psp/|-I$(PSPDEV)/psp/|g"
 SDL_LIB=	$(shell $(SDL_CONFIG) --libs | sed "s|-L/psp/|-L$(PSPDEV)/psp/|g")
 
 INCDIR = ./x11 ./x68k ./fmgen ./win32api
-CFLAGS = -G0 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION)
+# -G8: globals of up to 8 bytes in small data, one gp-relative instruction
+# each (lui + load/store otherwise): -14 % per frame on the device (Gradius
+# demo).  Code that runs in an interrupt handler must not rely on $gp: the
+# profiler's alarm state is placed in .data (psp/prof.h).
+CFLAGS = -G8 -O2 -Wall $(SDL_INCLUDE) -DPX68K_VERSION=$(PX68K_VERSION) $(PGOFLAGS) $(XCFLAGS)
+# XCFLAGS: extra flags for an experiment, e.g. -DPROF_TIMERS ("prof on").
+#
+# Profile-guided optimization: -21 % per frame on the device (Gradius demo;
+# with -G8: -23 %), pixel-identical (tools/regress.sh).  The counts in pgo/
+# come from a training run in PPSSPP (they do not depend on the speed):
+# tools/pgo-train.sh builds with PGO=gen, plays, has the "gcov" debug
+# command write pgo/ on the memory stick, and copies it here.  After source
+# changes the functions that changed lose their profile (-Wno-coverage-
+# mismatch), the rest keep it; train again after larger changes.
+#   PGO=0    no profile (and no pgo/ needed)
+#   PGO=gen  the training build
+PGO ?= use
+ifeq ($(PGO),gen)
+PGOFLAGS = -DPX68K_GCOV -fprofile-generate=ms0:/PSP/GAME/PX68K/pgo -fprofile-prefix-path=$(CURDIR) -fprofile-update=single
+else ifeq ($(PGO),use)
+ifneq ($(wildcard pgo/*.gcda),)
+PGOFLAGS = -fprofile-use=pgo -fprofile-prefix-path=$(CURDIR) -fprofile-correction \
+	-Wno-missing-profile -Wno-coverage-mismatch
+endif
+endif
 # for debugging
 #CFLAGS = -g -G0 -Wall $(SDL_INCLUDE)
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 # c68kmacro.h writes the low word/byte of the 32-bit registers through
 # UINT16/UINT8 pointers (WRITE_REG_16/8): type punning
 m68000/c68k.o: CFLAGS += -fno-strict-aliasing
+# psp/me.c runs in kernel mode (kuKernelCall) and as me_wrapper's event
+# handler, with other modules' $gp: none of its data in small data.
+psp/me.o: CFLAGS += -G0
 
 LIBDIR =
 LDFLAGS =
@@ -78,7 +105,7 @@ LDFLAGS =
 # (sdl-config --libs repeats those, which splits a module's import stubs:
 # "stubs out of order", and the calls stay unresolved on real hardware).
 LIBS= -lSDLmain -lSDL -lpspgum -lpspgu -lstdc++ -lm -lpsphprm -lpspaudio \
-	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user
+	-lpspirkeyb -lpspwlan -lpsppower -lpspsystemctrl_user -lpspkubridge
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PX68K for PSP ver.$(PX68K_VERSION)
@@ -87,8 +114,12 @@ PSP_EBOOT_ICON = psp_logo.png
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
 
+# the OPM on the Media Engine: both sides must agree on these
+fmgen/fmg_wrap.o fmgen/opm.o x11/dswin.o x11/winx68k.o: fmgen/opm.h fmgen/fmg_wrap.h psp/me.h
+
 # objects that use psp/gecomp.h: rebuilt when it changes (its GE_ST_* indices must agree)
-x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o: psp/gecomp.h
+x11/windraw.o x11/winx68k.o x68k/bg.o x68k/gvram.o x68k/tvram.o x68k/palette.o psp/gecomp.o psp/prof.o: psp/gecomp.h psp/prof.h
+x11/dswin.o x68k/mem_wrap.o m68000/c68k.o psp/prof.o: psp/prof.h
 
 # The 68000 handlers in the order of tools/c68ktest/hot995.txt, hottest
 # first (I-cache): a gain on the PSP only (tools/bench), so c68k_op.c keeps

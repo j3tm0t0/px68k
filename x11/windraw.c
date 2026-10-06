@@ -385,10 +385,12 @@ static unsigned psp_ge_wait(void)
 
 	if (psp_ge_busy) {
 		unsigned t0 = sceKernelGetSystemTimeLow();
+		PROF_ENTER(PS_GE_WAIT);
 
 		psp_ge_busy = 0;
 		sceGuSync(0, 0);
 		t = sceKernelGetSystemTimeLow() - t0;
+		PROF_LEAVE();
 	}
 	if (psp_ge_pending) {
 		psp_ge_pending = 0;
@@ -407,6 +409,7 @@ static void *psp_ge_build(int passes)
 	SceKernelThreadInfo ti0, ti1;
 	unsigned t0, t1;
 	void *l;
+	PROF_ENTER(PS_GE_BUILD);
 
 	/* the thread's own run time too: other threads (sound) may run meanwhile */
 	ti0.size = sizeof(ti0);
@@ -420,19 +423,23 @@ static void *psp_ge_build(int passes)
 	GE_Stat[GE_ST_RENDER_US] += sceKernelGetSystemTimeLow() - t0;
 	if (sceKernelReferThreadStatus(0, &ti1) >= 0)
 		GE_Stat[GE_ST_BUILD_US + 5] += ti1.runClocks.low - ti0.runClocks.low;
+	PROF_LEAVE();
 	return l;
 }
 
 /* run call list l in a direct list of its own (list[]: the GE is idle) and wait */
 static unsigned psp_ge_run(void *l)
 {
-	unsigned t0 = sceKernelGetSystemTimeLow();
+	unsigned t0 = sceKernelGetSystemTimeLow(), t;
+	PROF_ENTER(PS_GE_WAIT);
 
 	sceGuStart(GU_DIRECT, list);
 	sceGuCallList(l);
 	sceGuFinish();
 	sceGuSync(0, 0);
-	return sceKernelGetSystemTimeLow() - t0;
+	t = sceKernelGetSystemTimeLow() - t0;
+	PROF_LEAVE();
+	return t;
 }
 
 /*
@@ -814,7 +821,9 @@ WinDraw_Draw(void)
 
 #elif defined(PSP)
 	PROF_BEGIN(draw);
+	PROF_ENTER(PS_DRAW);
 	PROF_COUNT(PROF_FRAMES, 1);
+	PROF_EV(PEV_DRAWN, 1);
 	/* normally done already, by the first line of this frame */
 	GE_Stat[GE_ST_FRAME_WAIT_US] += psp_ge_wait();
 	ge_list = NULL;
@@ -919,6 +928,7 @@ WinDraw_Draw(void)
 	psp_ge_busy = 1;
 	/* GE_Render() set GE_Guard: the GE reads the X68000 memory until psp_ge_wait() */
 	PROF_END(draw, PROF_DRAW);
+	PROF_LEAVE();
 
 #else // OpenGL ES 未使用
 
@@ -1350,12 +1360,23 @@ void WinDraw_DrawLine(void)
 	Draw_DrawFlag = 1;
 	PROF_COUNT(PROF_LINES, 1);
 #ifdef PSP
-	if (GE_Enabled && GE_Line())
-		return;		/* drawn by the GE with the frame */
+	if (GE_Enabled) {
+		int ge;
+		PROF_ENTER(PS_GE_LINE);
+		ge = GE_Line();
+		PROF_LEAVE();
+		if (ge) {
+			PROF_EV(PEV_GELINES, 1);
+			return;		/* drawn by the GE with the frame */
+		}
+	}
 #endif
 	{
 		PROF_BEGIN(line);
+		PROF_ENTER(PS_DL_MIX);
+		PROF_EV(PEV_CPULINES, 1);
 		DrawLine();
+		PROF_LEAVE();
 		PROF_END(line, PROF_MIX);	/* the decoders are subtracted when reported */
 	}
 }
@@ -1364,6 +1385,7 @@ static void DrawLine(void)
 {
 	int opaq, ton=0, gon=0, bgon=0, tron=0, pron=0, tdrawed=0;
 	PROF_BEGIN(grp);
+	PROF_SET(PS_DL_GRP);
 
 
 	if (Debug_Grp)
@@ -1519,6 +1541,7 @@ static void DrawLine(void)
 	}
 	}
 	PROF_END(grp, PROF_GRP);
+	PROF_SET(PS_DL_MIX);
 
 
 //	if ( ( ((VCReg1[0]&0x30)>>4) < (VCReg1[0]&0x03) ) && (gon) )
@@ -1528,7 +1551,7 @@ static void DrawLine(void)
 	{						// BGの方が上
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			{ PROF_BEGIN(t); Text_DrawLine(1); PROF_END(t, PROF_TEXT); }
+			{ PROF_BEGIN(t); PROF_SET(PS_DL_TEXT); Text_DrawLine(1); PROF_SET(PS_DL_MIX); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 		else
@@ -1543,7 +1566,7 @@ static void DrawLine(void)
 			VLINEBG <<= s1;
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
-			{ PROF_BEGIN(b); BG_DrawLine(!ton, 0); PROF_END(b, PROF_BG); }
+			{ PROF_BEGIN(b); PROF_SET(PS_DL_BG); BG_DrawLine(!ton, 0); PROF_SET(PS_DL_MIX); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 	}
@@ -1559,7 +1582,7 @@ static void DrawLine(void)
 			VLINEBG >>= s2;
 			if ( !(BG_Regs[0x11]&16) ) VLINEBG -= ((BG_Regs[0x0f]>>s1)-(CRTC_Regs[0x0d]>>s2));
 			ZeroMemory(Text_TrFlag, TextDotX+16);
-			{ PROF_BEGIN(b); BG_DrawLine(1, 1); PROF_END(b, PROF_BG); }
+			{ PROF_BEGIN(b); PROF_SET(PS_DL_BG); BG_DrawLine(1, 1); PROF_SET(PS_DL_MIX); PROF_END(b, PROF_BG); }
 			bgon = 1;
 		}
 		else
@@ -1578,7 +1601,7 @@ static void DrawLine(void)
 
 		if ((VCReg2[1]&0x20)&&(Debug_Text))
 		{
-			{ PROF_BEGIN(t); Text_DrawLine(!bgon); PROF_END(t, PROF_TEXT); }
+			{ PROF_BEGIN(t); PROF_SET(PS_DL_TEXT); Text_DrawLine(!bgon); PROF_SET(PS_DL_MIX); PROF_END(t, PROF_TEXT); }
 			ton = 1;
 		}
 	}

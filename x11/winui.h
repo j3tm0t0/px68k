@@ -32,6 +32,10 @@ struct menu_flist {
 
 extern char menu_item_key[][15];
 extern char menu_items[][15][30];
+#ifdef PSP
+/* winx68k.cpp: 1 = join, 0 = leave the debug WLAN, -1 = query; returns 1 while up */
+int psp_debug_net(int on);
+#endif
 
 int WinUI_get_drv_num(int key);
 

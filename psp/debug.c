@@ -11,6 +11,8 @@
 
 #include "debug.h"
 #include "log.h"
+#include "me.h"
+#include "net.h"
 #include "selfexec.h"
 
 #define KEY_MIN 16
@@ -228,11 +230,13 @@ int debug_paused(void)
 	return paused || transfers;
 }
 
+unsigned debug_pad_frame;	/* buttons held by the emulator thread for this frame ("padat") */
+
 unsigned debug_pad(void)
 {
 	if (pad_buttons && sceKernelGetSystemTimeWide() >= pad_until)
 		pad_buttons = 0;
-	return pad_buttons;
+	return pad_buttons | debug_pad_frame;
 }
 
 int debug_poll(char *buf, int len)
@@ -270,7 +274,8 @@ static void serve(int fd)
 {
 	char cmd[256], out[2048];
 	size_t cmd_len = 0, sent = 0;
-	int authed = 0;
+	int authed = 0, errors = 0;
+	unsigned t0;
 
 	for (;;) {
 		fd_set rd;
@@ -279,6 +284,17 @@ static void serve(int fd)
 		char *nl;
 		int r;
 
+		if (net_paused()) {
+			/*
+			 * The WLAN is left (bench, benchf, samp, "Debug Net" off):
+			 * no socket calls until it is back.  Polling the dead
+			 * socket (select with a timeout, send, recv) kept this
+			 * thread, above the emulator's priority, busy: 4.5 ms of
+			 * CPU per emulated frame in "samp" on the device.
+			 */
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
 		while (authed && (n = log_read(&sent, out, sizeof(out))) > 0)
 			if (send_all(fd, out, n) != 0)
 				return;
@@ -287,7 +303,24 @@ static void serve(int fd)
 		FD_SET(fd, &rd);
 		if (server_fd >= 0)
 			FD_SET(server_fd, &rd);
-		if (select((fd > server_fd ? fd : server_fd) + 1, &rd, NULL, NULL, &tv) <= 0)
+		t0 = sceKernelGetSystemTimeLow();
+		r = select((fd > server_fd ? fd : server_fd) + 1, &rd, NULL, NULL, &tv);
+		if (r == 0 && sceKernelGetSystemTimeLow() - t0 < 50 * 1000)
+			r = -1;	/* a timeout that did not wait: as a failure */
+		if (r < 0) {
+			/*
+			 * The WLAN is down (net_pause: bench, benchf, samp): select()
+			 * returns at once, and retrying at once spun this thread, above
+			 * the emulator's priority (4.4 ms per frame in samp).  Wait,
+			 * and give the client up after ~5 s (accept() waits too).
+			 */
+			if (++errors >= 50)
+				return;
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
+		errors = 0;
+		if (r == 0)
 			continue;
 		/*
 		 * A new client takes over: the old one may be gone without its
@@ -357,6 +390,7 @@ static void serve(int fd)
 				press(fd, cmd + 4);
 			} else if (strcmp(cmd, "quit") == 0) {
 				reply(fd, "OK quit");
+				me_release();
 				sceKernelExitGame();
 			} else if (cmd[0]) {
 				log_printf("debug: > %s\n", cmd);
@@ -401,7 +435,13 @@ static int server_thread(SceSize args, void *argp)
 	for (;;) {
 		struct sockaddr_in peer;
 		socklen_t len = sizeof(peer);
-		int fd = srv >= 0 ? accept(srv, (struct sockaddr *)&peer, &len) : -1;
+		int fd;
+
+		if (net_paused()) {	/* no socket calls while the WLAN is left (serve) */
+			sceKernelDelayThread(100 * 1000);
+			continue;
+		}
+		fd = srv >= 0 ? accept(srv, (struct sockaddr *)&peer, &len) : -1;
 		if (fd < 0) {
 			/*
 			 * The socket dies when the WLAN is left (bench); listen again
